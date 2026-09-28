@@ -1,0 +1,60 @@
+# MARK LIII — files that must stay local
+
+# Secrets and integration credentials. Keep each pattern on its own line:
+# in .gitignore, an inline # is treated as part of the filename pattern.
+config/api_keys.json
+config/certs/
+config/whatsapp_web/
+config/google_credentials.json
+config/google_token.json
+**/*token*.json
+**/*secret*.json
+**/client_secret*.json
+**/*credential*.json
+.env
+.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
+# Personal data and runtime state
+memory/long_term.json
+memory/*.db
+memory/call_state.json
+*.db
+*.sqlite
+*.sqlite3
+security/audit_log.jsonl
+sandbox_runs/
+dashboard/uploads/
+
+# Python build output
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Runtime output
+*.log
+logs/
+downloads/
+screenshots/
