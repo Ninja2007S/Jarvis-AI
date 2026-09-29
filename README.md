@@ -1445,40 +1445,126 @@ JarvisAI/
 
 # ⚡ Quick Start
 
-JARVIS is a native PyQt desktop app. Use a separate virtual environment for it,
-and use Python **3.11–3.13** (3.12 is the recommended choice). Run commands from
-the inner `JarvisAI` source folder, which contains `main.py` and `setup.py`.
+JARVIS is a native PyQt desktop app. Use Python **3.11–3.13** (Python 3.12 is
+recommended) and create a virtual environment for the project. Follow the
+commands for your operating system **in order**. Run each command, wait for it
+to finish, then continue to the next step.
 
 ## Windows 10/11
 
-Install Python 3.12 and Git, then open PowerShell:
+Before starting, install Python 3.12 and Git. Open **PowerShell** and check
+Python:
+
+```powershell
+py -3.12 --version
+```
+
+It should print `Python 3.12.x`. If `py` is not recognized, install Python
+from python.org and enable the Python Launcher during installation.
+
+Clone the repository (skip this if you already have it):
 
 ```powershell
 git clone https://github.com/Ninja2007S/Jarvis-AI.git
+```
+
+Go to the folder containing `main.py`:
+
+```powershell
 cd Jarvis-AI\JarvisAI
+```
+
+Create the project's virtual environment:
+
+```powershell
 py -3.12 -m venv .venv
+```
+
+Activate it:
+
+```powershell
 .\.venv\Scripts\Activate.ps1
+```
+
+If PowerShell blocks activation, use **Command Prompt** instead and run:
+
+```bat
+.venv\Scripts\activate.bat
+```
+
+Upgrade pip inside the active environment:
+
+```powershell
 python -m pip install --upgrade pip
+```
+
+Install JARVIS's dependencies and its Playwright browsers. This can take a few
+minutes:
+
+```powershell
 python setup.py
+```
+
+When setup finishes, start JARVIS:
+
+```powershell
 python main.py
 ```
 
-If PowerShell blocks virtual-environment activation, open Command Prompt and
-use `.venv\Scripts\activate.bat`, then continue with the `python` commands.
-
 ## macOS
 
-Install Xcode Command Line Tools (`xcode-select --install`), Git, and Homebrew.
-Then in Terminal:
+Install Git and Homebrew first. In **Terminal**, install Xcode Command Line
+Tools if you do not already have them:
+
+```bash
+xcode-select --install
+```
+
+Install Python 3.12 and PortAudio:
 
 ```bash
 brew install python@3.12 portaudio
+```
+
+Clone the repository (skip this if you already have it):
+
+```bash
 git clone https://github.com/Ninja2007S/Jarvis-AI.git
+```
+
+Go to the folder containing `main.py`:
+
+```bash
 cd Jarvis-AI/JarvisAI
+```
+
+Create a virtual environment:
+
+```bash
 python3.12 -m venv .venv
+```
+
+Activate it:
+
+```bash
 source .venv/bin/activate
+```
+
+Upgrade pip:
+
+```bash
 python -m pip install --upgrade pip
+```
+
+Install JARVIS's dependencies and Playwright browsers; wait for setup to finish:
+
+```bash
 python setup.py
+```
+
+Start JARVIS:
+
+```bash
 python main.py
 ```
 
@@ -1490,29 +1576,76 @@ focused; this app does not install a global keyboard hook on macOS.
 
 ## Linux (Ubuntu/Debian example)
 
-Use a graphical desktop session. Install the system libraries before pip
-dependencies:
+Use a graphical desktop session. Open **Terminal** and update the package list:
 
 ```bash
 sudo apt update
+```
+
+Install Git, Python's virtual-environment/Tk support, audio, and Qt runtime
+libraries:
+
+```bash
 sudo apt install -y git python3 python3-venv python3-tk python3-dev \
   libportaudio2 libxcb-cursor0 libxkbcommon-x11-0 libegl1 libgl1 \
   xdg-utils pulseaudio-utils
-python3 --version  # continue only if this is Python 3.11–3.13
+```
+
+Check the installed Python version:
+
+```bash
+python3 --version
+```
+
+Continue only if it reports Python 3.11–3.13. If it is outside that range,
+install a supported Python release using your distribution's official package
+source before continuing.
+
+Clone the repository (skip this if you already have it):
+
+```bash
 git clone https://github.com/Ninja2007S/Jarvis-AI.git
+```
+
+Go to the folder containing `main.py`:
+
+```bash
 cd Jarvis-AI/JarvisAI
+```
+
+Create a virtual environment:
+
+```bash
 python3 -m venv .venv
+```
+
+Activate it:
+
+```bash
 source .venv/bin/activate
+```
+
+Upgrade pip:
+
+```bash
 python -m pip install --upgrade pip
+```
+
+Install JARVIS's dependencies and Playwright browsers; wait for setup to finish:
+
+```bash
 python setup.py
+```
+
+Start JARVIS:
+
+```bash
 python main.py
 ```
 
-If your distribution's default Python is older than 3.11 or newer than 3.13,
-install a supported Python release using that distribution's official package
-source before creating the environment. On Fedora or another distribution,
-install the matching Python venv/Tk, PortAudio, Qt/X11 runtime, and desktop
-URL-opener packages with its package manager first.
+On Fedora or another distribution, install the equivalent Python venv/Tk,
+PortAudio, Qt/X11 runtime, and desktop URL-opener packages with its package
+manager before creating the virtual environment.
 
 JARVIS desktop automation is most complete in an X11 session. On Wayland,
 screen capture and global mouse/keyboard automation can be restricted by the
@@ -1769,7 +1902,7 @@ See the third-party licensing information below.
 
 Jarvis has evolved through multiple phases.
 
-| Phase              | Focus                                                                                     |
+| Mark               | Focus                                                                                     |
 | ------------------ | ----------------------------------------------------------------------------------------- |
 | **Phase 1**        | Auto-start, clipboard intelligence, assistant customization                               |
 | **Phase 2**        | Session memory, background monitoring, proactive intelligence                             |
