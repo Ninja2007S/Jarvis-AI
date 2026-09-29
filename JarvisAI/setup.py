@@ -11,6 +11,9 @@ Two things it deliberately does NOT install:
     ⚙ → WAKE WORD inside the app;
   * anything for the avatar — the holographic head renders in software on the
     PyQt6 and numpy already listed here. No GPU, no OpenGL, no extra packages.
+
+Qt WebEngine is installed from requirements.txt for the embedded Earth globe;
+it renders inside the PyQt window and does not open a separate browser.
 """
 import platform
 import subprocess

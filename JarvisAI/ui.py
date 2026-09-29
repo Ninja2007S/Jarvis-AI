@@ -2959,7 +2959,7 @@ class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
-    _earth_sig      = pyqtSignal(str)         # destination, empty means rotating Earth
+    _earth_sig      = pyqtSignal(str, str, str)  # destination, origin, mode
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
@@ -3182,11 +3182,11 @@ class MainWindow(QMainWindow):
             if not self._earth_open:
                 self._hud_cam_stack.setCurrentIndex(0)
 
-    def _show_earth(self, destination: str = "") -> None:
+    def _show_earth(self, destination: str = "", origin: str = "", mode: str = "show") -> None:
         if self._cam_active:
             self.stop_camera_stream()
         self._earth_open = True
-        self._earth_panel.open_view(destination)
+        self._earth_panel.open_view(destination, origin, mode)
         self._hud_cam_stack.setCurrentWidget(self._earth_panel)
 
     def _close_earth(self) -> None:
@@ -5510,9 +5510,11 @@ class JarvisUI:
         """Thread-safe: display content in the panel below the HUD."""
         self._win._content_sig.emit(title[:48], text[:4000])
 
-    def show_earth(self, destination: str = "") -> None:
-        """Thread-safe: show the in-window globe and optionally locate a place."""
-        self._win._earth_sig.emit(str(destination or "")[:160])
+    def show_earth(self, destination: str = "", origin: str = "", mode: str = "show") -> None:
+        """Thread-safe: show the in-window globe, locate a place, or plot a route."""
+        self._win._earth_sig.emit(
+            str(destination or "")[:160], str(origin or "")[:160], str(mode or "show")[:16]
+        )
 
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.

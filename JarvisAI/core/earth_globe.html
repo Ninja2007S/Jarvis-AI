@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@6.11.2/dist/maplibre-gl.css">
+  <style>
+    html, body, #map { width:100%; height:100%; margin:0; overflow:hidden; background:#071116; }
+    .maplibregl-ctrl-group { background:#101c21; border:1px solid #39545a; }
+    .maplibregl-ctrl button { filter: invert(.82) sepia(.22) saturate(.55) hue-rotate(115deg); }
+    .maplibregl-ctrl-attrib { color:#d3dedb!important; background:rgba(5,15,19,.78)!important; }
+    .maplibregl-ctrl-attrib a { color:#8de0d0!important; }
+    #credits { position:absolute;bottom:7px;left:8px;z-index:2;padding:4px 7px;
+      color:#d3dedb;background:rgba(5,15,19,.78);font:10px Arial,sans-serif; }
+    #credits a { color:#8de0d0; }
+    .jarvis-pin { width:20px;height:20px;border:2px solid #fff0bd;border-radius:50%;
+      background:#ff9f55;box-shadow:0 0 0 7px #ff9f5544,0 0 20px #ff9f55; }
+    .jarvis-start { background:#66e0cf;box-shadow:0 0 0 7px #66e0cf44,0 0 20px #66e0cf; }
+  </style>
+</head>
+<body>
+<div id="map" aria-label="Interactive three-dimensional Earth map"></div>
+<div id="credits"><a href="https://cloudless.eox.at">EOxCloudless</a> · © OpenStreetMap contributors · route: OSRM / FOSSGIS</div>
+<script>
+  window.addEventListener('error', () => {
+    if (!window.jarvisEarth) document.title = 'JARVIS_EARTH_ERROR';
+  });
+  window.addEventListener('unhandledrejection', () => {
+    if (!window.jarvisEarth) document.title = 'JARVIS_EARTH_ERROR';
+  });
+</script>
+<script type="module">
+  import * as maplibregl from 'https://unpkg.com/maplibre-gl@6.11.2/dist/maplibre-gl.mjs';
+
+  const map = new maplibregl.Map({
+    container: 'map',
+    center: [15, 18],
+    zoom: 0.65,
+    style: {
+      version: 8,
+      projection: { type: 'globe' },
+      sources: {
+        satellite: {
+          type: 'raster',
+          tiles: ['https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g/{z}/{y}/{x}.jpg'],
+          tileSize: 256,
+          maxzoom: 13,
+          attribution: '<a href="https://cloudless.eox.at">EOxCloudless</a> by EOX IT Services GmbH · Contains modified Copernicus Sentinel data 2020'
+        },
+        streets: {
+          type: 'raster',
+          tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+          tileSize: 256,
+          maxzoom: 19,
+          attribution: '<a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>'
+        }
+      },
+      layers: [
+        { id: 'satellite', type: 'raster', source: 'satellite', layout: { visibility: 'visible' } },
+        { id: 'streets', type: 'raster', source: 'streets', layout: { visibility: 'none' } }
+      ],
+      sky: {
+        'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 1, 5, 1, 7, 0]
+      },
+      light: { anchor: 'map', position: [1.5, 90, 80] }
+    },
+    attributionControl: { compact: false },
+    maxZoom: 19,
+    minZoom: 0
+  });
+
+  map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
+  map.addControl(new maplibregl.GlobeControl(), 'top-right');
+
+  let rotating = true;
+  let destinationMarker = null;
+  let startMarker = null;
+  let rotationTimer = null;
+  let mapLoaded = false;
+  const deferredMapCalls = [];
+  const whenMapLoaded = callback => mapLoaded ? callback() : deferredMapCalls.push(callback);
+  const stopForInput = () => { if (rotating) window.jarvisEarth.setRotation(false); };
+  map.on('dragstart', stopForInput);
+  map.on('zoomstart', stopForInput);
+  map.on('rotatestart', stopForInput);
+  map.on('load', () => {
+    mapLoaded = true;
+    document.title = 'JARVIS_EARTH_READY';
+    while (deferredMapCalls.length) deferredMapCalls.shift()();
+    rotationTimer = window.setInterval(() => {
+      if (rotating && map.getZoom() < 2.7) {
+        map.rotateTo((map.getBearing() + 0.12) % 360, { duration: 0 });
+      }
+    }, 40);
+  });
+  map.on('error', event => {
+    if (event && event.error) console.warn('JARVIS Earth map:', event.error.message || event.error);
+  });
+
+  const marker = (className) => {
+    const el = document.createElement('div');
+    el.className = `jarvis-pin ${className || ''}`;
+    return el;
+  };
+  const bboxForRoute = coordinates => {
+    const bounds = new maplibregl.LngLatBounds(coordinates[0], coordinates[0]);
+    coordinates.forEach(point => bounds.extend(point));
+    return bounds;
+  };
+
+  window.jarvisEarth = {
+    setRotation(enabled) {
+      rotating = Boolean(enabled);
+      whenMapLoaded(() => {
+        if (rotating && map.getZoom() >= 2.7) map.easeTo({ zoom: 0.65, duration: 900 });
+      });
+    },
+    toggleRotation() {
+      rotating = !rotating;
+      whenMapLoaded(() => {
+        if (rotating && map.getZoom() >= 2.7) map.easeTo({ zoom: 0.65, duration: 900 });
+      });
+      return rotating;
+    },
+    resetGlobe() {
+      rotating = true;
+      whenMapLoaded(() => {
+        if (destinationMarker) destinationMarker.remove();
+        if (startMarker) startMarker.remove();
+        destinationMarker = null;
+        startMarker = null;
+        if (map.getSource('jarvis-route')) {
+          map.getSource('jarvis-route').setData({ type:'FeatureCollection', features:[] });
+        }
+        map.setLayoutProperty('satellite', 'visibility', 'visible');
+        map.setLayoutProperty('streets', 'visibility', 'none');
+        map.easeTo({ center:[15,18], zoom:0.65, bearing:0, pitch:0, duration:1000 });
+      });
+    },
+    setBase(name) {
+      whenMapLoaded(() => {
+        map.setLayoutProperty('satellite', 'visibility', name === 'satellite' ? 'visible' : 'none');
+        map.setLayoutProperty('streets', 'visibility', name === 'streets' ? 'visible' : 'none');
+      });
+    },
+    focusPlace(place, zoom) {
+      rotating = false;
+      whenMapLoaded(() => {
+        map.setLayoutProperty('satellite', 'visibility', zoom >= 8 ? 'none' : 'visible');
+        map.setLayoutProperty('streets', 'visibility', zoom >= 8 ? 'visible' : 'none');
+        if (destinationMarker) destinationMarker.remove();
+        if (startMarker) startMarker.remove();
+        startMarker = null;
+        if (map.getSource('jarvis-route')) {
+          map.getSource('jarvis-route').setData({ type:'FeatureCollection', features:[] });
+        }
+        destinationMarker = new maplibregl.Marker({ element: marker('') })
+          .setLngLat([place.lon, place.lat])
+          .setPopup(new maplibregl.Popup({ offset: 18 }).setText(place.name))
+          .addTo(map);
+        map.flyTo({ center: [place.lon, place.lat], zoom, essential: true, speed: 0.85, curve: 1.45 });
+      });
+    },
+    showRoute(route) {
+      rotating = false;
+      whenMapLoaded(() => {
+        map.setLayoutProperty('satellite', 'visibility', 'none');
+        map.setLayoutProperty('streets', 'visibility', 'visible');
+        if (destinationMarker) destinationMarker.remove();
+        if (startMarker) startMarker.remove();
+        const start = route.start;
+        const end = route.end;
+        startMarker = new maplibregl.Marker({ element: marker('jarvis-start') })
+          .setLngLat([start.lon, start.lat])
+          .setPopup(new maplibregl.Popup({ offset: 18 }).setText(`START · ${start.name}`))
+          .addTo(map);
+        destinationMarker = new maplibregl.Marker({ element: marker('') })
+          .setLngLat([end.lon, end.lat])
+          .setPopup(new maplibregl.Popup({ offset: 18 }).setText(`DESTINATION · ${end.name}`))
+          .addTo(map);
+        const data = { type: 'Feature', properties: {}, geometry: route.geometry };
+        if (map.getSource('jarvis-route')) {
+          map.getSource('jarvis-route').setData(data);
+        } else {
+          map.addSource('jarvis-route', { type: 'geojson', data });
+          map.addLayer({
+            id: 'jarvis-route-outline', type: 'line', source: 'jarvis-route',
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: { 'line-color': '#071116', 'line-width': 9, 'line-opacity': 0.75 }
+          });
+          map.addLayer({
+            id: 'jarvis-route-line', type: 'line', source: 'jarvis-route',
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: { 'line-color': '#37e0d0', 'line-width': 5, 'line-opacity': 0.95 }
+          });
+        }
+        map.fitBounds(bboxForRoute(route.geometry.coordinates), { padding: 80, duration: 1200, maxZoom: 13 });
+      });
+    }
+  };
+  document.title = 'JARVIS_EARTH_READY';
+</script>
+</body>
+</html>
