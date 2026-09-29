@@ -2261,11 +2261,25 @@ class ConfirmBanner(_HudOverlay):
         lay.addWidget(ttl)
 
         if detail:
-            dtl = QLabel(detail)
-            dtl.setWordWrap(True)
-            dtl.setFont(QFont("Courier New", 8))
-            dtl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
-            lay.addWidget(dtl)
+            if title == "Instagram account access":
+                # DMs and captions must be visible in full before approval.
+                # Keep the overlay compact and let long content scroll.
+                dtl = QTextEdit()
+                dtl.setReadOnly(True)
+                dtl.setPlainText(detail)
+                dtl.setFixedHeight(170)
+                dtl.setFont(QFont("Courier New", 8))
+                dtl.setStyleSheet(
+                    f"color: {C.TEXT_MED}; background: {C.PANEL}; "
+                    f"border: 1px solid {C.BORDER};"
+                )
+                lay.addWidget(dtl)
+            else:
+                dtl = QLabel(detail)
+                dtl.setWordWrap(True)
+                dtl.setFont(QFont("Courier New", 8))
+                dtl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+                lay.addWidget(dtl)
 
         voice_hint = QLabel("VOICE: say CONFIRM ACTION or CANCEL ACTION")
         voice_hint.setWordWrap(True)
@@ -5709,7 +5723,8 @@ class JarvisUI:
     def show_confirm(self, title: str, detail: str) -> None:
         """Thread-safe: raise the irreversible-action gate. Called from action
         handlers running in executor threads, so it goes through a signal."""
-        self._win._confirm_sig.emit(str(title)[:120], str(detail)[:300])
+        detail_limit = 4500 if str(title) == "Instagram account access" else 300
+        self._win._confirm_sig.emit(str(title)[:120], str(detail)[:detail_limit])
 
     def hide_confirm(self) -> None:
         """Thread-safe: take the gate down."""

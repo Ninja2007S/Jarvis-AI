@@ -119,6 +119,9 @@ _TIERS: dict[str, str] = {
     "spotify_control":  TIER_SENSITIVE,
     "send_message":     TIER_DANGEROUS,
     "email_gmail":      TIER_DANGEROUS,
+    # Instagram reads private DMs and can send messages or publish content.
+    # Require a fresh user confirmation for every operation, including reads.
+    "instagram_account": TIER_DANGEROUS,
     "printer_control":  TIER_SENSITIVE,
     "home_automation":  TIER_SENSITIVE,
     "calendar_google":  TIER_SENSITIVE,
@@ -151,6 +154,7 @@ _CONFIRMATION_LABELS = {
     "screen_process": "Screen access",
     "send_message": "Send a message",
     "email_gmail": "Email access",
+    "instagram_account": "Instagram account access",
     "browser_control": "Browser access",
     "desktop": "Desktop control",
     "code_helper": "Code execution or changes",
@@ -181,6 +185,11 @@ _CONFIRMATION_PARAM_LABELS = {
     "game": "Game",
     "module": "Package",
     "operation": "Recovery step",
+    "recipient_id": "Instagram recipient",
+    "image_url": "Image URL",
+    "caption": "Post caption",
+    "scheduled_for": "Publish time",
+    "schedule_id": "Scheduled post",
 }
 
 
@@ -194,6 +203,21 @@ def _confirmation_detail(params: dict) -> str:
     """Render action parameters in readable form while retaining the values."""
     if not isinstance(params, dict):
         return str(params)[:300]
+    if params.get("action") in {
+        "inbox", "read_messages", "send_message", "reply", "publish_now",
+        "schedule_post", "list_scheduled", "cancel_scheduled",
+    } and ("recipient_id" in params or "caption" in params or "image_url" in params
+           or "schedule_id" in params or params.get("action") in {"inbox", "read_messages", "list_scheduled"}):
+        # Show the full outgoing text in the Instagram confirmation panel so
+        # the user can approve the exact DM/caption before it is sent/published.
+        action = str(params.get("action", "")).replace("_", " ")
+        parts = [f"Action: {action}"]
+        for key in ("recipient_id", "schedule_id", "scheduled_for", "image_url", "caption", "message", "limit"):
+            if key not in params or params[key] in (None, ""):
+                continue
+            value = str(params[key]).strip()
+            parts.append(f"{_CONFIRMATION_PARAM_LABELS[key]}: {value}")
+        return "  ·  ".join(parts)[:4500]
     items = []
     for key, value in params.items():
         label = _CONFIRMATION_PARAM_LABELS.get(

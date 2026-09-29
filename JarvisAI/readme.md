@@ -920,6 +920,7 @@ All discovered capabilities are passed through the security layer before executi
 | 📧 `email_gmail`      | Read, search, and send Gmail                   | Google OAuth            |
 | 📅 `calendar_google`  | List, check, and create Google Calendar events | Google OAuth            |
 | 📞 `phone_call`       | Answer calls and capture caller messages       | Twilio                  |
+| 📷 `instagram_account` | Read Instagram DMs, send/reply, publish and schedule image posts | Meta Instagram API + Professional account |
 | 🏠 `home_automation`  | Control Tuya / Smart Life devices              | Device IDs + local keys |
 | 🖨️ `printer_control` | Control a 3D printer over MQTT                 | MQTT configuration      |
 | 🧠 `quiz`             | Interactive spoken quiz/study mode             | None                    |
@@ -1701,6 +1702,47 @@ system settings depend on the host OS, desktop session, permissions, and
 installed native tools.
 
 ## Configure optional integrations
+
+### Instagram Account
+
+The Instagram plugin uses Meta's supported Instagram API. It requires an
+Instagram **Professional** account (Business or Creator) and a Meta developer
+app with the appropriate Instagram permissions, including
+`instagram_business_basic`, `instagram_business_manage_messages`, and
+`instagram_business_content_publish`. Follow Meta's [Instagram API setup
+guide](https://www.postman.com/meta/instagram/collection/6yqw8pt/instagram-api)
+to create the app and obtain an access token and Instagram account ID.
+
+In JARVIS, open **Settings → Plugin Settings → INSTAGRAM ACCOUNT — Meta API**,
+enter the Instagram Professional account ID and access token, then choose
+**TEST INSTAGRAM CONNECTION**. The token is stored in
+`config/api_keys.json`, which is ignored by Git. Do not paste credentials into
+source files, README files, screenshots, or GitHub issues. Instagram scheduled
+post data (caption, image URL, and time) is stored locally in
+`config/instagram_schedule.json`; that file is ignored by Git too.
+
+Supported actions include reading recent inbox messages, sending a message or
+reply to an Instagram-scoped recipient ID shown by the inbox, publishing a
+single image now, scheduling an image post, listing scheduled posts, and
+cancelling a queued post. **Every Instagram action requires JARVIS's security
+confirmation.** Scheduled posts publish only while JARVIS is running. The image
+must be reachable by Meta through a public HTTPS URL; a local file path will not
+work. Meta's messaging API generally only permits replying after that Instagram
+user has contacted the account; it is not a cold-DM tool. See Meta's [Send API
+requirements](https://www.postman.com/meta/instagram/folder/uxudqu0/send-api).
+
+The plugin does not save DM message bodies to its own files or log them. When
+you ask JARVIS to read or respond to a DM, its text is returned to the active
+assistant conversation so JARVIS can understand it. With the configured Gemini
+service, that content is sent to Gemini as part of the current conversation;
+sending or publishing also sends the requested content to Meta/Instagram. These
+API calls are never sent to GitHub by this integration. The access token is
+stored locally in `config/api_keys.json` (the app's current settings store is
+not encrypted by this plugin), so keep your Windows account protected and use
+device/disk encryption. If `config/api_keys.json` was committed in the past,
+`.gitignore` does not remove it from Git history: revoke the exposed token and
+remove the file from tracking/history before pushing.
+Meta requires a Professional Instagram account and the relevant API permissions; messaging is subject to Meta’s recipient rules, so this cannot cold-DM arbitrary users. See Meta’s Instagram API guide and Send API requirements.
 
 ### Email & Calendar
 
