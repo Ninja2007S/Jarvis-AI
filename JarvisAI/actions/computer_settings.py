@@ -58,9 +58,36 @@ def _get_macos_wifi_interface() -> str:
         pass
     return "en0" 
 
+def _windows_volume_control():
+    """Return the Windows default-output endpoint volume interface."""
+    from ctypes import POINTER, cast
+    from comtypes import CLSCTX_ALL
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+
+    device = AudioUtilities.GetSpeakers()
+    interface = device.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+    return cast(interface, POINTER(IAudioEndpointVolume))
+
+
+def _windows_volume_adjust(delta: int) -> None:
+    """Adjust and verify the actual Windows master endpoint level."""
+    before = volume_get()
+    if before is None:
+        raise RuntimeError(
+            "Could not read the Windows output volume. Check that Pycaw is installed."
+        )
+    target = max(0, min(100, before + int(delta)))
+    volume_set(target)
+    after = volume_get()
+    if after is None or abs(after - target) > 1:
+        raise RuntimeError(
+            f"Windows volume change was not confirmed (wanted {target}%, read {after})."
+        )
+
+
 def volume_up():
     if _OS == "Windows":
-        for _ in range(5): pyautogui.press("volumeup")
+        _windows_volume_adjust(10)
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             "set volume output volume (output volume of (get volume settings) + 10)"],
@@ -71,7 +98,7 @@ def volume_up():
 
 def volume_down():
     if _OS == "Windows":
-        for _ in range(5): pyautogui.press("volumedown")
+        _windows_volume_adjust(-10)
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             "set volume output volume (output volume of (get volume settings) - 10)"],
@@ -98,17 +125,8 @@ def volume_get() -> int | None:
     undoable — a wrong undo is worse than no undo."""
     try:
         if _OS == "Windows":
-            import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-            devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
-            db        = vol.GetMasterVolumeLevel()
-            if db <= -65.0:
-                return 0
-            return max(0, min(100, round(10 ** (db / 20) * 100)))
+            vol = _windows_volume_control()
+            return max(0, min(100, round(vol.GetMasterVolumeLevelScalar() * 100)))
         if _OS == "Darwin":
             r = subprocess.run(["osascript", "-e", "output volume of (get volume settings)"],
                                capture_output=True, text=True, timeout=5)
@@ -162,21 +180,9 @@ def brightness_set(value: int) -> None:
 def volume_set(value: int):
     value = max(0, min(100, int(value)))
     if _OS == "Windows":
-        try:
-            import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-            devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
-            vol_db    = -65.25 if value == 0 else max(-65.25, 20 * math.log10(value / 100))
-            vol.SetMasterVolumeLevel(vol_db, None)
-            return
-        except Exception as e:
-            print(f"[Settings] pycaw failed, using keypress fallback: {e}")
-            pyautogui.press("volumemute")
-            pyautogui.press("volumemute")
+        vol = _windows_volume_control()
+        vol.SetMasterVolumeLevelScalar(value / 100.0, None)
+        return
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e", f"set volume output volume {value}"],
             capture_output=True)

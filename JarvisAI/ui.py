@@ -1969,6 +1969,124 @@ class CustomizeOverlay(QWidget):
         self.hide()
 
 
+class VoicePersonalityOverlay(QWidget):
+    """Editor for response style profiles stored in local long-term memory."""
+
+    saved = pyqtSignal(object)
+    _OW = 460
+
+    def __init__(self, settings: dict, parent=None):
+        super().__init__(parent)
+        from memory.voice_personality import MODE_DEFINITIONS
+
+        self._modes = MODE_DEFINITIONS
+        self._settings = dict(settings or {})
+        self._settings["tuning"] = dict(self._settings.get("tuning") or {})
+        self._editing_mode = str(self._settings.get("mode", "conversational"))
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedWidth(self._OW)
+        self.setStyleSheet(f"VoicePersonalityOverlay {{ background: rgba(7, 13, 16, 248); border: 1px solid {C.BORDER_B}; border-radius: 6px; }}")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 17, 22, 17)
+        lay.setSpacing(8)
+
+        def label(text, color=C.TEXT_DIM, size=8, bold=False):
+            w = QLabel(text)
+            w.setFont(QFont("Courier New", size,
+                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            return w
+
+        header = label("◈  RESPONSE PERSONALITY", C.PRI, 11, True)
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(header)
+        lay.addWidget(label("Choose a response mode and tune its speaking style."))
+
+        lay.addWidget(label("ACTIVE MODE"))
+        self._mode = QComboBox()
+        self._mode.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        self._mode.setFixedHeight(32)
+        self._mode.setStyleSheet(f"QComboBox {{ background: #081216; color: {C.TEXT}; border: 1px solid {C.BORDER}; padding: 4px 8px; }} QComboBox QAbstractItemView {{ background: #0b1519; color: {C.TEXT}; selection-background-color: {C.PRI_GHO}; }}")
+        for mode_id, item in self._modes.items():
+            self._mode.addItem(item["label"], mode_id)
+        idx = self._mode.findData(self._editing_mode)
+        self._mode.setCurrentIndex(max(0, idx))
+        lay.addWidget(self._mode)
+
+        self._description = label("", C.TEXT_MED)
+        self._description.setWordWrap(True)
+        lay.addWidget(self._description)
+
+        self._name_label = label("CUSTOM PROFILE NAME")
+        lay.addWidget(self._name_label)
+        self._name = QLineEdit(str(self._settings.get("custom_name", "My profile")))
+        self._name.setMaxLength(40)
+        self._name.setPlaceholderText("e.g. Mission Control")
+        self._name.setFixedHeight(30)
+        self._name.setFont(QFont("Courier New", 9))
+        self._name.setStyleSheet(f"QLineEdit {{ background: #081216; color: {C.TEXT}; border: 1px solid {C.BORDER}; padding: 4px 7px; }}")
+        lay.addWidget(self._name)
+
+        self._text_label = label("PERSONAL TUNING FOR THIS MODE")
+        lay.addWidget(self._text_label)
+        self._text = QTextEdit()
+        self._text.setAcceptRichText(False)
+        self._text.setMaximumHeight(150)
+        self._text.setFont(QFont("Courier New", 9))
+        self._text.setPlaceholderText("How should JARVIS phrase replies? Keep instructions focused on tone, length, or format.")
+        self._text.setStyleSheet(f"QTextEdit {{ background: #081216; color: {C.TEXT}; border: 1px solid {C.BORDER}; padding: 6px; }}")
+        lay.addWidget(self._text)
+        lay.addWidget(label("Saved to this device's memory · style only · 1,200 character limit", C.TEXT_DIM, 7))
+
+        buttons = QHBoxLayout()
+        save = QPushButton("▸  SAVE PROFILE")
+        save.setFixedHeight(32)
+        save.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        save.setStyleSheet(f"QPushButton {{ color: {C.PRI}; background: {C.PRI_GHO}; border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}")
+        save.clicked.connect(self._save)
+        buttons.addWidget(save)
+        cancel = QPushButton("CANCEL")
+        cancel.setFixedHeight(32)
+        cancel.setFont(QFont("Courier New", 8))
+        cancel.setStyleSheet(f"QPushButton {{ color: {C.TEXT_MED}; background: transparent; border: 1px solid {C.BORDER}; border-radius: 3px; }}")
+        cancel.clicked.connect(self.hide)
+        buttons.addWidget(cancel)
+        lay.addLayout(buttons)
+
+        self._mode.currentIndexChanged.connect(self._change_mode)
+        self._load_mode(self._editing_mode)
+        self.adjustSize()
+
+    def _store_current(self):
+        text = self._text.toPlainText().strip()[:1200]
+        if self._editing_mode == "custom":
+            self._settings["custom_instructions"] = text
+        else:
+            self._settings.setdefault("tuning", {})[self._editing_mode] = text
+
+    def _load_mode(self, mode_id):
+        self._editing_mode = mode_id
+        self._description.setText(self._modes[mode_id]["description"])
+        custom = mode_id == "custom"
+        self._name_label.setVisible(custom)
+        self._name.setVisible(custom)
+        self._text_label.setText("CUSTOM STYLE INSTRUCTIONS" if custom else "PERSONAL TUNING FOR THIS MODE")
+        content = (self._settings.get("custom_instructions", "") if custom else
+                   self._settings.get("tuning", {}).get(mode_id, ""))
+        self._text.setPlainText(content)
+
+    def _change_mode(self, _index):
+        self._store_current()
+        self._load_mode(str(self._mode.currentData() or "conversational"))
+
+    def _save(self):
+        self._store_current()
+        self._settings["mode"] = str(self._mode.currentData() or "conversational")
+        self._settings["custom_name"] = self._name.text().strip() or "My profile"
+        self.saved.emit(self._settings)
+        self.hide()
+
+
 class PluginManagerOverlay(QWidget):
     """Floating overlay — lists discovered plugins with per-plugin ON/OFF toggles."""
 
@@ -3130,6 +3248,7 @@ class MainWindow(QMainWindow):
         self.on_interrupt      = None   # callable: () -> None — stop JARVIS mid-speech
         self.on_voice_change   = None   # callable: () -> None — rebuild session with new voice
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
+        self.on_voice_personality_change = None  # callable: () -> None — apply saved response style
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
         self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
@@ -3143,6 +3262,7 @@ class MainWindow(QMainWindow):
         self._current_file: str | None = None
         self._remote_overlay: RemoteKeyOverlay | None = None
         self._customize_overlay: CustomizeOverlay | None = None
+        self._personality_overlay: VoicePersonalityOverlay | None = None
 
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
@@ -4109,6 +4229,14 @@ class MainWindow(QMainWindow):
         cust_btn.setStyleSheet(_BTN_STYLE_DIM)
         cust_btn.clicked.connect(self._open_customize)
         lay.addWidget(cust_btn)
+
+        personality_btn = QPushButton("◈  RESPONSE PERSONALITY")
+        personality_btn.setFixedHeight(26)
+        personality_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        personality_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        personality_btn.setStyleSheet(_BTN_STYLE_DIM)
+        personality_btn.clicked.connect(self._open_voice_personality)
+        lay.addWidget(personality_btn)
 
         self._brief_btn = QPushButton()
         self._brief_btn.setFixedHeight(26)
@@ -5214,6 +5342,28 @@ class MainWindow(QMainWindow):
         ov.show()
         self._customize_overlay = ov
 
+    def _open_voice_personality(self):
+        from memory.voice_personality import get_voice_personality
+        if self._personality_overlay:
+            self._personality_overlay.hide()
+        ov = VoicePersonalityOverlay(get_voice_personality(), parent=self.centralWidget())
+        ov.saved.connect(self._apply_voice_personality)
+        self._centre_overlay(ov)
+        self._personality_overlay = ov
+
+    def _apply_voice_personality(self, settings: dict):
+        from memory.voice_personality import MODE_DEFINITIONS, save_voice_personality
+        try:
+            profile = save_voice_personality(settings)
+            label = MODE_DEFINITIONS[profile["mode"]]["label"]
+            if profile["mode"] == "custom":
+                label = profile["custom_name"]
+            self._log.append_log(f"SYS: Response profile saved — {label}")
+            if self.on_voice_personality_change:
+                self.on_voice_personality_change()
+        except Exception as exc:
+            self._log.append_log(f"ERR: Response profile save failed — {exc}")
+
     def _preview_ui_color(self, hex_color: str):
         """Live preview — paints the whole interface the new colour (does NOT write to config)."""
         old = current_palette()
@@ -5547,6 +5697,14 @@ class JarvisUI:
     @on_audio_device_change.setter
     def on_audio_device_change(self, cb):
         self._win.on_audio_device_change = cb
+
+    @property
+    def on_voice_personality_change(self):
+        return self._win.on_voice_personality_change
+
+    @on_voice_personality_change.setter
+    def on_voice_personality_change(self, cb):
+        self._win.on_voice_personality_change = cb
 
     def show_confirm(self, title: str, detail: str) -> None:
         """Thread-safe: raise the irreversible-action gate. Called from action
