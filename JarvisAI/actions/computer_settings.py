@@ -59,14 +59,30 @@ def _get_macos_wifi_interface() -> str:
     return "en0" 
 
 def _windows_volume_control():
-    """Return the Windows default-output endpoint volume interface."""
-    from ctypes import POINTER, cast
-    from comtypes import CLSCTX_ALL
-    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+    """Return the endpoint interface across old and current Pycaw releases.
 
+    Current Pycaw returns an AudioDevice whose EndpointVolume property is
+    already the IAudioEndpointVolume interface. Older releases exposed a
+    lower-level Activate method instead.
+    """
+    from pycaw.pycaw import AudioUtilities
     device = AudioUtilities.GetSpeakers()
-    interface = device.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-    return cast(interface, POINTER(IAudioEndpointVolume))
+    endpoint = getattr(device, "EndpointVolume", None)
+    if endpoint is not None:
+        return endpoint
+
+    activate = getattr(device, "Activate", None)
+    if callable(activate):
+        from ctypes import POINTER, cast
+        from comtypes import CLSCTX_ALL
+        from pycaw.pycaw import IAudioEndpointVolume
+        interface = activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        return cast(interface, POINTER(IAudioEndpointVolume))
+
+    raise RuntimeError(
+        "Pycaw did not expose EndpointVolume on the default output device. "
+        "Update pycaw and comtypes, then restart JARVIS."
+    )
 
 
 def _windows_volume_adjust(delta: int) -> None:

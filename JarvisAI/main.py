@@ -540,6 +540,7 @@ class JarvisLive:
         self.out_queue            = None
         self._loop                     = None
         self._is_speaking         = False
+        self._barge_in_until      = 0.0
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
@@ -603,6 +604,9 @@ class JarvisLive:
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
+        # Persist the last clearly detected Sinhala/English user utterance so
+        # startup and clap briefings use the language the user actually used.
+        self._last_spoken_language = self._load_last_spoken_language()
 
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
         self._tuned_live    = True  # turn-taking / media / thinking knobs; same fallback
@@ -687,12 +691,16 @@ class JarvisLive:
         return True
 
     def _on_wake_detected(self) -> None:
-        """Wake or interrupt only when the local 'Hey Jarvis' detector fires."""
+        """Interrupt speech or wake only on the local 'Hey Jarvis' detection."""
         with self._speaking_lock:
             speaking = self._is_speaking
         if speaking:
             print("[Wake] 'Hey Jarvis' detected during playback; interrupt requested.")
             self.ui.write_log("SYS: 'Hey Jarvis' detected — interrupting speech.")
+            # The user normally starts their actual request immediately after
+            # the wake phrase. Bypass the output echo guard briefly so its tail
+            # cannot clip the beginning of that request after barge-in.
+            self._barge_in_until = time.monotonic() + 3.0
             loop = self._loop
             if loop and loop.is_running():
                 loop.call_soon_threadsafe(self.interrupt)
@@ -703,7 +711,14 @@ class JarvisLive:
         """The clap worker calls from its own thread; marshal state changes."""
         loop = self._loop
         if loop and loop.is_running():
-            loop.call_soon_threadsafe(self.wake, "two claps", True)
+            loop.call_soon_threadsafe(self._schedule_clap_wake_briefing)
+
+    def _schedule_clap_wake_briefing(self) -> None:
+        """Wake on the event loop and run the normal time/news briefing."""
+        if self._awake:
+            return
+        self.wake(reason="two claps")
+        asyncio.create_task(self._send_startup_briefing(wake_trigger=True))
 
     def _announce_wake(self) -> None:
         """Ask the Live voice to give the short wake greeting."""
@@ -896,6 +911,50 @@ class JarvisLive:
             ),
             self._loop
         )
+
+    @staticmethod
+    def _normalize_briefing_language(value: str) -> str:
+        text = str(value or "").strip().casefold()
+        return "Sinhala" if "sinh" in text or "සිංහල" in text else "English"
+
+    def _load_last_spoken_language(self) -> str:
+        memory = load_memory()
+        preferences = memory.get("preferences", {})
+        preferences = preferences if isinstance(preferences, dict) else {}
+        remembered = preferences.get("last_spoken_language", {})
+        if isinstance(remembered, dict):
+            remembered = remembered.get("value", "")
+        if remembered:
+            return self._normalize_briefing_language(remembered)
+
+        identity = memory.get("identity", {})
+        identity = identity if isinstance(identity, dict) else {}
+        language = identity.get("language", {})
+        if isinstance(language, dict):
+            language = language.get("value", "")
+        if language:
+            return self._normalize_briefing_language(language)
+
+        sessions = memory.get("sessions", [])
+        if isinstance(sessions, list) and sessions:
+            return self._normalize_briefing_language(sessions[-1].get("language", "English"))
+        return "English"
+
+    def _remember_spoken_language(self, text: str) -> None:
+        """Remember only clear Sinhala- or Latin-script utterances."""
+        sinhala_count = len(re.findall(r"[\u0D80-\u0DFF]", text or ""))
+        latin_count = len(re.findall(r"[A-Za-z]", text or ""))
+        if sinhala_count >= max(2, latin_count * 0.35):
+            language = "Sinhala"
+        elif latin_count >= max(3, sinhala_count * 1.5):
+            language = "English"
+        else:
+            return
+        if language == self._last_spoken_language:
+            return
+        self._last_spoken_language = language
+        update_memory({"preferences": {"last_spoken_language": {"value": language}}})
+        print(f"[Memory] Last spoken language saved: {language}")
 
     def _tail_active(self) -> bool:
         """True while the speakers may still be finishing our last sentence."""
@@ -1306,7 +1365,32 @@ class JarvisLive:
                     import os as _os
                     _os._exit(0)
                 def _trigger_shutdown():
-                    asyncio.create_task(_do_shutdown())
+                    # Confirmation callbacks run on a worker thread, which has
+                    # no running asyncio loop. Submit shutdown to the live
+                    # session loop instead of calling create_task() here.
+                    shutdown_loop = getattr(self, "_loop", None)
+                    if shutdown_loop is None or not shutdown_loop.is_running():
+                        return "Shutdown could not start because JARVIS's event loop is not running."
+
+                    shutdown_coro = _do_shutdown()
+                    try:
+                        shutdown_future = asyncio.run_coroutine_threadsafe(
+                            shutdown_coro, shutdown_loop
+                        )
+                    except Exception:
+                        # If submission fails during loop teardown, explicitly
+                        # close the coroutine so Python does not report it as
+                        # never awaited.
+                        shutdown_coro.close()
+                        raise
+
+                    def _report_shutdown_error(future):
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            print(f"[JARVIS] Shutdown failed: {exc}")
+
+                    shutdown_future.add_done_callback(_report_shutdown_error)
                     return "Shutting down."
                 result = security.guard("shutdown_jarvis", args, _trigger_shutdown)
 
@@ -1427,7 +1511,7 @@ class JarvisLive:
             # it was addressed, and answers its own last sentence. The microphone
             # stays OPEN — the guard only drops blocks that are our own voice, so
             # replying the instant it stops still works.
-            if self._tail_active():
+            if self._tail_active() and time.monotonic() >= self._barge_in_until:
                 try:
                     if not self._echo.is_user_speech(
                             indata, SEND_SAMPLE_RATE, _pcm_level(indata)):
@@ -1586,6 +1670,22 @@ class JarvisLive:
                     if response.server_content:
                         sc = response.server_content
 
+                        # Gemini reports barge-in separately from turn_complete.
+                        # Stop any audio already queued for the speakers at once;
+                        # otherwise a cut-off sentence can keep playing locally.
+                        if getattr(sc, "interrupted", False):
+                            q = self.audio_in_queue
+                            if q:
+                                while True:
+                                    try:
+                                        q.get_nowait()
+                                    except Exception:
+                                        break
+                            self.set_speaking(False)
+                            self._visemes.reset()
+                            self._play_cursor = 0.0
+                            print("[JARVIS] ✋ Live session reported user interruption.")
+
                         if sc.output_transcription and sc.output_transcription.text:
                             txt = _clean_transcript(sc.output_transcription.text)
                             # A turn that involves a tool call passes through
@@ -1606,6 +1706,7 @@ class JarvisLive:
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
+                                self._remember_spoken_language(txt)
                                 self._last_user_speech = time.monotonic()
                                 security.mark_user_turn_started()
                                 if not voice_confirmation_consumed:
@@ -1841,7 +1942,7 @@ class JarvisLive:
 
     # ── Morning briefing ────────────────────────────────────────────────────────
 
-    async def _send_startup_briefing(self) -> None:
+    async def _send_startup_briefing(self, wake_trigger: bool = False) -> None:
         """
         Two-phase briefing optimized for speed:
           Phase 1 — instant greeting (no tools) → speech starts in <1s
@@ -1857,16 +1958,56 @@ class JarvisLive:
             e = identity.get(k, {})
             return (e.get("value", "") if isinstance(e, dict) else str(e)).strip()
 
-        lang = _val("language")
+        # This is updated from actual user transcription and persisted between
+        # runs. Identity.language remains a fallback for existing memory files.
+        lang = self._normalize_briefing_language(
+            self._last_spoken_language or _val("language")
+        )
         name = _val("name")
-        time_str = datetime.now().strftime("%H:%M")
+        now = datetime.now()
+        time_str = now.strftime("%I:%M %p").lstrip("0")
+        day = now.day
+        day_suffix = (
+            "th" if 11 <= day % 100 <= 13
+            else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+        )
+        date_str = f"{now.strftime('%A, %B')} {day}{day_suffix}, {now.year}"
+        if 5 <= now.hour < 12:
+            day_period = "morning"
+        elif 12 <= now.hour < 17:
+            day_period = "afternoon"
+        elif 17 <= now.hour < 21:
+            day_period = "evening"
+        else:
+            day_period = "late night"
 
         # Start fetching news immediately — runs in parallel while phase 1 plays
         loop = asyncio.get_event_loop()
+
+        def _fetch_briefing_news():
+            query = "Sri Lankan local news from Newsfirst and Ada Derana in Sinhala and English"
+            result = ""
+            unavailable_prefixes = (
+                "No Sri Lankan headlines",
+                "Sri Lankan news could not be fetched",
+                "Search failed",
+            )
+            for attempt in range(2):
+                try:
+                    result = _fetch_news_sync(query) or ""
+                except Exception as exc:
+                    print(f"[Briefing] News fetch attempt {attempt + 1} failed: {exc}")
+                    result = ""
+                if result and not result.startswith(unavailable_prefixes):
+                    return result
+                if attempt == 0:
+                    print("[Briefing] No news returned; retrying the publisher search once.")
+                    time.sleep(1.0)
+            return result
+
         news_future = loop.run_in_executor(
             None,
-            _fetch_news_sync,
-            "Sri Lankan local news from Newsfirst and Ada Derana in Sinhala and English",
+            _fetch_briefing_news,
         )
 
         await asyncio.sleep(0.3)
@@ -1874,16 +2015,13 @@ class JarvisLive:
             return
 
         # ── Phase 1: instant greeting ─────────────────────────────────────────
-        # The briefing fires before the user has said anything, so the
-        # remembered language is the only signal there is. It is a starting
-        # point, not a setting: the moment they reply, their language wins.
-        lang_clause = (f" Speak this greeting in {lang}, then follow the "
-                       f"user's own language from their first reply onward."
-                       if lang else "")
+        # Keep every part of the briefing in the last language the user spoke.
+        lang_clause = f" Speak the entire briefing in {lang}."
         name_clause = f" Address the user as {name}." if name else ""
 
-        # Inject last session context if available — pop removes it so it's never repeated
-        last = await asyncio.to_thread(pop_last_session)
+        # Startup consumes the previous-session summary once. A clap-triggered
+        # briefing must not consume it again or change the normal next-launch flow.
+        last = None if wake_trigger else await asyncio.to_thread(pop_last_session)
         session_clause = ""
         if last:
             try:
@@ -1895,10 +2033,23 @@ class JarvisLive:
                 f" Also briefly and naturally mention that {_when}: {last['summary']}"
             )
 
-        p1 = (
-            f"Greet the user warmly, mention it is {time_str}, and say you are fetching today's Sri Lankan news now.{session_clause} "
-            f"Keep it to 2 short sentences max. Do not call any tools.{lang_clause}{name_clause}"
-        )
+        if wake_trigger:
+            p1 = (
+                f"Give a natural {day_period} wake greeting in {lang}, addressing the "
+                f"user respectfully. Then tell them conversationally that today is "
+                f"{date_str} and the local time is {time_str}. Say the date and time "
+                f"naturally in {lang}, rather than reading them like a system log. "
+                "Also say you are fetching the latest Sri Lankan news from Newsfirst "
+                f"and Ada Derana. Keep this opening brief. Do not call any tools."
+                f"{lang_clause}{name_clause}"
+            )
+        else:
+            p1 = (
+                f"Greet the user warmly in {lang}, state the local date is {date_str} "
+                f"and the time is {time_str}, and say you are fetching today's Sri Lankan "
+                f"news now.{session_clause} Keep it to 2 short sentences max. "
+                f"Do not call any tools.{lang_clause}{name_clause}"
+            )
 
         # Clear the turn-done event so we can wait for Phase 1 to finish
         if self._turn_done_event:
@@ -1913,9 +2064,12 @@ class JarvisLive:
         # ── Phase 2: fire as soon as Phase 1 audio is done ───────────────────
         async def _deliver_news():
             try:
-                lang_str = (f" Speak in {lang} unless the user has since "
-                            f"spoken another language, in which case use theirs."
-                            if lang else "")
+                # If the user spoke while the greeting/news fetch was running,
+                # use that newer language for the news portion.
+                briefing_lang = self._normalize_briefing_language(
+                    self._last_spoken_language or lang
+                )
+                lang_str = f" Speak the complete news briefing in {briefing_lang}."
 
                 # Wait for news fetch (already running) and Phase 1 turn-complete
                 # in parallel — whichever takes longer determines the wait time
@@ -1938,7 +2092,10 @@ class JarvisLive:
                     await asyncio.sleep(1.0)
 
                 try:
-                    news_text = await asyncio.wait_for(news_done, timeout=8.0)
+                    # The publisher searches run concurrently and may need up
+                    # to 18 seconds per attempt on a slow connection. Allow
+                    # the bounded retry to finish before announcing failure.
+                    news_text = await asyncio.wait_for(news_done, timeout=38.0)
                 except Exception as e:
                     self.ui.write_log(f"SYS: News fetch timed out/failed: {e!r}")
                     news_text = ""
@@ -1960,9 +2117,15 @@ class JarvisLive:
                     self.ui.show_content("SRI LANKA NEWS — Newsfirst + Ada Derana", news_text)
 
                     p2 = (
-                        f"[BRIEFING] Here are today's Sri Lankan news headlines from Newsfirst and Ada Derana, in English and Sinhala where available:\n{news_text}\n\n"
-                        "Pick ONE headline, summarise it in one sentence, then say the full list "
-                        f"is displayed on screen. Do not call any tools.{lang_str}"
+                        f"[BRIEFING — LANGUAGE: {briefing_lang}] Read out EVERY news topic/headline "
+                        "in the supplied Newsfirst and Ada Derana results. Do not skip items, "
+                        "select only one, or replace the list with a general summary. For each "
+                        "headline, say its full topic and give one concise sentence of context "
+                        "using its provided snippet. Translate the headline and context into "
+                        f"{briefing_lang} when the source is in the other language. Group items "
+                        "by publisher edition, preserve distinctions between stories, and do "
+                        "not read URLs aloud. Full source list is also displayed on screen:\n"
+                        f"{news_text}\n\nDo not call any tools.{lang_str}"
                     )
                 else:
                     self.ui.write_log(

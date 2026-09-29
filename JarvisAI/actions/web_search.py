@@ -317,7 +317,10 @@ def _sri_lanka_news(_query: str = "") -> str:
     for worker in workers:
         worker.start()
 
-    deadline = time.monotonic() + 5.5
+    # Search providers can be slow to establish a connection on a cold start.
+    # Keep the four editions parallel, but give each one enough time to return
+    # instead of discarding all results after a short shared deadline.
+    deadline = time.monotonic() + 14.0
     for worker in workers:
         worker.join(max(0.0, deadline - time.monotonic()))
 
@@ -561,7 +564,7 @@ def _news(query: str) -> str:
     if _is_sri_lanka_news_request(query):
         local_news = _run_bounded(
             lambda: _sri_lanka_news(query),
-            timeout=7.0,
+            timeout=18.0,
             label="Sri Lankan news",
         )
         if local_news and not local_news.startswith("No Sri Lankan headlines"):

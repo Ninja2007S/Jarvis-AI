@@ -30,7 +30,9 @@ import random
 
 import numpy as np
 from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt
-from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF, QRadialGradient
+from PyQt6.QtGui import (
+    QBrush, QColor, QPainter, QPen, QPolygonF, QRadialGradient,
+)
 
 from core.avatar_mesh import JAW_MAX, JAW_PIVOT, get_head_mesh
 
@@ -424,6 +426,7 @@ class HoloAvatar:
         self._glance = (max(-1.0, min(1.0, float(dx))),
                         max(-1.0, min(1.0, float(dy))),
                         self._t + max(0.1, float(hold)))
+
 
     # ── posing ──────────────────────────────────────────────────────────────
 

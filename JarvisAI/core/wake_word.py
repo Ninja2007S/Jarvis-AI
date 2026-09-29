@@ -28,7 +28,7 @@ from typing import Callable
 # Pretrained openwakeword model that listens for "Hey Jarvis".
 WAKE_MODEL = "hey_jarvis"
 # Score in [0,1]; above this counts as a detection. Tunable per environment.
-DEFAULT_THRESHOLD = 0.5
+DEFAULT_THRESHOLD = 0.35
 # Mic frames arrive at 16 kHz int16; this is just the detector's input rate.
 SAMPLE_RATE = 16000
 # Do not let the tail of one wake phrase re-trigger the detector or immediately
@@ -191,42 +191,54 @@ class WakeWordDetector:
 
     def _loop(self) -> None:
         import numpy as np
+        pending = np.empty(0, dtype=np.int16)
+        # The input callback currently produces 1024-sample (64 ms) blocks.
+        # openWakeWord's streaming frontend is designed around 1280 samples
+        # (80 ms); accumulate exact model frames here instead of feeding short
+        # callback blocks whose detection quality varies by library version.
+        model_frame_samples = 1280
         while self._running:
             try:
                 frame = self._queue.get()
                 if frame is None or not self._running:
                     break
-                scores = self._model.predict(np.asarray(frame, dtype=np.int16))
-                score = 0.0
-                if isinstance(scores, dict):
-                    # match the jarvis model regardless of exact key suffix
-                    for k, v in scores.items():
-                        if "jarvis" in k.lower():
-                            score = max(score, float(v))
-                    if score == 0.0 and scores:
-                        score = max(float(v) for v in scores.values())
+                pending = np.concatenate((pending, np.asarray(frame, dtype=np.int16)))
+                while pending.size >= model_frame_samples and self._running:
+                    model_frame = pending[:model_frame_samples]
+                    pending = pending[model_frame_samples:]
+                    scores = self._model.predict(model_frame)
+                    score = 0.0
+                    if isinstance(scores, dict):
+                        # Match the intended JARVIS phrase regardless of exact
+                        # version suffix; don't let unrelated model scores fire.
+                        for key, value in scores.items():
+                            if "jarvis" in key.lower():
+                                score = max(score, float(value))
 
-                if not self._armed:
-                    if score < self._threshold * 0.5:
-                        self._quiet_frames += 1
-                    else:
+                    now = time.monotonic()
+                    if not self._armed:
+                        if score < self._threshold * 0.5:
+                            self._quiet_frames += 1
+                        else:
+                            self._quiet_frames = 0
+                        if (now >= self._cooldown_until
+                                and self._quiet_frames >= REARM_QUIET_FRAMES):
+                            self._armed = True
+                        else:
+                            continue
+
+                    if score >= self._threshold:
+                        self._armed = False
+                        self._cooldown_until = now + RETRIGGER_COOLDOWN_SEC
                         self._quiet_frames = 0
-                    if (time.monotonic() >= self._cooldown_until
-                            and self._quiet_frames >= REARM_QUIET_FRAMES):
-                        self._armed = True
-                    else:
-                        continue
-
-                if score >= self._threshold:
-                    self._armed = False
-                    self._cooldown_until = time.monotonic() + RETRIGGER_COOLDOWN_SEC
-                    self._quiet_frames = 0
-                    # drain any backlog so we don't double-fire on the same utterance
-                    self._drain()
-                    try:
-                        self._on_detect()
-                    except Exception as e:
-                        self._logger(f"Wake word: on_detect error — {e}")
+                        self._logger(f"Wake word: detected (score {score:.2f}).")
+                        # Drop queued audio so the same phrase cannot fire again.
+                        self._drain()
+                        pending = np.empty(0, dtype=np.int16)
+                        try:
+                            self._on_detect()
+                        except Exception as e:
+                            self._logger(f"Wake word: on_detect error — {e}")
             except Exception as e:
                 self._logger(f"Wake word: inference error — {e}")
 

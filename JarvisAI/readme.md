@@ -118,6 +118,8 @@ When the local **"Hey Jarvis"** detector is installed and ready, saying **"Hey J
 
 Install or enable the detector from **⚙ → WAKE WORD**. The feature is unavailable if the model is not ready. Mute, phone-call audio, and push-to-talk settings also gate the microphone path. The HUD's **INTERRUPT [ESC]** control remains available as a manual option.
 
+When wake-word mode is enabled and Jarvis is asleep, clap twice to wake it. Jarvis then gives the wake greeting, tells you the local date and time, and reads every retrieved Newsfirst/Ada Derana news topic. Startup briefings do the same when Morning Brief is enabled. JARVIS remembers whether the user's latest clearly recognized speech was Sinhala or English in local memory and speaks the briefing in that language, translating headlines and context where needed. The clap detector runs locally; its audio stays on the computer.
+
 ---
 
 # 🛡️ Security Architecture
