@@ -1193,20 +1193,27 @@ You can change:
 * Wake word
 * Audio devices
 
-The HUD can also switch between two visual modes.
+The HUD selector offers three desktop-native visual modes. The selection is
+saved and restored the next time JARVIS starts.
 
-### 🧑‍🎤 Avatar Mode
+### 🧑‍🎤 Face Mesh
 
-Animated human-style face.
+Animated face mesh with gaze and mouth movement synchronized to JARVIS speech.
 
-### ⚛️ Reactor Mode
+### ⚛️ JARVIS Logo
 
-A futuristic reactive core displaying:
+The original JARVIS reactor/logo, animated by assistant state and voice level.
 
-* Audio waveform
-* Assistant state
-* Activity
-* Voice intensity
+### 🧠 Neural Network
+
+A detailed, live layered network with SENSE, ENCODE, ATTEND, REASON, TOOLS,
+FORM, and VOICE stages. Nodes, synaptic paths, and traveling signal sparks
+respond to listening audio, thinking, active tool calls, and spoken responses.
+Each active assistant call produces a distinct pulse and increments the call
+counter in the HUD. Choose the mode from the HUD selector beside the audio
+controls. The network is an activity visualization driven by JARVIS's live
+state and audio; it does not expose the AI model's internal activations.
+
 
 ---
 

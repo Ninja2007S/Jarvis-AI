@@ -413,6 +413,10 @@ class HudCanvas(QWidget):
         except Exception:
             self.hud_style = "face"
         self._core_phase = 0.0
+        self._neural_phase = 0.0
+        self._neural_energy = 0.12
+        self._neural_flash = 0.0
+        self._neural_call_count = 0
 
         self._tick       = 0
         self._scale      = 1.0
@@ -525,6 +529,11 @@ class HudCanvas(QWidget):
         if lv > self._live_amp:
             self._live_amp = lv
 
+    def trigger_activity(self) -> None:
+        """Flash a distinct neural pulse for each active JARVIS operation."""
+        self._neural_call_count += 1
+        self._neural_flash = 1.0
+
     def _make_grid(self, W: int, H: int) -> QPixmap:
         """Pre-render the static grid-dot background into a transparent pixmap so
         paintEvent can blit it once per frame instead of running a nested
@@ -586,6 +595,18 @@ class HudCanvas(QWidget):
         # a rate that changes with state jumps the rings the instant JARVIS
         # starts talking. Same lesson the head's sway taught.
         self._core_phase += min(0.10, max(0.0, dt))
+        network_target = 0.12
+        if self.state in ("THINKING", "PROCESSING"):
+            network_target = 0.82
+        elif self.speaking:
+            network_target = 0.42 + amp * 0.48
+        elif self.state == "LISTENING":
+            network_target = 0.24 + amp * 0.40
+        if self.muted:
+            network_target *= 0.45
+        self._neural_energy += (network_target - self._neural_energy) * 0.16
+        self._neural_flash *= 0.91
+        self._neural_phase += min(0.12, max(0.0, dt)) * (1.7 + self._neural_energy * 5.5)
 
         if self._avatar is not None and self.hud_style == "face":
             self._avatar.step(dt, amp, speaking=self.speaking,
@@ -636,7 +657,8 @@ class HudCanvas(QWidget):
         # either way because the animation state keeps stepping at 60 Hz.
         self._paint_tick = (self._paint_tick + 1) % 6
         active = (self.speaking or amp > 0.02
-                  or self.state in ("THINKING", "PROCESSING"))
+                  or self.state in ("THINKING", "PROCESSING")
+                  or (self.hud_style == "neural" and self._neural_flash > 0.025))
         if _blinked or (self._paint_tick % 2 == 0 if active
                         else self._paint_tick % 3 == 0):
             # Nothing is on screen when the window is hidden or minimised, so
@@ -820,6 +842,111 @@ class HudCanvas(QWidget):
             p.drawText(QRectF(cx - r, cy - fsz, r * 2, fsz * 2),
                        Qt.AlignmentFlag.AlignCenter, name)
 
+    def _paint_neural_network(self, p: QPainter, W: float, H: float,
+                              cx: float, cy: float, fw: float):
+        """Layered node-and-synapse display driven by JARVIS state and audio."""
+        counts = (5, 8, 10, 12, 10, 8, 5)
+        labels = ("SENSE", "ENCODE", "ATTEND", "REASON", "TOOLS", "FORM", "VOICE")
+        left, right = cx - fw * 0.36, cx + fw * 0.36
+        top, bottom = cy - fw * 0.235, cy + fw * 0.235
+        xs = [left + (right - left) * i / (len(counts) - 1)
+              for i in range(len(counts))]
+        max_count = max(counts)
+        ys = []
+        for count in counts:
+            step = (bottom - top) / (max_count - 1)
+            ys.append([cy + (i - (count - 1) / 2) * step for i in range(count)])
+
+        energy = max(0.0, min(1.0, self._neural_energy))
+        flash = max(0.0, min(1.0, self._neural_flash))
+        phase = self._neural_phase
+        active = self.state in ("THINKING", "PROCESSING", "SPEAKING") or energy > 0.30
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Connection fabric: adjacent layers carry the main signal; a sparse
+        # set of long skips suggests recurrent memory and attention links.
+        for layer in range(len(counts) - 1):
+            for source_i, sy in enumerate(ys[layer]):
+                for target_i, ty in enumerate(ys[layer + 1]):
+                    if (source_i * 17 + target_i * 11 + layer * 7) % 3 == 0:
+                        continue
+                    wave = 0.5 + 0.5 * math.sin(
+                        phase * 1.8 - layer * 1.35 - source_i * 0.73 + target_i * 0.47
+                    )
+                    glow = max(0.0, wave - 0.72) / 0.28
+                    alpha = int(18 + 34 * energy + 58 * flash * glow + 24 * energy * glow)
+                    base = qcol(C.ACC if layer >= 4 else C.PRI)
+                    base.setAlpha(max(8, min(175, alpha)))
+                    p.setPen(QPen(base, 0.7 + glow * (0.7 + flash)))
+                    p.drawLine(QLineF(xs[layer], sy, xs[layer + 1], ty))
+
+                    # Moving synapse spark: a small number of edges light up
+                    # in sequence so each operation reads as data travelling.
+                    travel = (phase * 0.31 + layer * 0.23 + source_i * 0.17
+                              + target_i * 0.11) % 1.0
+                    if active and 0.44 < travel < 0.57:
+                        t = (travel - 0.44) / 0.13
+                        spark = QPointF(xs[layer] + (xs[layer + 1] - xs[layer]) * t,
+                                        sy + (ty - sy) * t)
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(qcol(C.WHITE))
+                        p.drawEllipse(spark, 1.2 + energy * 1.4, 1.2 + energy * 1.4)
+
+        # A few long skip connections arc through the network as a distinct
+        # secondary channel rather than turning the whole display into noise.
+        for layer, source_i, target_i in ((0, 1, 5), (1, 6, 3), (2, 2, 7),
+                                           (3, 9, 2), (4, 6, 1)):
+            end_layer = layer + 2
+            if end_layer >= len(counts):
+                continue
+            col = qcol(C.ACC2)
+            col.setAlpha(int(18 + 42 * energy + 55 * flash))
+            p.setPen(QPen(col, 0.8))
+            p.drawLine(QLineF(xs[layer], ys[layer][source_i],
+                              xs[end_layer], ys[end_layer][target_i]))
+
+        # Layer rails and captions give the graph structure and a real sense
+        # of what is being shown, instead of a generic animated background.
+        for layer, x in enumerate(xs):
+            rail = qcol(C.PRI_GHO)
+            rail.setAlpha(40)
+            p.setPen(QPen(rail, 0.7, Qt.PenStyle.DotLine))
+            p.drawLine(QLineF(x, top - 8, x, bottom + 8))
+            p.setPen(QPen(qcol(C.TEXT_DIM), 1))
+            p.setFont(QFont("Courier New", 6, QFont.Weight.Bold))
+            p.drawText(QRectF(x - fw * 0.05, bottom + 12, fw * 0.10, 12),
+                       Qt.AlignmentFlag.AlignCenter, labels[layer])
+
+        # Neurons: rings, active cores, and numbered input/output terminals.
+        for layer, count in enumerate(counts):
+            for index, y in enumerate(ys[layer]):
+                pulse = 0.5 + 0.5 * math.sin(
+                    phase * (1.4 + layer * 0.07) - layer * 0.92 - index * 0.61
+                )
+                radius = 3.0 + 1.5 * pulse * (0.35 + energy + flash * 0.65)
+                color = qcol(C.ACC if layer in (3, 4, 5) else C.PRI)
+                glow_alpha = int(50 + 100 * energy * pulse + 90 * flash * pulse)
+                color.setAlpha(max(30, min(235, glow_alpha)))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(color, 1.0 + 0.7 * pulse))
+                p.drawEllipse(QPointF(xs[layer], y), radius + 3, radius + 3)
+                p.setPen(Qt.PenStyle.NoPen)
+                core_color = qcol(C.WHITE if pulse > 0.88 and active else C.PRI)
+                core_color.setAlpha(int(95 + 150 * pulse * max(energy, 0.35)))
+                p.setBrush(core_color)
+                p.drawEllipse(QPointF(xs[layer], y), radius, radius)
+
+        # Telemetry tags identify the currently rendered call and signal load.
+        p.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        p.setPen(QPen(qcol(C.ACC if active else C.TEXT_DIM), 1))
+        p.drawText(QRectF(left, top - 27, fw * 0.34, 14),
+                   Qt.AlignmentFlag.AlignLeft,
+                   f"SYNAPTIC ARRAY  //  {'FLOW' if active else 'IDLE'}")
+        p.setPen(QPen(qcol(C.TEXT_DIM), 1))
+        p.drawText(QRectF(right - fw * 0.36, top - 27, fw * 0.36, 14),
+                   Qt.AlignmentFlag.AlignRight,
+                   f"CALL {self._neural_call_count:04d}  ·  LOAD {int(energy * 100):02d}%")
+
     def paintEvent(self, _):
         p = QPainter(self)
         if not p.isActive():      # device not ready (e.g. 0-size during layout) — skip cleanly
@@ -864,10 +991,11 @@ class HudCanvas(QWidget):
                     _acc = qcol(C.PRI)
             self._avatar.paint(p, cx, _head_cy, _r_head, _main, _acc, qcol(C.BG))
 
-        # reactor core — the other centrepiece, and the fallback if the head
-        # could not be built. There is no third path: the old face.png branch
-        # was unreachable (no such file ships) and the bare orb it fell through
-        # to is what this replaces.
+        elif self.hud_style == "neural":
+            self._paint_neural_network(p, W, H, cx, cy, fw)
+
+        # JARVIS logo / reactor core — kept as the original selectable mode
+        # and as a fallback if the face mesh is unavailable.
         else:
             _band_t = 12.0
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
@@ -2958,6 +3086,7 @@ class RemoteKeyOverlay(QWidget):
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
+    _hud_pulse_sig  = pyqtSignal(str)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
     _earth_sig      = pyqtSignal(str, str, str)  # destination, origin, mode
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
@@ -3124,6 +3253,7 @@ class MainWindow(QMainWindow):
 
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
+        self._hud_pulse_sig.connect(self._on_hud_activity)
         self._content_sig.connect(self._show_content)
         self._earth_sig.connect(self._show_earth)
         self._reconfig_sig.connect(self._show_setup)
@@ -4028,11 +4158,14 @@ class MainWindow(QMainWindow):
 
         self._refresh_talk_btns()
 
-        self._hud_btn = QPushButton()
+        self._hud_btn = QComboBox()
         self._hud_btn.setFixedHeight(26)
         self._hud_btn.setFont(QFont("Courier New", 7))
         self._hud_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._hud_btn.clicked.connect(self._toggle_hud_style)
+        self._hud_btn.addItem("HUD: FACE MESH", "face")
+        self._hud_btn.addItem("HUD: JARVIS LOGO", "core")
+        self._hud_btn.addItem("HUD: NEURAL NETWORK", "neural")
+        self._hud_btn.currentIndexChanged.connect(self._on_hud_style_selected)
         lay.addWidget(self._hud_btn)
         self._refresh_hud_btn()
 
@@ -4840,39 +4973,55 @@ class MainWindow(QMainWindow):
 
     def _refresh_hud_btn(self):
         from memory.config_manager import get_hud_style
-        face = get_hud_style() == "face"
-        # Neither state is "off", so both read as active — this is a choice
-        # between two things, not a switch with a disabled side.
         style = f"""
-            QPushButton {{ background: {C.PANEL2}; color: {C.PRI};
+            QComboBox {{ background: {C.PANEL2}; color: {C.PRI};
                 border: 1px solid {C.BORDER_A}; border-radius: 3px;
                 text-align: left; padding: 0 8px; }}
-            QPushButton:hover {{ color: {C.WHITE}; border: 1px solid {C.BORDER_B}; }}"""
-        self._hud_btn.setText("🧑  HUD: ANIMATED FACE" if face
-                              else "◉  HUD: REACTOR CORE")
+            QComboBox:hover {{ color: {C.WHITE}; border: 1px solid {C.BORDER_B}; }}
+            QComboBox::drop-down {{ border: none; width: 18px; }}
+            QComboBox QAbstractItemView {{ background: {C.PANEL2}; color: {C.TEXT};
+                selection-background-color: {C.BORDER_A}; }}"""
         self._hud_btn.setStyleSheet(style)
-        self._hud_btn.setToolTip(
-            "An animated head that speaks your words and shows what JARVIS is "
-            "doing. Tap to switch to the reactor core."
-            if face else
-            "A reactor core that turns with the state and moves with your voice. "
-            "Tap to switch to the animated head.")
+        current = get_hud_style()
+        index = self._hud_btn.findData(current)
+        self._hud_btn.blockSignals(True)
+        self._hud_btn.setCurrentIndex(max(0, index))
+        self._hud_btn.blockSignals(False)
+        descriptions = {
+            "face": "Animated face mesh: keeps its gaze and mouth movement synced to JARVIS speech.",
+            "core": "JARVIS logo/reactor: the existing identity mark, animated by assistant state and voice.",
+            "neural": "Live neural network: layered neurons and signal paths react to listening, thinking, tool calls, and speech.",
+        }
+        self._hud_btn.setToolTip(descriptions.get(current, descriptions["face"]))
 
-    def _toggle_hud_style(self):
-        """Swap the centrepiece. Both objects stay in memory, so the change is
-        instant and switching back costs nothing."""
-        from memory.config_manager import get_hud_style, save_hud_style
-        want = "core" if get_hud_style() == "face" else "face"
+    def _on_hud_activity(self, _state: str):
+        """Queue an activity pulse on the GUI thread for each assistant call."""
+        self.hud.trigger_activity()
+        self.hud.update()
+
+    def _on_hud_style_selected(self, index: int):
+        """Persist and immediately display the selected HUD centrepiece."""
+        from memory.config_manager import save_hud_style
+        want = self._hud_btn.itemData(index)
+        if want not in {"face", "core", "neural"}:
+            return
         save_hud_style(want)
         try:
             self.hud.hud_style = want
             self.hud.update()
         except Exception:
             pass
-        self._refresh_hud_btn()
-        self._log.append_log(
-            "SYS: HUD switched to the animated face." if want == "face"
-            else "SYS: HUD switched to the reactor core.")
+        labels = {
+            "face": "the animated face mesh",
+            "core": "the JARVIS logo",
+            "neural": "the live neural network",
+        }
+        self._hud_btn.setToolTip({
+            "face": "Animated face mesh: keeps its gaze and mouth movement synced to JARVIS speech.",
+            "core": "JARVIS logo/reactor: the existing identity mark, animated by assistant state and voice.",
+            "neural": "Live neural network: layered neurons and signal paths react to listening, thinking, tool calls, and speech.",
+        }[want])
+        self._log.append_log(f"SYS: HUD switched to {labels[want]}.")
 
     def _toggle_ptt(self):
         from memory.config_manager import (get_push_to_talk_enabled,
@@ -5497,6 +5646,9 @@ class JarvisUI:
         self._win.notify_phone_connected()
 
     def set_state(self, state: str):
+        normalized = str(state or "").upper()
+        if normalized in {"THINKING", "PROCESSING", "SPEAKING"}:
+            self._win._hud_pulse_sig.emit(normalized)
         self._win._state_sig.emit(state)
 
     def write_log(self, text: str):

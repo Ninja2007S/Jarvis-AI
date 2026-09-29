@@ -39,30 +39,43 @@ It can:
 * 🎨 Display an animated holographic-style avatar
 * 🛡️ Apply security controls before executing sensitive actions
 * 💬 Communicate naturally through voice
-* 🌍 Open a rotating Earth globe in the desktop HUD and locate named places worldwide
+* 🌍 Explore a rotating satellite globe, zoom to cities, and plot driving routes in the desktop HUD
 
 The goal is simple:
 
 > **Build a personal AI that lives on your computer instead of inside a browser tab.**
 
-## 🌍 Earth Globe and Place Lookup
+## 🌍 Interactive Earth, Place Search, and Routes
 
-Ask JARVIS **“show me the Earth”** to open the animated globe in the existing
-desktop HUD. Ask **“locate Kandy, Sri Lanka”** or **“show Tokyo on the globe”**
-to center the globe on a city, landmark, or country and mark its position. You
-can also enter a place in the HUD, drag the globe to pan, and pause or resume
-rotation. This feature stays in the PyQt desktop window; it does not launch a
-browser.
+Ask JARVIS **“show me the Earth”** to open a rotating, satellite-textured globe
+inside the existing desktop window. Say **“take me to Kandy, Sri Lanka”** or
+**“show Tokyo on the map”** and the camera flies to the matched place. City
+searches switch to a detailed street map; the HUD has **STREETS** and
+**SATELLITE** layers, map zoom/tilt controls, and a destination marker.
 
-Place lookup needs an internet connection and uses OpenStreetMap's Nominatim
-service only when a place is submitted. The submitted place name is sent to
-OpenStreetMap; searches are rate-limited to one request per second and successful
-results are cached in memory for the current run. There is no autocomplete.
-OpenStreetMap attribution appears in the globe panel. The drawn continents are
-illustrative, while the pin is based on the returned geographic coordinates, so
-the display is a place finder rather than a street-level or navigation map.
-Place coverage depends on OpenStreetMap data; it cannot guarantee that every
-address or named location worldwide will resolve.
+Ask **“route from Colombo to Galle”** to draw a driving route and show an
+estimated distance and time. JARVIS does not use or infer the PC's location. If
+you ask for a route without a start, it asks you; the **FROM** field is cleared
+after each completed route.
+
+The Earth panel is rendered inside the PyQt application using Qt WebEngine and
+MapLibre GL JS; it does not launch a separate browser. Install its dependency
+with the rest of the project requirements:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+Map data requires internet access. Place names are sent to OpenStreetMap's
+Nominatim geocoder when searched. Route endpoints are sent to the public OSRM
+routing service, which says route requests are stored in server logs. Visible
+map tiles are requested from OpenStreetMap and EOxCloudless; a local WebEngine
+cache is used. The satellite mode is a Sentinel-2 cloudless 2020 mosaic, not
+live imagery. OpenStreetMap coverage varies, so JARVIS cannot promise that every
+address or rural road worldwide is mapped or routable. Service availability and
+coverage are outside JARVIS's control.
+
+The panel displays map attribution. OSM tile use follows its [tile policy](https://operations.osmfoundation.org/policies/tiles/); place lookup follows the [Nominatim policy](https://operations.osmfoundation.org/policies/nominatim/). EOxCloudless requires visible attribution and its imagery is restricted to non-commercial use under its current terms; see its [license summary](https://cloudless.eox.at/documentation/license). Routes use the best-effort public [OSRM routing service](https://routing.openstreetmap.de/about.html).
 
 ---
 
@@ -1180,20 +1193,27 @@ You can change:
 * Wake word
 * Audio devices
 
-The HUD can also switch between two visual modes.
+The HUD selector offers three desktop-native visual modes. The selection is
+saved and restored the next time JARVIS starts.
 
-### 🧑‍🎤 Avatar Mode
+### 🧑‍🎤 Face Mesh
 
-Animated human-style face.
+Animated face mesh with gaze and mouth movement synchronized to JARVIS speech.
 
-### ⚛️ Reactor Mode
+### ⚛️ JARVIS Logo
 
-A futuristic reactive core displaying:
+The original JARVIS reactor/logo, animated by assistant state and voice level.
 
-* Audio waveform
-* Assistant state
-* Activity
-* Voice intensity
+### 🧠 Neural Network
+
+A detailed, live layered network with SENSE, ENCODE, ATTEND, REASON, TOOLS,
+FORM, and VOICE stages. Nodes, synaptic paths, and traveling signal sparks
+respond to listening audio, thinking, active tool calls, and spoken responses.
+Each active assistant call produces a distinct pulse and increments the call
+counter in the HUD. Choose the mode from the HUD selector beside the audio
+controls. The network is an activity visualization driven by JARVIS's live
+state and audio; it does not expose the AI model's internal activations.
+
 
 ---
 
@@ -1740,6 +1760,9 @@ Security features are implemented as **defense-in-depth controls**. No security 
 | Google APIs           | Gmail / Calendar integration    | Google service              |
 | TinyTuya              | Smart-home communication        | See project license         |
 | MQTT                  | 3D printer communication        | Protocol / broker dependent |
+| MapLibre GL JS        | Interactive 3D globe and map     | BSD 3-Clause                |
+| OpenStreetMap         | Street map, geocoding, route data| ODbL; attribution required  |
+| EOxCloudless          | Satellite globe imagery          | Attribution; non-commercial terms apply |
 
 Third-party services and libraries remain subject to their own licenses and terms.
 
