@@ -21,6 +21,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -30,6 +31,11 @@ WAKE_MODEL = "hey_jarvis"
 DEFAULT_THRESHOLD = 0.5
 # Mic frames arrive at 16 kHz int16; this is just the detector's input rate.
 SAMPLE_RATE = 16000
+# Do not let the tail of one wake phrase re-trigger the detector or immediately
+# barge into the greeting. Re-arm only after both the cooldown and a quiet score
+# run, so sustained scores from the same phrase cannot fire repeatedly.
+RETRIGGER_COOLDOWN_SEC = 1.5
+REARM_QUIET_FRAMES = 8
 
 
 def is_installed() -> bool:
@@ -128,12 +134,18 @@ class WakeWordDetector:
         self._running = False
         self._model = None
         self._ready = False
+        self._armed = True
+        self._cooldown_until = 0.0
+        self._quiet_frames = 0
 
     def start(self) -> bool:
         """Load the model and spawn the inference thread. Returns True on success.
         Safe to call again — a no-op if already running. Never raises."""
         if self._running:
             return True
+        self._armed = True
+        self._cooldown_until = 0.0
+        self._quiet_frames = 0
         try:
             from openwakeword.model import Model
             self._model = Model(wakeword_models=[WAKE_MODEL], inference_framework="onnx")
@@ -193,7 +205,22 @@ class WakeWordDetector:
                             score = max(score, float(v))
                     if score == 0.0 and scores:
                         score = max(float(v) for v in scores.values())
+
+                if not self._armed:
+                    if score < self._threshold * 0.5:
+                        self._quiet_frames += 1
+                    else:
+                        self._quiet_frames = 0
+                    if (time.monotonic() >= self._cooldown_until
+                            and self._quiet_frames >= REARM_QUIET_FRAMES):
+                        self._armed = True
+                    else:
+                        continue
+
                 if score >= self._threshold:
+                    self._armed = False
+                    self._cooldown_until = time.monotonic() + RETRIGGER_COOLDOWN_SEC
+                    self._quiet_frames = 0
                     # drain any backlog so we don't double-fire on the same utterance
                     self._drain()
                     try:

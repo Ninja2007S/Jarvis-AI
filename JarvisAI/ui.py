@@ -3004,6 +3004,7 @@ class MainWindow(QMainWindow):
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
+        self.on_voice_id_action = None  # callable: (action: str) -> status text
         self.on_push_to_talk   = None   # callable: (enable: bool) -> str scope
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
         self.wake_get_state    = None   # callable: () -> dict {enabled, awake, ready}
@@ -3978,6 +3979,18 @@ class MainWindow(QMainWindow):
         self._wake_sleep_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._wake_sleep_btn.clicked.connect(self._tap_wake_manual)
         lay.addWidget(self._wake_sleep_btn)
+        self._voice_id_btn = QPushButton("🔐  VOICE ID: SET UP / TOGGLE")
+        self._voice_id_btn.setFixedHeight(26)
+        self._voice_id_btn.setFont(QFont("Courier New", 7))
+        self._voice_id_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._voice_id_btn.setStyleSheet(_BTN_STYLE_DIM)
+        self._voice_id_btn.setToolTip(
+            "Click to set up or toggle speaker checks. Right-click to re-enroll or remove the profile."
+        )
+        self._voice_id_btn.clicked.connect(self._toggle_voice_id)
+        self._voice_id_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._voice_id_btn.customContextMenuRequested.connect(self._voice_id_menu)
+        lay.addWidget(self._voice_id_btn)
         # Neutral placeholder now; the real state (which may load the model to
         # check readiness) is resolved lazily the first time the drawer opens.
         self._wake_btn.setText("🎙  WAKE WORD")
@@ -4940,6 +4953,41 @@ class MainWindow(QMainWindow):
                 pass
         self._refresh_wake_btns()
 
+    def _toggle_voice_id(self):
+        if self.on_voice_id_action:
+            try:
+                result = self.on_voice_id_action("toggle")
+                if result:
+                    self._log.append_log(f"SYS: {result}")
+            except Exception as e:
+                self._log.append_log(f"ERR: Voice ID — {e}")
+
+    def _voice_id_menu(self, pos):
+        if not self.on_voice_id_action:
+            return
+        from PyQt6.QtWidgets import QMenu, QMessageBox
+
+        menu = QMenu(self)
+        reenroll = menu.addAction("Enroll / replace owner voice")
+        remove = menu.addAction("Remove Voice ID profile")
+        chosen = menu.exec(self._voice_id_btn.mapToGlobal(pos))
+        if chosen == reenroll:
+            result = self.on_voice_id_action("enroll")
+            if result:
+                self._log.append_log(f"SYS: {result}")
+        elif chosen == remove:
+            answer = QMessageBox.question(
+                self,
+                "Remove Voice ID",
+                "Delete the encrypted owner voice profile and disable speaker checks?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                result = self.on_voice_id_action("remove")
+                if result:
+                    self._log.append_log(f"SYS: {result}")
+
     def _update_brief_btn(self, enabled: bool):
         if not hasattr(self, '_brief_btn'):
             return
@@ -5372,6 +5420,14 @@ class JarvisUI:
     @wake_get_state.setter
     def wake_get_state(self, cb):
         self._win.wake_get_state = cb
+
+    @property
+    def on_voice_id_action(self):
+        return self._win.on_voice_id_action
+
+    @on_voice_id_action.setter
+    def on_voice_id_action(self, cb):
+        self._win.on_voice_id_action = cb
 
     def set_audio_level(self, level: float) -> None:
         """Thread-safe: feed a 0.0–1.0 live audio level to the HUD waveform.

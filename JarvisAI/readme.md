@@ -59,6 +59,7 @@ Jarvis uses the **Gemini Live API** for low-latency, real-time voice interaction
 * Automatic language adaptation
 * Push-to-talk
 * Local wake-word detection
+* Optional local speaker verification for wake-word unlocks and spoken approvals
 * Self-echo protection
 * Session continuity
 * Instant task acknowledgement
@@ -218,7 +219,43 @@ Actions routed through the confirmation gate include operations such as:
 * Phone calls
 * Other actions classified as dangerous
 
-You can approve or cancel a pending request by clicking **CONFIRM** or **CANCEL** on the HUD, or by saying **"confirm action"** or **"cancel action"**. Voice phrases are accepted only while a confirmation is pending; a plain "yes" is not enough. This is not speaker identification, so treat voice approval as authorization from the active microphone.
+You can approve or cancel a pending request by clicking **CONFIRM** or **CANCEL** on the HUD, or by saying **"confirm action"** or **"cancel action"**. Voice phrases are accepted only while a confirmation is pending; a plain "yes" is not enough. With Voice ID enabled, spoken confirmation also requires a local speaker match.
+
+### Optional Voice ID
+
+Voice ID can add a local speaker-match check to wake-word unlocks and spoken
+confirmation of sensitive actions. The manual **WAKE NOW** control and clicking
+**CONFIRM** or **CANCEL** remain available.
+
+1. Install the optional packages in the same Python environment used to launch
+   JARVIS:
+
+   ```powershell
+   python -m pip install -r requirements-voice-id.txt
+   ```
+2. Restart Jarvis and open the left settings panel.
+3. Click **VOICE ID: SET UP / TOGGLE** and read the enrollment phrase shown in
+   the activity log for eight seconds.
+4. Use the same button to turn Voice ID on or off. Right-click it to replace or
+   remove the profile.
+
+The speaker model runs locally and downloads its model files on the first
+enrollment into the standard Hugging Face cache outside the project. JARVIS
+uses that cache directly, so Windows Developer Mode or administrator
+privileges are not needed. The enrollment audio is not saved; only a Windows
+DPAPI-encrypted speaker profile is stored in config/voice_id.dat. The model
+cache is under your user profile's Hugging Face cache and is outside the Git
+repository.
+
+SpeechBrain currently documents support through Python 3.12 and does not list
+Windows among its officially supported operating systems. If installation
+fails under your current Python 3.14 setup, use a Python 3.12 environment for
+JARVIS and install the optional requirements there.
+
+Voice ID is a convenience check, not proof against replayed recordings or
+voice-cloning attacks. Keep the manual confirmation path for sensitive actions.
+If Jarvis runs with wake-word mode enabled, the local wake phrase must also pass
+the speaker check before voice unlock.
 
 The intended execution flow is:
 

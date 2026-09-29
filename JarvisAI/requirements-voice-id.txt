@@ -1,0 +1,7 @@
+# Optional Windows speaker-verification feature.
+# Install separately; these ML packages are intentionally excluded from the
+# normal JARVIS requirements. Python 3.12 is recommended for SpeechBrain.
+torch>=2.0,<3
+torchaudio>=2.0,<3
+speechbrain>=1.0.2,<2
+pywin32>=306

@@ -7,6 +7,9 @@ config/certs/
 config/whatsapp_web/
 config/google_credentials.json
 config/google_token.json
+config/voice_id.dat
+config/voice_id.tmp
+config/voice_id_model/
 **/*token*.json
 **/*secret*.json
 **/client_secret*.json

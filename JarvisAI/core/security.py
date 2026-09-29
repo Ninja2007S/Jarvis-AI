@@ -55,12 +55,22 @@ LOG_FILE   = LOG_DIR / "audit_log.jsonl"
 _GENESIS   = "0" * 64
 
 _log_cb: Optional[Callable[[str], None]] = None
+_voice_id_required_cb: Optional[Callable[[], bool]] = None
+_voice_id_verifier_cb: Optional[Callable[[], bool]] = None
+_manual_user_turn = False
+_manual_user_turn_lock = threading.Lock()
 
 
-def bind(logger: Callable[[str], None] | None = None) -> None:
-    """Wire this module to the HUD's log line. Call once from main.py."""
-    global _log_cb
+def bind(
+    logger: Callable[[str], None] | None = None,
+    voice_id_required: Callable[[], bool] | None = None,
+    voice_id_verifier: Callable[[], bool] | None = None,
+) -> None:
+    """Wire logging and optional owner-speaker checks from main.py."""
+    global _log_cb, _voice_id_required_cb, _voice_id_verifier_cb
     _log_cb = logger
+    _voice_id_required_cb = voice_id_required
+    _voice_id_verifier_cb = voice_id_verifier
 
 
 def _log(msg: str) -> None:
@@ -213,11 +223,34 @@ _untrusted_content_active = False
 _untrusted_lock = threading.Lock()
 
 
-def mark_user_turn_started() -> None:
-    """Call at the start of handling a fresh user utterance/text command."""
-    global _untrusted_content_active
+def mark_user_turn_started(voice_verified: bool | None = None) -> None:
+    """Mark a fresh turn; trusted manual text/paired-device input may pass True."""
+    global _untrusted_content_active, _manual_user_turn
     with _untrusted_lock:
         _untrusted_content_active = False
+    with _manual_user_turn_lock:
+        _manual_user_turn = voice_verified is True
+
+
+def _voice_id_is_required() -> bool:
+    if _voice_id_required_cb is None:
+        return False
+    try:
+        return bool(_voice_id_required_cb())
+    except Exception:
+        return True
+
+
+def _voice_id_authorized() -> bool:
+    with _manual_user_turn_lock:
+        if _manual_user_turn:
+            return True
+    if _voice_id_verifier_cb is None:
+        return False
+    try:
+        return bool(_voice_id_verifier_cb())
+    except Exception:
+        return False
 
 
 def mark_untrusted_seen() -> None:
@@ -360,6 +393,21 @@ def guard(name: str, params: dict, run: Callable[[], str]) -> str:
         return (f"I'm not doing '{name}' — that state change seems to be coming from "
                 f"something I just read rather than from you directly. Ask me for "
                 f"it yourself if you want it done.")
+
+    # When Voice ID is enabled, verify the recent microphone audio before
+    # allowing a SENSITIVE action to run immediately. DANGEROUS actions still
+    # go to the confirmation panel; spoken approval is separately identity-
+    # checked in main.py, while a deliberate click remains the manual fallback.
+    # Typed commands and authenticated paired-phone commands are marked as
+    # deliberate manual input by main.py.
+    if tier == TIER_SENSITIVE and _voice_id_is_required():
+        if not _voice_id_authorized():
+            audit("call", name, tier, "denied", "Voice ID did not match or was unavailable")
+            _log(f"VOICE ID blocked '{name}' — no owner speaker match.")
+            return (
+                f"I have not done '{_confirmation_label(name)}' because Voice ID could not "
+                "verify the owner. Try again in your own voice or use the manual control."
+            )
 
     # 2) rate limit — independent of confirmation, catches loops.
     limited = _rate_check(tier)
