@@ -39,10 +39,30 @@ It can:
 * 🎨 Display an animated holographic-style avatar
 * 🛡️ Apply security controls before executing sensitive actions
 * 💬 Communicate naturally through voice
+* 🌍 Open a rotating Earth globe in the desktop HUD and locate named places worldwide
 
 The goal is simple:
 
 > **Build a personal AI that lives on your computer instead of inside a browser tab.**
+
+## 🌍 Earth Globe and Place Lookup
+
+Ask JARVIS **“show me the Earth”** to open the animated globe in the existing
+desktop HUD. Ask **“locate Kandy, Sri Lanka”** or **“show Tokyo on the globe”**
+to center the globe on a city, landmark, or country and mark its position. You
+can also enter a place in the HUD, drag the globe to pan, and pause or resume
+rotation. This feature stays in the PyQt desktop window; it does not launch a
+browser.
+
+Place lookup needs an internet connection and uses OpenStreetMap's Nominatim
+service only when a place is submitted. The submitted place name is sent to
+OpenStreetMap; searches are rate-limited to one request per second and successful
+results are cached in memory for the current run. There is no autocomplete.
+OpenStreetMap attribution appears in the globe panel. The drawn continents are
+illustrative, while the pin is based on the returned geographic coordinates, so
+the display is a place finder rather than a street-level or navigation map.
+Place coverage depends on OpenStreetMap data; it cannot guarantee that every
+address or named location worldwide will resolve.
 
 ---
 
