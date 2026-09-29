@@ -100,6 +100,7 @@ _TIERS: dict[str, str] = {
     # read-only / informational
     "web_search":       TIER_SAFE,
     "weather_report":   TIER_SAFE,
+    "earth_globe":      TIER_SAFE,
     "battery_status":   TIER_SAFE,
     "system_status":    TIER_SAFE,
     "system_monitor":   TIER_SAFE,

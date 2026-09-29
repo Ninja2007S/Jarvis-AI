@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
+from core.earth_globe import EarthGlobePanel
 
 try:
     from core.avatar import HoloAvatar
@@ -2958,6 +2959,7 @@ class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
+    _earth_sig      = pyqtSignal(str)         # destination, empty means rotating Earth
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
@@ -3073,6 +3075,11 @@ class MainWindow(QMainWindow):
         self._hud_cam_stack = QStackedWidget()
         self._hud_cam_stack.addWidget(self.hud)
         self._hud_cam_stack.addWidget(_cam_cont)
+        self._earth_panel = EarthGlobePanel()
+        self._earth_panel.close_requested.connect(self._close_earth)
+        self._hud_cam_stack.addWidget(self._earth_panel)
+        self._earth_open = False
+        self._cam_active = False
 
         self._center_split = QSplitter(Qt.Orientation.Vertical)
         self._center_split.setStyleSheet(f"""
@@ -3118,6 +3125,7 @@ class MainWindow(QMainWindow):
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
         self._content_sig.connect(self._show_content)
+        self._earth_sig.connect(self._show_earth)
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
         self._confirm_sig.connect(self._show_confirm_banner)
@@ -3165,11 +3173,25 @@ class MainWindow(QMainWindow):
 
     # --- Live camera stream in HUD area ------------------------------------
     def _on_cam_stream(self, start: bool) -> None:
+        self._cam_active = bool(start)
         if start:
+            self._earth_open = False
             self._hud_cam_stack.setCurrentIndex(1)
         else:
-            self._hud_cam_stack.setCurrentIndex(0)
             self._cam_live_lbl.clear()
+            if not self._earth_open:
+                self._hud_cam_stack.setCurrentIndex(0)
+
+    def _show_earth(self, destination: str = "") -> None:
+        if self._cam_active:
+            self.stop_camera_stream()
+        self._earth_open = True
+        self._earth_panel.open_view(destination)
+        self._hud_cam_stack.setCurrentWidget(self._earth_panel)
+
+    def _close_earth(self) -> None:
+        self._earth_open = False
+        self._hud_cam_stack.setCurrentIndex(1 if self._cam_active else 0)
 
     def _on_cam_frame(self, data: bytes) -> None:
         px = QPixmap()
@@ -5487,6 +5509,10 @@ class JarvisUI:
     def show_content(self, title: str, text: str):
         """Thread-safe: display content in the panel below the HUD."""
         self._win._content_sig.emit(title[:48], text[:4000])
+
+    def show_earth(self, destination: str = "") -> None:
+        """Thread-safe: show the in-window globe and optionally locate a place."""
+        self._win._earth_sig.emit(str(destination or "")[:160])
 
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.
