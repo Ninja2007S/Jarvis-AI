@@ -61,6 +61,7 @@ _KEY_FILE = _BASE / "config" / "api_keys.json"
 
 FAST = "fast"
 SMART = "smart"
+DEEP = "deep"
 SEARCH = "search"
 LIVE = "live"
 
@@ -69,22 +70,32 @@ LIVE = "live"
 
 _LADDERS = {
     FAST: (
-        LIVE,
-        "gemini-2.5-flash-lite",
-        "gemini-2.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
     ),
 
     SMART: (
-        LIVE,
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+    ),
+
+    # Deep work starts on Pro, then steps down through stable Flash models
+    # when Pro is throttled or unavailable to this API account.
+    DEEP: (
+        "gemini-3.1-pro-preview",
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
     ),
 
     # Grounded search stays on REST because callers need grounding metadata.
     SEARCH: (
-        "gemini-2.5-flash",
-        "gemini-flash-latest",
-        "gemini-2.5-flash-lite",
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
     ),
 }
 
@@ -567,16 +578,17 @@ def _live_call(
 # ---------------------------------------------------------------------------
 
 _COOLDOWN_SECONDS = 300
+_UNAVAILABLE_COOLDOWN_SECONDS = 3600
 
 _cooldown: dict[str, float] = {}
 _cool_lock = threading.Lock()
 
 
-def _cool(model: str) -> None:
+def _cool(model: str, seconds: int = _COOLDOWN_SECONDS) -> None:
     with _cool_lock:
         _cooldown[model] = (
             time.monotonic()
-            + _COOLDOWN_SECONDS
+            + max(1, int(seconds))
         )
 
 
@@ -630,10 +642,13 @@ def _resolve_ladder(tier: str):
     Resolve a tier into an ordered model ladder.
 
     FAST:
-        Live -> flash-lite -> flash
+        Gemini 3.5 Flash-Lite -> Gemini 3.1 Flash-Lite
 
     SMART:
-        Live -> flash -> flash-lite
+        Gemini 3.8 Flash -> progressively smaller Flash models
+
+    DEEP:
+        Gemini 3.1 Pro -> Gemini 3.8 Flash -> progressively smaller Flash models
 
     SEARCH:
         REST grounded models only
@@ -727,6 +742,7 @@ def call(
                 )
 
                 if reply is not None:
+                    print(f"[Gemini] tier={tier} routed to Live model {_live_model()}")
                     return reply
 
                 raise RuntimeError(
@@ -751,17 +767,25 @@ def call(
             if effective_config is not None:
                 kwargs["config"] = effective_config
 
-            return rest_client.models.generate_content(
+            response = rest_client.models.generate_content(
                 **kwargs
             )
+            print(f"[Gemini] tier={tier} routed to {model}")
+            return response
 
         except Exception as exc:
 
             message = str(exc)
 
+            status_code = (
+                getattr(exc, "code", None)
+                or getattr(exc, "status_code", None)
+            )
             if (
-                "429" in message
-                or "RESOURCE_EXHAUSTED" in message
+                status_code == 429
+                or "429" in message
+                or "RESOURCE_EXHAUSTED" in message.upper()
+                or "RATE LIMIT" in message.upper()
             ):
                 _cool(model)
 
@@ -769,6 +793,20 @@ def call(
                     f"[Gemini] {model}: out of quota — "
                     f"skipping it for "
                     f"{_COOLDOWN_SECONDS // 60} minutes"
+                )
+
+            elif (
+                status_code in (403, 404)
+                or "PERMISSION_DENIED" in message.upper()
+                or "MODEL NOT FOUND" in message.upper()
+                or "NOT SUPPORTED" in message.upper()
+                or "BILLING" in message.upper()
+                or "DOES NOT HAVE ACCESS" in message.upper()
+            ):
+                _cool(model, _UNAVAILABLE_COOLDOWN_SECONDS)
+                print(
+                    f"[Gemini] {model}: unavailable for this API key; "
+                    "skipping it for 60 minutes"
                 )
 
             else:
@@ -779,7 +817,7 @@ def call(
                 )
 
     print(
-        "[Gemini] every model in the selected ladder failed"
+        f"[Gemini] every model in the selected {tier!r} ladder failed"
     )
 
     return None

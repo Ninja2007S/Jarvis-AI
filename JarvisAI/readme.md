@@ -120,6 +120,35 @@ Install or enable the detector from **⚙ → WAKE WORD**. The feature is unavai
 
 When wake-word mode is enabled and Jarvis is asleep, clap twice to wake it. Jarvis then gives the wake greeting, tells you the local date and time, and reads every retrieved Newsfirst/Ada Derana news topic. Startup briefings do the same when Morning Brief is enabled. JARVIS remembers whether the user's latest clearly recognized speech was Sinhala or English in local memory and speaks the briefing in that language, translating headlines and context where needed. The clap detector runs locally; its audio stays on the computer.
 
+## 🧠 Task-Aware Model Routing
+
+JARVIS chooses a model tier based on the work. Ordinary voice conversation stays
+on the low-latency Live session. Difficult open-ended questions can be handed to
+the `deep_reasoning` plugin; code generation and developer-agent work use the
+deep tier; routine classification uses the fast tier; and grounded web searches
+use the search tier. The deep tier starts with Gemini 3.1 Pro Preview and falls
+back through Gemini Flash models if a model is throttled or unavailable. Google
+currently lists Pro Preview as a paid-tier model, so check its [model and billing
+requirements](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview)
+before using it. If your key cannot use Pro, JARVIS cools that model and routes
+deep work through Flash instead.
+
+One-shot Gemini calls keep a per-model cooldown after a `429`/quota response and
+try the next model in that task's ladder. If the always-on Live model is
+rate-limited, JARVIS reconnects on a lower-cost native-audio model, then tries
+the next configured Live option if needed. The most recent completed transcript
+is carried into the replacement session; the Live resumption token itself is
+not reused across models. A switch briefly interrupts audio. If the Google
+project or API key has exhausted a quota shared by all available models, model
+switching cannot bypass that account-wide limit. Gemini 3.8 Live is skipped
+when proactive audio is disabled because that model keeps proactive audio on;
+Google bills input while the Live session listens, so model fallback may change
+usage costs.
+
+Model ladders are maintained in `core/gemini.py`; the Live fallback list and
+cooldown are in `main.py`. Google can change model availability and quotas, so
+an individual fallback only works if that model is enabled for your API key.
+
 ---
 
 # 🛡️ Security Architecture
@@ -918,6 +947,7 @@ All discovered capabilities are passed through the security layer before executi
 | Plugin                | What it does                                   | Setup needed            |
 | --------------------- | ---------------------------------------------- | ----------------------- |
 | 📧 `email_gmail`      | Read, search, and send Gmail                   | Google OAuth            |
+| 🧠 `deep_reasoning`   | Delegate complex questions to the deep model tier | Gemini API            |
 | 📅 `calendar_google`  | List, check, and create Google Calendar events | Google OAuth            |
 | 📞 `phone_call`       | Answer calls and capture caller messages       | Twilio                  |
 | 📷 `instagram_account` | Read Instagram DMs, send/reply, publish and schedule image posts | Meta Instagram API + Professional account |

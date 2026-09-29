@@ -19,15 +19,15 @@ MAX_FIX_ATTEMPTS = 5
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from core import gemini
 
-MODEL_PLANNER    = gemini.SMART
-MODEL_WRITER     = gemini.SMART
+MODEL_PLANNER    = gemini.DEEP
+MODEL_WRITER     = gemini.DEEP
 
 def _get_api_key() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)["gemini_api_key"]
 
 
-def _get_model(model_name: str = gemini.SMART):
+def _get_model(model_name: str = gemini.DEEP):
     """Planning and writing whole files — the reasoning tier, and a long
     deadline because the answer is a source file rather than a sentence."""
     class _W:

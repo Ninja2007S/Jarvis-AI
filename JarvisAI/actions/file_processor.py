@@ -217,7 +217,8 @@ def _process_pdf(path: Path, action: str, params: dict, speak=None) -> str:
             "reformat":       f"Reformat this text cleanly with proper structure:\n\n{text}",
         }
         try:
-            model    = _gemini_client()
+            tier     = gemini.DEEP if action == "analyze" else gemini.SMART
+            model    = _gemini_client(tier=tier)
             response = model.generate_content(prompt_map.get(action, f"Analyze:\n\n{text}"))
             result   = response.text.strip()
             if len(result) > 600 and params.get("save", True):
@@ -513,7 +514,8 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
         prompt = prompt_map[action]
 
     try:
-        model    = _gemini_client()
+        tier     = gemini.DEEP if action in {"review", "fix", "optimize", "test"} else gemini.SMART
+        model    = _gemini_client(tier=tier)
         response = model.generate_content(prompt)
         result   = response.text.strip()
 

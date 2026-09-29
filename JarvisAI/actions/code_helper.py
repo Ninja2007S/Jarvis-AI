@@ -30,9 +30,8 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
-def _get_gemini(tier: str = gemini.SMART):
-    """Writing and fixing code is the reasoning tier; a 60s deadline because a
-    whole file can come back."""
+def _get_gemini(tier: str = gemini.DEEP):
+    """Code generation, edits, fixes, and builds use the deep reasoning tier."""
     class _W:
         def generate_content(self, contents):
             resp = gemini.call(contents, tier=tier, timeout_ms=60000)
@@ -154,7 +153,7 @@ def _detect_intent(description: str, file_path: str, code: str) -> str:
                 "  optimize     = refactor / clean up / speed up existing code\n\n"
                 "Reply with ONLY the intent word, nothing else."
             )
-            ans = _get_gemini().generate_content(prompt).text.strip().lower()
+            ans = _get_gemini(gemini.FAST).generate_content(prompt).text.strip().lower()
             ans = ans.strip("`'\". \n")
             if ans in _VALID_INTENTS:
                 return ans
@@ -501,7 +500,7 @@ Be specific and actionable. If you see an error message, quote it exactly."""
             analysis_prompt,
         ]
 
-        response = gemini.call(contents, tier=gemini.SMART, timeout_ms=45_000)
+        response = gemini.call(contents, tier=gemini.DEEP, timeout_ms=45_000)
         if response is None:
             return "Sir, I couldn't reach Gemini to analyse that screenshot."
 

@@ -99,6 +99,7 @@ TIER_SAFE, TIER_SENSITIVE, TIER_DANGEROUS = "SAFE", "SENSITIVE", "DANGEROUS"
 _TIERS: dict[str, str] = {
     # read-only / informational
     "web_search":       TIER_SAFE,
+    "deep_reasoning":   TIER_SAFE,
     "weather_report":   TIER_SAFE,
     "earth_globe":      TIER_SAFE,
     "battery_status":   TIER_SAFE,
