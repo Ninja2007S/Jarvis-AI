@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from core import injection_guard
 
@@ -259,6 +260,126 @@ def _ddg_news(
     return results
 
 
+# ── Sri Lankan publisher news ────────────────────────────────────────────────
+
+_SRI_LANKA_NEWS_SOURCES = (
+    {
+        "label": "Newsfirst — English",
+        "query": "site:english.newsfirst.lk/latest latest Sri Lanka news",
+        "hosts": {"english.newsfirst.lk"},
+    },
+    {
+        "label": "Newsfirst — Sinhala",
+        "query": "site:newsfirst.lk/sinhala/latest ශ්‍රී ලංකාවේ අද පුවත්",
+        "hosts": {"newsfirst.lk"},
+        "path_prefix": "/sinhala/",
+    },
+    {
+        "label": "Ada Derana — English",
+        "query": "site:adaderana.lk Sri Lanka latest news",
+        "hosts": {"adaderana.lk", "www.adaderana.lk"},
+    },
+    {
+        "label": "Ada Derana — Sinhala",
+        "query": "site:sinhala.adaderana.lk ශ්‍රී ලංකාවේ අද පුවත්",
+        "hosts": {"sinhala.adaderana.lk"},
+    },
+)
+
+
+def _sri_lanka_news(_query: str = "") -> str:
+    """Return recent headlines from both language editions of two local outlets."""
+    sections = []
+    seen_urls = set()
+
+    # Search the four editions concurrently. A shared deadline keeps the
+    # morning briefing from waiting four times for the search provider.
+    source_results = [None] * len(_SRI_LANKA_NEWS_SOURCES)
+
+    def _fetch_source(index: int, source: dict) -> None:
+        try:
+            source_results[index] = _ddg_search(
+                source["query"],
+                max_results=5,
+            )
+        except Exception as e:
+            print(f"[WebSearch] Sri Lankan source search failed: {e}")
+            source_results[index] = []
+
+    workers = [
+        threading.Thread(
+            target=_fetch_source,
+            args=(index, source),
+            daemon=True,
+        )
+        for index, source in enumerate(_SRI_LANKA_NEWS_SOURCES)
+    ]
+    for worker in workers:
+        worker.start()
+
+    deadline = time.monotonic() + 5.5
+    for worker in workers:
+        worker.join(max(0.0, deadline - time.monotonic()))
+
+    for index, source in enumerate(_SRI_LANKA_NEWS_SOURCES):
+        results = source_results[index] or []
+
+        accepted = []
+        for result in results:
+            url = result.get("url", "").strip()
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower()
+            path_prefix = source.get("path_prefix")
+
+            # Search results are untrusted. Keep links on the named publisher
+            # and on HTTPS before presenting them as that publisher's stories.
+            if (
+                parsed.scheme != "https"
+                or host not in source["hosts"]
+                or (path_prefix and not parsed.path.startswith(path_prefix))
+                or url in seen_urls
+            ):
+                continue
+
+            title = " ".join(result.get("title", "").split())
+            if not title:
+                continue
+
+            seen_urls.add(url)
+            snippet = " ".join(result.get("snippet", "").split())
+            accepted.append((title, snippet, url))
+            if len(accepted) == 3:
+                break
+
+        if accepted:
+            lines = [source["label"]]
+            for title, snippet, url in accepted:
+                lines.append(f"• {title}")
+                if snippet:
+                    lines.append(f"  {snippet[:220]}")
+                lines.append(f"  Source: {url}")
+            sections.append("\n".join(lines))
+        else:
+            sections.append(f"{source['label']}: no headlines found right now.")
+
+    if not seen_urls:
+        return "No Sri Lankan headlines were found from Newsfirst or Ada Derana right now."
+
+    return (
+        "Sri Lankan local news — Newsfirst and Ada Derana, English and Sinhala\n\n"
+        + "\n\n".join(sections)
+    )
+
+
+def _is_sri_lanka_news_request(query: str) -> bool:
+    q = (query or "").casefold()
+    return any(term in q for term in (
+        "sri lanka", "sri lankan", "srilanka", "local news",
+        "newsfirst", "news first", "ada derana", "sinhalese news",
+        "sinhala news", "ශ්‍රී ලංකා", "පුවත්",
+    ))
+
+
 # ── Formatting ───────────────────────────────────────────────────────────────
 
 
@@ -437,6 +558,16 @@ def _news(query: str) -> str:
     DDG is preferred for fast headline retrieval.
     Gemini is only used when DDG returns insufficient results.
     """
+    if _is_sri_lanka_news_request(query):
+        local_news = _run_bounded(
+            lambda: _sri_lanka_news(query),
+            timeout=7.0,
+            label="Sri Lankan news",
+        )
+        if local_news and not local_news.startswith("No Sri Lankan headlines"):
+            return local_news
+        return local_news or "Sri Lankan news could not be fetched right now."
+
     gemini_query = (
         f"latest news today: {query}"
         if query
@@ -687,6 +818,8 @@ TOOL = {
         "Searches the web. Use for ANY question about current facts, "
         "events, prices, or topics — always prefer this over guessing. "
         "Modes: 'search' (default), 'news' (latest headlines on a topic), "
+        "For Sri Lankan local news, use news mode and return headlines from "
+        "Newsfirst and Ada Derana in both English and Sinhala when available. "
         "'research' (deep comprehensive answer), 'price' (product cost "
         "lookup), 'compare' (side-by-side comparison of items)."
     ),

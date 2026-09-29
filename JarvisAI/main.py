@@ -1825,7 +1825,11 @@ class JarvisLive:
 
         # Start fetching news immediately — runs in parallel while phase 1 plays
         loop = asyncio.get_event_loop()
-        news_future = loop.run_in_executor(None, _fetch_news_sync, "top world news today")
+        news_future = loop.run_in_executor(
+            None,
+            _fetch_news_sync,
+            "Sri Lankan local news from Newsfirst and Ada Derana in Sinhala and English",
+        )
 
         await asyncio.sleep(0.3)
         if not self.session:
@@ -1854,7 +1858,7 @@ class JarvisLive:
             )
 
         p1 = (
-            f"Greet the user warmly, mention it is {time_str}, and say you are fetching today's news now.{session_clause} "
+            f"Greet the user warmly, mention it is {time_str}, and say you are fetching today's Sri Lankan news now.{session_clause} "
             f"Keep it to 2 short sentences max. Do not call any tools.{lang_clause}{name_clause}"
         )
 
@@ -1905,14 +1909,20 @@ class JarvisLive:
                     return
 
                 failed = (not news_text) or news_text.startswith(
-                    ("No news found", "Search failed", "Please provide")
+                    (
+                        "No news found",
+                        "No Sri Lankan headlines",
+                        "Sri Lankan news could not be fetched",
+                        "Search failed",
+                        "Please provide",
+                    )
                 )
                 if not failed:
                     # Show on UI content panel immediately
-                    self.ui.show_content("NEWS — top world news today", news_text)
+                    self.ui.show_content("SRI LANKA NEWS — Newsfirst + Ada Derana", news_text)
 
                     p2 = (
-                        f"[BRIEFING] Here are today's top news headlines:\n{news_text}\n\n"
+                        f"[BRIEFING] Here are today's Sri Lankan news headlines from Newsfirst and Ada Derana, in English and Sinhala where available:\n{news_text}\n\n"
                         "Pick ONE headline, summarise it in one sentence, then say the full list "
                         f"is displayed on screen. Do not call any tools.{lang_str}"
                     )
