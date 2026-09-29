@@ -4139,6 +4139,11 @@ class MainWindow(QMainWindow):
         self._voice_id_btn.setToolTip(
             "Click to set up or toggle speaker checks. Right-click to re-enroll or remove the profile."
         )
+        if _OS != "Windows":
+            self._voice_id_btn.setEnabled(False)
+            self._voice_id_btn.setToolTip(
+                "Voice ID profile encryption currently uses Windows DPAPI and is only available on Windows."
+            )
         self._voice_id_btn.clicked.connect(self._toggle_voice_id)
         self._voice_id_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._voice_id_btn.customContextMenuRequested.connect(self._voice_id_menu)

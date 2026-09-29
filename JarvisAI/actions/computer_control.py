@@ -51,7 +51,9 @@ def _platform_os() -> str:
     )
 
 def _get_os() -> str:
-    return _load_config().get("os_system", _platform_os()).lower()
+    # The config may have been copied from a different computer. Keyboard
+    # modifiers and launch commands must match this host, not that saved value.
+    return _platform_os()
 
 
 def _get_api_key() -> str:

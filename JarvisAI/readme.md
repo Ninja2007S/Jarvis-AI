@@ -1119,17 +1119,17 @@ Jarvis supports:
 
 Jarvis includes a phone dashboard that can display assistant status and send remote commands while the computer remains the primary system.
 
-JARVIS continues to run as its existing Windows/PyQt desktop application. Phone access uses the project's mobile dashboard in the phone browser; it does not replace the desktop UI.
+JARVIS continues to run as its native PyQt desktop application on the computer. Phone access uses the project's mobile dashboard in the phone browser; it does not replace the desktop UI.
 
-The dashboard listens only on `127.0.0.1:8000`. Tailscale Serve can provide a private HTTPS URL to devices in your tailnet without router port forwarding or changes to the Windows firewall. Tailscale Serve is available only within the tailnet; do not use Tailscale Funnel for this dashboard. See the [Tailscale Serve guide](https://tailscale.com/docs/features/tailscale-serve) and [Serve CLI reference](https://tailscale.com/docs/reference/tailscale-cli/serve).
+The dashboard listens only on `127.0.0.1:8000`. Tailscale Serve can provide a private HTTPS URL to devices in your tailnet without router port forwarding or opening a public port. Tailscale Serve is available only within the tailnet; do not use Tailscale Funnel for this dashboard. See the [Tailscale Serve guide](https://tailscale.com/docs/features/tailscale-serve) and [Serve CLI reference](https://tailscale.com/docs/reference/tailscale-cli/serve).
 
 ## 1. Install and connect Tailscale
 
-Install Tailscale on the Windows PC and phone, and sign both devices into the same tailnet. Enable HTTPS certificates for the tailnet when prompted. Keep the PC and JARVIS running while you use the phone dashboard.
+Install Tailscale on the computer and phone, and sign both devices into the same tailnet. Enable HTTPS certificates for the tailnet when prompted. Keep the computer and JARVIS running while you use the phone dashboard.
 
 ## 2. Serve the local dashboard privately
 
-Start JARVIS on the PC and read the dashboard listener URL from its startup log. Open PowerShell and run the matching command. The `--bg` option leaves Serve running in the background.
+Start JARVIS and read the dashboard listener URL from its startup log. In PowerShell, Terminal, or a Linux shell, run the matching command. The `--bg` option leaves Serve running in the background.
 
 ```powershell
 # If JARVIS reports http://127.0.0.1:8000:
@@ -1145,7 +1145,7 @@ Use the HTTPS `*.ts.net` hostname shown by `tailscale serve status` in the next 
 
 ## 3. Configure JARVIS's remote pairing URL
 
-Replace the example hostname with the exact root HTTPS hostname from `tailscale serve status`. Do not append a path, query, or fragment. Run this once in PowerShell:
+Replace the example hostname with the exact root HTTPS hostname from `tailscale serve status`. Do not append a path, query, or fragment. On Windows, set it persistently in PowerShell:
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
@@ -1155,7 +1155,17 @@ Replace the example hostname with the exact root HTTPS hostname from `tailscale 
 )
 ```
 
-Close and restart JARVIS so the desktop process receives the new environment variable. JARVIS reads this setting at startup. If the Tailscale hostname changes, update this value and restart JARVIS again.
+On macOS/Linux, export it in the same Terminal session used to start JARVIS:
+
+```bash
+export JARVIS_REMOTE_URL='https://your-pc.your-tailnet.ts.net'
+python main.py
+```
+
+For a desktop-launched process on macOS/Linux, add the export to the shell's
+startup file and fully quit/reopen the desktop session or launch JARVIS from
+that shell. JARVIS reads this setting at startup. If the Tailscale hostname
+changes, update the variable and restart JARVIS.
 
 ## 4. Pair the phone
 
@@ -1167,14 +1177,18 @@ The dashboard backend supports an authenticated `POST /api/revoke-devices` reque
 
 ## 5. Stop remote access
 
-To clear the Tailscale Serve configuration on this PC, run:
+To clear the Tailscale Serve configuration on this computer, run:
 
 ```powershell
 tailscale serve reset
 [Environment]::SetEnvironmentVariable('JARVIS_REMOTE_URL', $null, 'User')
 ```
 
-`tailscale serve reset` clears all Serve configuration on this PC, including any other services configured with Tailscale Serve. Restart JARVIS after clearing `JARVIS_REMOTE_URL`. The dashboard remains available to the desktop app locally, but remote pairing is disabled.
+On macOS/Linux, run `tailscale serve reset` and `unset JARVIS_REMOTE_URL` in the
+launching shell. Also remove any persistent export you added to a shell startup
+file.
+
+`tailscale serve reset` clears all Serve configuration on this computer, including any other services configured with Tailscale Serve. Restart JARVIS after clearing `JARVIS_REMOTE_URL`. The dashboard remains available to the desktop app locally, but remote pairing is disabled.
 
 ---
 
@@ -1431,44 +1445,98 @@ JarvisAI/
 
 # ⚡ Quick Start
 
-## 1. Clone the repository
+JARVIS is a native PyQt desktop app. Use a separate virtual environment for it,
+and use Python **3.11–3.13** (3.12 is the recommended choice). Run commands from
+the inner `JarvisAI` source folder, which contains `main.py` and `setup.py`.
 
-```bash
+## Windows 10/11
+
+Install Python 3.12 and Git, then open PowerShell:
+
+```powershell
 git clone https://github.com/Ninja2007S/Jarvis-AI.git
-cd JarvisAI
-```
-
-## 2. Install dependencies
-
-```bash
+cd Jarvis-AI\JarvisAI
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 python setup.py
-```
-
-Or manually:
-
-```bash
-pip install -r requirements.txt
-```
-
-The setup process detects your operating system and installs the relevant dependencies.
-
-## 3. Start Jarvis
-
-```bash
 python main.py
 ```
 
-## 4. Add your Gemini API key
+If PowerShell blocks virtual-environment activation, open Command Prompt and
+use `.venv\Scripts\activate.bat`, then continue with the `python` commands.
 
-On first launch, enter your Gemini API key.
+## macOS
 
-It will be stored locally in:
+Install Xcode Command Line Tools (`xcode-select --install`), Git, and Homebrew.
+Then in Terminal:
 
-```text
-config/api_keys.json
+```bash
+brew install python@3.12 portaudio
+git clone https://github.com/Ninja2007S/Jarvis-AI.git
+cd Jarvis-AI/JarvisAI
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python setup.py
+python main.py
 ```
 
-## 5. Configure optional integrations
+On first use, allow microphone access. macOS may also ask for Camera, Screen
+Recording, or Accessibility permission when you use those features. Grant them
+to the app that launches JARVIS (for example, Terminal or VS Code) in **System
+Settings → Privacy & Security**. Push-to-talk works while the JARVIS window is
+focused; this app does not install a global keyboard hook on macOS.
+
+## Linux (Ubuntu/Debian example)
+
+Use a graphical desktop session. Install the system libraries before pip
+dependencies:
+
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-tk python3-dev \
+  libportaudio2 libxcb-cursor0 libxkbcommon-x11-0 libegl1 libgl1 \
+  xdg-utils pulseaudio-utils
+python3 --version  # continue only if this is Python 3.11–3.13
+git clone https://github.com/Ninja2007S/Jarvis-AI.git
+cd Jarvis-AI/JarvisAI
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python setup.py
+python main.py
+```
+
+If your distribution's default Python is older than 3.11 or newer than 3.13,
+install a supported Python release using that distribution's official package
+source before creating the environment. On Fedora or another distribution,
+install the matching Python venv/Tk, PortAudio, Qt/X11 runtime, and desktop
+URL-opener packages with its package manager first.
+
+JARVIS desktop automation is most complete in an X11 session. On Wayland,
+screen capture and global mouse/keyboard automation can be restricted by the
+compositor; some actions may work only in the focused window. Linux volume
+controls use PulseAudio-compatible `pactl` (including PipeWire's PulseAudio
+compatibility service). Brightness control is optional and uses `brightnessctl`
+when installed.
+
+## All operating systems
+
+`setup.py` installs the Python requirements and Playwright Chromium/Firefox for
+the current OS. To install only Python packages manually, use
+`python -m pip install -r requirements.txt` in the active virtual environment.
+On first launch, enter your Gemini API key; it is stored locally in
+`config/api_keys.json`.
+
+Voice ID enrollment currently uses Windows DPAPI and is disabled on macOS/Linux.
+It does not prevent using the assistant's other security controls. GPU
+utilization is shown only when a supported NVIDIA driver/NVML library is
+available. Computer control, screenshots, camera access, audio devices, and
+system settings depend on the host OS, desktop session, permissions, and
+installed native tools.
+
+## Configure optional integrations
 
 ### Email & Calendar
 

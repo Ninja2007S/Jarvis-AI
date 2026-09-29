@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import platform
 import sys
 from pathlib import Path
 
@@ -62,7 +63,9 @@ def _save_config_key(key: str, value) -> None:
 
 
 def _get_os() -> str:
-    return _load_config().get("os_system", "windows").lower()
+    return {"Windows": "windows", "Darwin": "mac", "Linux": "linux"}.get(
+        platform.system(), "linux"
+    )
 
 
 _IMG_MAX_W = 1280
