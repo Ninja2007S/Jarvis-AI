@@ -38,6 +38,7 @@ It can:
 * 📱 Provide a remote dashboard for your phone
 * 🎨 Display an animated holographic-style avatar
 * 🛡️ Apply security controls before executing sensitive actions
+* 🩺 Self-Healing System Version 1: read-only checks and approval-gated repairs
 * 💬 Communicate naturally through voice
 * 🌍 Explore a rotating satellite globe, zoom to cities, and plot driving routes in the desktop HUD
 
@@ -145,6 +146,7 @@ core/security.py
 core/injection_guard.py
 core/confirm.py
 core/sandbox.py
+actions/self_heal.py
 security/audit_log.jsonl
 ```
 
@@ -157,7 +159,7 @@ Every tool or action is classified into one of three risk tiers.
 | Tier          | Description                                       | Examples                                                                              |
 | ------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | **SAFE**      | Read-only or trivially reversible                 | `web_search`, `weather_report`, `battery_status`, `quiz`, `recall_memory`             |
-| **SENSITIVE** | Changes system state but is generally reversible  | `save_memory`, `open_app`, `send_message`, `file_processor`, `home_automation`        |
+| **SENSITIVE** | Changes system state but is generally reversible  | `save_memory`, `open_app`, `send_message`, `file_processor`, `home_automation`, `self_heal` |
 | **DANGEROUS** | Irreversible, high-impact, or OS-level operations | `code_helper`, `file_controller`, `computer_control`, `shutdown_jarvis`, `phone_call` |
 
 Unknown tools are **never automatically treated as SAFE**.
@@ -253,6 +255,33 @@ Actions routed through the confirmation gate include operations such as:
 * Other actions classified as dangerous
 
 You can approve or cancel a pending request by clicking **CONFIRM** or **CANCEL** on the HUD, or by saying **"confirm action"** or **"cancel action"**. Voice phrases are accepted only while a confirmation is pending; a plain "yes" is not enough. With Voice ID enabled, spoken confirmation also requires a local speaker match.
+
+### Self-Healing System — Version 1
+
+Version 1 is a deliberately limited first release, not a full automatic
+self-repair system. Ask JARVIS to **run a health check** for a read-only report
+of supported Python dependencies, the Python version, and common native tools.
+The check does not change files or install anything.
+
+If an allowlisted Python dependency is missing, ask JARVIS to repair that one
+dependency. JARVIS displays the exact package, purpose, and Python environment
+in the normal confirmation prompt. **Every repair is a separate approval** by
+HUD click or the configured voice-confirmation flow. Canceling or letting the
+prompt expire does nothing. There is no automatic repair, batch installation,
+arbitrary command, administrator privilege request, or silent retry. Approved
+package repairs are recorded in the security audit ledger and require a JARVIS
+restart before the affected feature is used.
+
+This recovery set covers only missing allowlisted Python packages declared by
+the project. It cannot repair OS libraries, hardware or permission problems,
+damaged user data, or every runtime error; those need manual review.
+
+Broader recovery capabilities are planned for future versions. They are being
+staged separately because repairs that restart services, change operating-system
+settings, or modify user data need their own safety checks and approval flows.
+Future versions will not silently inherit permission to perform those actions;
+each newly supported repair must be reviewed and must request your approval
+before it changes anything.
 
 ### Optional Voice ID
 

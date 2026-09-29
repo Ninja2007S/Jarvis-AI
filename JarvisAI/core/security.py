@@ -127,6 +127,9 @@ _TIERS: dict[str, str] = {
     "browser_control":  TIER_DANGEROUS,
     "desktop":          TIER_DANGEROUS,
     "file_processor":   TIER_SENSITIVE,
+    # Health checks are read-only; actual repairs have their own individual
+    # confirmation inside actions/self_heal.py. Keep provenance/rate controls.
+    "self_heal":        TIER_SENSITIVE,
 
     # writes/executes code or touches the filesystem/OS broadly — DANGEROUS
     "code_helper":        TIER_DANGEROUS,
@@ -157,6 +160,7 @@ _CONFIRMATION_LABELS = {
     "game_updater": "Game update",
     "phone_call": "Place a phone call",
     "shutdown_jarvis": "Close Jarvis",
+    "self_heal": "JARVIS self-repair",
 }
 
 _CONFIRMATION_PARAM_LABELS = {
@@ -175,6 +179,8 @@ _CONFIRMATION_PARAM_LABELS = {
     "command": "Command",
     "value": "Value",
     "game": "Game",
+    "module": "Package",
+    "operation": "Recovery step",
 }
 
 
