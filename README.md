@@ -1769,7 +1769,7 @@ See the third-party licensing information below.
 
 Jarvis has evolved through multiple phases.
 
-| Mark               | Focus                                                                                     |
+| Phase              | Focus                                                                                     |
 | ------------------ | ----------------------------------------------------------------------------------------- |
 | **Phase 1**        | Auto-start, clipboard intelligence, assistant customization                               |
 | **Phase 2**        | Session memory, background monitoring, proactive intelligence                             |
