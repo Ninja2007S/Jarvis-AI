@@ -2780,18 +2780,48 @@ class JarvisLive:
             await asyncio.sleep(delay)
 
 def main():
-    ui = JarvisUI("face.png")
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QApplication
 
-    def runner():
-        ui.wait_for_api_key()
-        jarvis = JarvisLive(ui)
-        try:
-            asyncio.run(jarvis.run())
-        except KeyboardInterrupt:
-            print("\n🔴 Shutting down...")
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setStyle("Fusion")
+    startup = {"ui": None, "splash": None}
 
-    threading.Thread(target=runner, daemon=True).start()
-    ui.root.mainloop()
+    def launch_jarvis():
+        if startup["ui"] is not None:
+            return
+        splash = startup["splash"]
+        if splash is not None:
+            splash.close()
+
+        ui = JarvisUI("face.png")
+        startup["ui"] = ui
+
+        def runner():
+            ui.wait_for_api_key()
+            jarvis = JarvisLive(ui)
+            try:
+                asyncio.run(jarvis.run())
+            except KeyboardInterrupt:
+                print("\n🔴 Shutting down...")
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    try:
+        from core.startup_video import create_startup_splash
+        splash = create_startup_splash()
+    except Exception as exc:
+        print(f"[Startup] Intro splash disabled: {exc}")
+        splash = None
+
+    startup["splash"] = splash
+    if splash is not None:
+        splash.finished.connect(launch_jarvis)
+        splash.start()
+    else:
+        QTimer.singleShot(0, launch_jarvis)
+
+    app.exec()
 
 if __name__ == "__main__":
     main()

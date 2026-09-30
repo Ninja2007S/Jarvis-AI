@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import sys
 import threading
 import time
@@ -61,40 +62,31 @@ _KEY_FILE = _BASE / "config" / "api_keys.json"
 
 FAST = "fast"
 SMART = "smart"
-DEEP = "deep"
 SEARCH = "search"
 LIVE = "live"
 
 
+# Hosted free-tier quota-first ladder. Gemma 4 is available through the Gemini
+# API and supports the image/function-call workloads used by Jarvis. Flash-Lite
+# models are compatibility fallbacks if Gemma is unavailable for a project.
+_FREE_HIGH_DAILY_LADDER = (
+    "gemma-4-26b-a4b-it",
+    "gemma-4-31b-it",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+)
+
 # Model ladders.
 
 _LADDERS = {
-    FAST: (
-        "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite",
-    ),
+    # Free-tier priority: use the same high-quota models for every one-shot
+    # workload so callers cannot silently spend the low-RPD full-Flash quota.
+    FAST: _FREE_HIGH_DAILY_LADDER,
+    SMART: _FREE_HIGH_DAILY_LADDER,
 
-    SMART: (
-        "gemini-3.8-flash",
-        "gemini-3.7-flash",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash-lite",
-    ),
-
-    # Deep work starts on Pro, then steps down through stable Flash models
-    # when Pro is throttled or unavailable to this API account.
-    DEEP: (
-        "gemini-3.1-pro-preview",
-        "gemini-3.8-flash",
-        "gemini-3.7-flash",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash-lite",
-    ),
-
-    # Grounded search stays on REST because callers need grounding metadata.
+    # Search grounding is skipped by default on free-tier projects below.
     SEARCH: (
         "gemini-3.8-flash",
-        "gemini-3.6-flash",
         "gemini-3.5-flash-lite",
     ),
 }
@@ -102,7 +94,26 @@ _LADDERS = {
 
 # Used when main.py is not imported, such as during tests.
 
-_LIVE_FALLBACK = "models/gemini-3.1-flash-live-preview"
+_LIVE_FALLBACK = "models/gemini-3.8-live"
+
+# Gemini limits are project-wide and vary by account. Pace one-shot calls to
+# avoid bursts, and leave the provider's current limits visible in AI Studio.
+_FREE_TIER = os.environ.get("JARVIS_GEMINI_FREE_TIER", "true").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+_REQUEST_GAP_SECONDS = 4.0
+_request_times: dict[str, float] = {}
+_request_lock = threading.Lock()
+
+
+def _wait_for_request_slot(model: str) -> None:
+    """Apply a conservative per-model request gap for free-tier traffic."""
+    with _request_lock:
+        now = time.monotonic()
+        delay = _request_times.get(model, 0.0) + _REQUEST_GAP_SECONDS - now
+        if delay > 0:
+            time.sleep(delay)
+        _request_times[model] = time.monotonic()
 
 
 # ---------------------------------------------------------------------------
@@ -578,17 +589,16 @@ def _live_call(
 # ---------------------------------------------------------------------------
 
 _COOLDOWN_SECONDS = 300
-_UNAVAILABLE_COOLDOWN_SECONDS = 3600
 
 _cooldown: dict[str, float] = {}
 _cool_lock = threading.Lock()
 
 
-def _cool(model: str, seconds: int = _COOLDOWN_SECONDS) -> None:
+def _cool(model: str) -> None:
     with _cool_lock:
         _cooldown[model] = (
             time.monotonic()
-            + max(1, int(seconds))
+            + _COOLDOWN_SECONDS
         )
 
 
@@ -641,14 +651,8 @@ def _resolve_ladder(tier: str):
     """
     Resolve a tier into an ordered model ladder.
 
-    FAST:
-        Gemini 3.5 Flash-Lite -> Gemini 3.1 Flash-Lite
-
-    SMART:
-        Gemini 3.8 Flash -> progressively smaller Flash models
-
-    DEEP:
-        Gemini 3.1 Pro -> Gemini 3.8 Flash -> progressively smaller Flash models
+    FAST / SMART:
+        quota-first Gemma 4 -> Flash-Lite compatibility fallbacks
 
     SEARCH:
         REST grounded models only
@@ -661,6 +665,11 @@ def _resolve_ladder(tier: str):
 
     if ladder is not None:
         return ladder
+
+    # In free-tier mode, clamp any explicit model request to the quota-first
+    # ladder. This prevents an action from bypassing the shared policy.
+    if _FREE_TIER and tier not in {LIVE, SEARCH}:
+        return _FREE_HIGH_DAILY_LADDER
 
     # Explicit model selection.
     return (
@@ -711,6 +720,12 @@ def call(
         else config
     )
 
+    # Google does not list Search grounding as available on the Gemini 3 free
+    # tier. Search callers have non-Gemini fallbacks, so avoid a rejected call.
+    if tier == SEARCH and _FREE_TIER:
+        print("[Gemini] Search grounding disabled in free-tier mode; using caller fallback")
+        return None
+
     # Skip models currently known to be out of quota.
     tried = [
         model
@@ -718,15 +733,18 @@ def call(
         if not _cooling(model)
     ]
 
-    # If every rung is cooling down, try the ladder anyway. This prevents a
-    # stale cooldown state from permanently disabling Gemini.
+    # Do not hammer a model whose quota is already known to be exhausted.
+    # Cooldowns expire automatically, so retrying now only creates more 429s.
     if not tried:
-        tried = list(ladder)
+        print("[Gemini] every model in this tier is cooling down; skipping request")
+        return None
 
     rest_client = None
 
     for model in tried:
         try:
+            if _FREE_TIER and model != LIVE:
+                _wait_for_request_slot(model)
 
             # ---------------------------------------------------------------
             # Live
@@ -742,7 +760,6 @@ def call(
                 )
 
                 if reply is not None:
-                    print(f"[Gemini] tier={tier} routed to Live model {_live_model()}")
                     return reply
 
                 raise RuntimeError(
@@ -767,25 +784,17 @@ def call(
             if effective_config is not None:
                 kwargs["config"] = effective_config
 
-            response = rest_client.models.generate_content(
+            return rest_client.models.generate_content(
                 **kwargs
             )
-            print(f"[Gemini] tier={tier} routed to {model}")
-            return response
 
         except Exception as exc:
 
             message = str(exc)
 
-            status_code = (
-                getattr(exc, "code", None)
-                or getattr(exc, "status_code", None)
-            )
             if (
-                status_code == 429
-                or "429" in message
-                or "RESOURCE_EXHAUSTED" in message.upper()
-                or "RATE LIMIT" in message.upper()
+                "429" in message
+                or "RESOURCE_EXHAUSTED" in message
             ):
                 _cool(model)
 
@@ -793,20 +802,6 @@ def call(
                     f"[Gemini] {model}: out of quota — "
                     f"skipping it for "
                     f"{_COOLDOWN_SECONDS // 60} minutes"
-                )
-
-            elif (
-                status_code in (403, 404)
-                or "PERMISSION_DENIED" in message.upper()
-                or "MODEL NOT FOUND" in message.upper()
-                or "NOT SUPPORTED" in message.upper()
-                or "BILLING" in message.upper()
-                or "DOES NOT HAVE ACCESS" in message.upper()
-            ):
-                _cool(model, _UNAVAILABLE_COOLDOWN_SECONDS)
-                print(
-                    f"[Gemini] {model}: unavailable for this API key; "
-                    "skipping it for 60 minutes"
                 )
 
             else:
@@ -817,7 +812,7 @@ def call(
                 )
 
     print(
-        f"[Gemini] every model in the selected {tier!r} ladder failed"
+        "[Gemini] every model in the selected ladder failed"
     )
 
     return None

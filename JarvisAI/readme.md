@@ -80,6 +80,9 @@ The panel displays map attribution. OSM tile use follows its [tile policy](https
 
 ---
 
+## Startup Video Intro
+
+JARVIS can play an optional video with embedded sound before opening its native PyQt desktop HUD. Put your clip at `assets/startup_intro.mp4`. The intro has a **SKIP INTRO** button and also skips with **Esc**. If the clip is absent or Qt Multimedia cannot play it, JARVIS opens normally. H.264 video with AAC audio is a practical MP4 format; codec support depends on the installed operating system multimedia backend.
 # 🚀 Core Features
 
 ## 🎙️ Real-Time Voice

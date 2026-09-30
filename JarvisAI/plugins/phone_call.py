@@ -519,7 +519,7 @@ class GeminiLiveSession:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=_get_api_key(), http_options={"api_version": "v1alpha"})
+        client = genai.Client(api_key=_get_api_key(), http_options={"api_version": "v1beta"})
 
         # System prompt for handling an unavailable boss call
         # NOTE: TwiML already says "My boss is currently unavailable right now. Please leave your message..."
@@ -554,7 +554,7 @@ Keep responses concise but friendly. The goal is to get the caller to leave a co
         )
 
         self._context = client.aio.live.connect(
-            model="models/gemini-3.1-flash-live-preview", config=config
+            model="models/gemini-3.8-live", config=config
         )
         self.session = await self._context.__aenter__()
         print(f"[PhoneCall] Started Gemini Live session for call {self.call_sid}")

@@ -60,3 +60,6 @@ desktop.ini
 logs/
 downloads/
 screenshots/
+
+# Optional personal/large startup media
+assets/startup_intro.mp4
