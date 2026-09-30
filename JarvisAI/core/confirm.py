@@ -1,19 +1,6 @@
 """
 core/confirm.py — a confirmation the model cannot forge.
 
-THE PROBLEM WITH THE OLD GATE
-    computer_settings guarded shutdown and restart like this:
-
-        confirmed = str(params.get("confirmed", "")).lower()
-        if confirmed not in ("yes", "true", "1", "confirm"):
-            return "Please confirm by calling again with confirmed=yes."
-
-    `confirmed` is a tool parameter, which means the *model* writes it. Nothing
-    stops it from sending confirmed=yes on the first call, and nothing checks
-    that a human was ever involved. It is a convention, not a gate — and its
-    coverage was two actions, so deleting files and switching off the WiFi the
-    assistant is talking over went through with no gate at all.
-
 THE DESIGN HERE
     The confirmation token is issued by the *interface*, never by the model:
 

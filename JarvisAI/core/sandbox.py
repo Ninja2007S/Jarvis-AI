@@ -16,8 +16,7 @@ WHAT THIS DOES NOT CLAIM TO BE
     This is process-level hygiene, not a real container/VM boundary — it
     will not stop a genuinely malicious binary that exploits the OS itself.
     For that, run Jarvis's code_helper sandbox folder under a separate
-    low-privilege Windows user account (see INTEGRATION_GUIDE.md, "further
-    hardening"), or — if this machine is ever upgraded to Windows 11 Pro —
+    low-privilege Windows user account if this machine is ever upgraded to Windows 11 Pro —
     enable Windows Sandbox, which is free on Pro but not on Home.
 """
 from __future__ import annotations
