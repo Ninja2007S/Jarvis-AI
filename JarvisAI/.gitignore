@@ -3,6 +3,7 @@
 # Secrets and integration credentials. Keep each pattern on its own line:
 # in .gitignore, an inline # is treated as part of the filename pattern.
 config/api_keys.json
+config/api_keys.json.tmp
 config/certs/
 config/whatsapp_web/
 config/google_credentials.json

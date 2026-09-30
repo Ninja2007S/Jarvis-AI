@@ -1529,7 +1529,7 @@ class _CameraPreview(QWidget):
 
 
 class SetupOverlay(QWidget):
-    done = pyqtSignal(str, str)
+    done = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1546,6 +1546,12 @@ class SetupOverlay(QWidget):
             _OS.lower(), "linux"
         )
         self._sel_os = detected
+        try:
+            from core.provider_settings import get_provider_settings
+            provider_settings = get_provider_settings()
+        except Exception:
+            provider_settings = {"provider": "gemini"}
+        self._provider_settings = provider_settings
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 22, 30, 22)
@@ -1563,6 +1569,47 @@ class SetupOverlay(QWidget):
         layout.addWidget(_lbl("◈  INITIALISATION REQUIRED", 13, True))
         layout.addWidget(_lbl("Configure J.A.R.V.I.S. before first boot.", 9, color=C.PRI_DIM))
         layout.addSpacing(6)
+
+        layout.addWidget(_lbl("ONE-SHOT AI PROVIDER", 8, color=C.TEXT_DIM,
+                               align=Qt.AlignmentFlag.AlignLeft))
+        self._provider = QComboBox()
+        self._provider.addItem("Gemini  ·  recommended", "gemini")
+        self._provider.addItem("OpenAI  ·  GPT API", "openai")
+        self._provider.addItem("Anthropic  ·  Claude API", "anthropic")
+        provider_idx = self._provider.findData(provider_settings.get("provider", "gemini"))
+        self._provider.setCurrentIndex(max(0, provider_idx))
+        self._provider.setFixedHeight(32)
+        self._provider.setStyleSheet(f"""
+            QComboBox {{ background: #000d12; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}
+            QComboBox:focus {{ border: 1px solid {C.PRI}; }}
+            QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT};
+                selection-background-color: {C.PRI_DIM}; }}
+        """)
+        layout.addWidget(self._provider)
+        self._provider_note = _lbl(
+            "Gemini remains required for live voice, tool routing, and Google-grounded search.",
+            8, color=C.TEXT_MED, align=Qt.AlignmentFlag.AlignLeft,
+        )
+        self._provider_note.setWordWrap(True)
+        layout.addWidget(self._provider_note)
+
+        self._external_key_label = _lbl("", 8, color=C.TEXT_DIM,
+                                        align=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self._external_key_label)
+        self._external_key_input = QLineEdit()
+        self._external_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._external_key_input.setFont(QFont("Courier New", 10))
+        self._external_key_input.setFixedHeight(32)
+        self._external_key_input.setStyleSheet(f"""
+            QLineEdit {{ background: #000d12; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}
+            QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
+        """)
+        layout.addWidget(self._external_key_input)
+        self._provider.currentIndexChanged.connect(self._update_provider_fields)
+        self._update_provider_fields()
+        layout.addSpacing(4)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep)
@@ -1646,6 +1693,29 @@ class SetupOverlay(QWidget):
                     QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
                 """)
 
+    def _update_provider_fields(self, *_):
+        provider = str(self._provider.currentData() or "gemini")
+        if provider == "openai":
+            self._external_key_label.setText("OPENAI API KEY  ·  OPTIONAL IF ALREADY CONFIGURED")
+            has_key = bool(self._provider_settings.get("has_openai_key"))
+            self._external_key_input.setPlaceholderText(
+                "Saved locally; leave blank to keep it" if has_key else "Paste OpenAI API key"
+            )
+            self._external_key_input.show()
+            self._external_key_label.show()
+        elif provider == "anthropic":
+            self._external_key_label.setText("ANTHROPIC API KEY  ·  OPTIONAL IF ALREADY CONFIGURED")
+            has_key = bool(self._provider_settings.get("has_anthropic_key"))
+            self._external_key_input.setPlaceholderText(
+                "Saved locally; leave blank to keep it" if has_key else "Paste Anthropic API key"
+            )
+            self._external_key_input.show()
+            self._external_key_label.show()
+        else:
+            self._external_key_input.clear()
+            self._external_key_input.hide()
+            self._external_key_label.hide()
+
     def _submit(self):
         key = self._key_input.text().strip()
         if not key:
@@ -1654,7 +1724,26 @@ class SetupOverlay(QWidget):
                 f" QLineEdit {{ border: 1px solid {C.RED}; }}"
             )
             return
-        self.done.emit(key, self._sel_os)
+        provider = str(self._provider.currentData() or "gemini")
+        external_key = self._external_key_input.text().strip()
+        has_key = bool(
+            self._provider_settings.get("has_openai_key" if provider == "openai"
+                                       else "has_anthropic_key")
+        ) if provider in ("openai", "anthropic") else True
+        if provider in ("openai", "anthropic") and not (external_key or has_key):
+            self._external_key_input.setStyleSheet(
+                self._external_key_input.styleSheet() +
+                f" QLineEdit {{ border: 1px solid {C.RED}; }}"
+            )
+            self._provider_note.setText("Enter a key for the selected provider, or configure it in your environment first.")
+            self._provider_note.setStyleSheet(f"color: {C.RED}; background: transparent;")
+            return
+        self.done.emit({
+            "gemini_api_key": key,
+            "os_system": self._sel_os,
+            "provider": provider,
+            "external_api_key": external_key,
+        })
 
 
 class HueWheel(QWidget):
@@ -3215,6 +3304,136 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+class AIProviderOverlay(_HudOverlay):
+    """Choose the provider for one-shot reasoning and keep optional keys local."""
+
+    saved = pyqtSignal(object)
+    _OW, _OH = 520, 510
+
+    def __init__(self, settings: dict, parent=None):
+        super().__init__(parent)
+        self._settings = settings or {}
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            AIProviderOverlay {{
+                background: rgba(5, 12, 17, 250);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 8px;
+            }}
+            QLineEdit, QComboBox {{
+                background: #000d12; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 5px;
+            }}
+        """)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(7)
+
+        def label(text, size=8, color=C.TEXT_DIM, bold=False):
+            item = QLabel(text)
+            item.setFont(QFont("Courier New", size,
+                               QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            item.setStyleSheet(f"color: {color}; background: transparent;")
+            item.setWordWrap(True)
+            return item
+
+        lay.addWidget(label("◈  MODEL PROVIDER", 12, C.PRI, True))
+        lay.addWidget(label(
+            "Selects the provider for one-shot reasoning, coding, and file analysis. "
+            "Live voice, tool routing, and Google-grounded search continue using Gemini. "
+            "Provider usage may be billed by the provider.",
+            8, C.TEXT_MED,
+        ))
+
+        self._provider = QComboBox()
+        for text, value in (
+            ("Gemini  ·  current default", "gemini"),
+            ("OpenAI  ·  GPT API", "openai"),
+            ("Anthropic  ·  Claude API", "anthropic"),
+        ):
+            self._provider.addItem(text, value)
+        current = str(self._settings.get("provider", "gemini"))
+        idx = self._provider.findData(current)
+        self._provider.setCurrentIndex(max(0, idx))
+        lay.addWidget(label("ACTIVE ONE-SHOT PROVIDER", 8, C.TEXT_DIM, True))
+        lay.addWidget(self._provider)
+
+        self._openai_key = QLineEdit()
+        self._openai_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._openai_key.setPlaceholderText(
+            "Saved locally; leave blank to keep it" if self._settings.get("has_openai_key")
+            else "Paste OpenAI API key"
+        )
+        lay.addWidget(label("OPENAI API KEY", 8, C.TEXT_DIM, True))
+        lay.addWidget(self._openai_key)
+
+        self._openai_fast = QLineEdit(str(self._settings.get("openai_model_fast", "gpt-5.6-luna")))
+        self._openai_strong = QLineEdit(str(self._settings.get("openai_model_reasoning", "gpt-5.6-terra")))
+        lay.addWidget(label("GPT MODEL IDS  ·  FAST / REASONING", 8, C.TEXT_DIM, True))
+        row = QHBoxLayout()
+        row.addWidget(self._openai_fast)
+        row.addWidget(self._openai_strong)
+        lay.addLayout(row)
+
+        self._anthropic_key = QLineEdit()
+        self._anthropic_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._anthropic_key.setPlaceholderText(
+            "Saved locally; leave blank to keep it" if self._settings.get("has_anthropic_key")
+            else "Paste Anthropic API key"
+        )
+        lay.addWidget(label("ANTHROPIC API KEY", 8, C.TEXT_DIM, True))
+        lay.addWidget(self._anthropic_key)
+
+        self._anthropic_fast = QLineEdit(str(self._settings.get("anthropic_model_fast", "claude-haiku-4-5-20251001")))
+        self._anthropic_strong = QLineEdit(str(self._settings.get("anthropic_model_reasoning", "claude-sonnet-5-5")))
+        lay.addWidget(label("CLAUDE MODEL IDS  ·  FAST / REASONING", 8, C.TEXT_DIM, True))
+        row = QHBoxLayout()
+        row.addWidget(self._anthropic_fast)
+        row.addWidget(self._anthropic_strong)
+        lay.addLayout(row)
+
+        self._status = label(
+            "Keys are stored in the locally ignored config/api_keys.json file.",
+            8, C.GREEN,
+        )
+        lay.addWidget(self._status)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("CANCEL")
+        save = QPushButton("▸  SAVE PROVIDER")
+        cancel.clicked.connect(self.hide)
+        save.clicked.connect(self._save)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        lay.addLayout(buttons)
+
+    def _save(self):
+        provider = str(self._provider.currentData() or "gemini")
+        if provider == "openai" and not (
+            self._openai_key.text().strip() or self._settings.get("has_openai_key")
+        ):
+            self._status.setText("Add an OpenAI key before selecting GPT.")
+            self._status.setStyleSheet(f"color: {C.RED}; background: transparent;")
+            return
+        if provider == "anthropic" and not (
+            self._anthropic_key.text().strip() or self._settings.get("has_anthropic_key")
+        ):
+            self._status.setText("Add an Anthropic key before selecting Claude.")
+            self._status.setStyleSheet(f"color: {C.RED}; background: transparent;")
+            return
+        self.saved.emit({
+            "provider": provider,
+            "openai_api_key": self._openai_key.text(),
+            "anthropic_api_key": self._anthropic_key.text(),
+            "openai_model_fast": self._openai_fast.text(),
+            "openai_model_reasoning": self._openai_strong.text(),
+            "anthropic_model_fast": self._anthropic_fast.text(),
+            "anthropic_model_reasoning": self._anthropic_strong.text(),
+        })
+        self.hide()
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -3277,6 +3496,7 @@ class MainWindow(QMainWindow):
         self._remote_overlay: RemoteKeyOverlay | None = None
         self._customize_overlay: CustomizeOverlay | None = None
         self._personality_overlay: VoicePersonalityOverlay | None = None
+        self._provider_overlay: AIProviderOverlay | None = None
 
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
@@ -3887,6 +4107,12 @@ class MainWindow(QMainWindow):
                 (cw.height() - oh) // 2,
                 ow, oh,
             )
+        if self._provider_overlay and self._provider_overlay.isVisible():
+            ow, oh = AIProviderOverlay._OW, min(AIProviderOverlay._OH, cw.height() - 16)
+            self._provider_overlay.setGeometry(
+                max(0, (cw.width() - ow) // 2),
+                max(0, (cw.height() - oh) // 2), ow, oh,
+            )
         # Camera preview — bottom-right corner of the center/HUD area
         pw = _CameraPreview._W
         ph = self._cam_preview.height() or _CameraPreview._H
@@ -4250,6 +4476,13 @@ class MainWindow(QMainWindow):
         personality_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         personality_btn.setStyleSheet(_BTN_STYLE_DIM)
         personality_btn.clicked.connect(self._open_voice_personality)
+        provider_btn = QPushButton("◈  AI PROVIDER / KEYS")
+        provider_btn.setFixedHeight(26)
+        provider_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        provider_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        provider_btn.setStyleSheet(_BTN_STYLE_DIM)
+        provider_btn.clicked.connect(self._open_provider_settings)
+        lay.addWidget(provider_btn)
         lay.addWidget(personality_btn)
 
         self._brief_btn = QPushButton()
@@ -5447,6 +5680,24 @@ class MainWindow(QMainWindow):
 
     # ── Audio devices ────────────────────────────────────────────────────────
 
+    def _open_provider_settings(self):
+        from core.provider_settings import get_provider_settings
+        if self._provider_overlay:
+            self._provider_overlay.hide()
+        ov = AIProviderOverlay(get_provider_settings(), parent=self.centralWidget())
+        ov.saved.connect(self._save_provider_settings)
+        self._centre_overlay(ov)
+        self._provider_overlay = ov
+
+    def _save_provider_settings(self, values: dict):
+        from core.provider_settings import save_provider_settings
+        try:
+            save_provider_settings(**values)
+            provider = values.get("provider", "gemini")
+            label = {"gemini": "Gemini", "openai": "OpenAI GPT", "anthropic": "Anthropic Claude"}.get(provider, "Gemini")
+            self._log.append_log(f"SYS: One-shot AI provider set to {label}. Live voice remains on Gemini.")
+        except Exception as exc:
+            self._log.append_log(f"ERR: AI provider settings could not be saved ({type(exc).__name__}).")
     def _open_audio_devices(self):
         ov = AudioDeviceOverlay(parent=self.centralWidget())
         ov.picked.connect(self._on_audio_devices_applied)
@@ -5617,7 +5868,7 @@ class MainWindow(QMainWindow):
     def _show_setup(self):
         ov = SetupOverlay(self.centralWidget())
         cw = self.centralWidget()
-        ow, oh = 460, 390
+        ow, oh = 520, 535
         ov.setGeometry(
             (cw.width()  - ow) // 2,
             (cw.height() - oh) // 2,
@@ -5627,11 +5878,22 @@ class MainWindow(QMainWindow):
         ov.show()
         self._overlay = ov
 
-    def _on_setup_done(self, key: str, os_name: str):
+    def _on_setup_done(self, setup: dict):
+        key = str(setup.get("gemini_api_key", "")).strip()
+        os_name = str(setup.get("os_system", "windows"))
         os.makedirs(CONFIG_DIR, exist_ok=True)
-        API_FILE.write_text(
-            json.dumps({"gemini_api_key": key, "os_system": os_name}, indent=4),
-            encoding="utf-8",
+        # Preserve the rest of the user's local config when setup is re-run.
+        config = _read_full_config()
+        config["gemini_api_key"] = key
+        config["os_system"] = os_name
+        API_FILE.write_text(json.dumps(config, indent=4), encoding="utf-8")
+        from core.provider_settings import save_provider_settings
+        provider = str(setup.get("provider", "gemini"))
+        provider_key = str(setup.get("external_api_key", ""))
+        save_provider_settings(
+            provider,
+            openai_api_key=provider_key if provider == "openai" else "",
+            anthropic_api_key=provider_key if provider == "anthropic" else "",
         )
         self._ready = True
         if self._overlay:

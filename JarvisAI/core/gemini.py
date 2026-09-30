@@ -62,6 +62,7 @@ _KEY_FILE = _BASE / "config" / "api_keys.json"
 
 FAST = "fast"
 SMART = "smart"
+DEEP = SMART  # Compatibility name for callers that request stronger one-shot reasoning
 SEARCH = "search"
 LIVE = "live"
 
@@ -703,6 +704,28 @@ def call(
         - None if every rung fails
     """
 
+    # The selected external provider handles isolated text/image work. The
+    # real-time voice session and Google-grounded search intentionally stay on
+    # Gemini; provider errors never silently fall back to a billable service.
+    if tier not in {LIVE, SEARCH}:
+        try:
+            from core.provider_settings import get_active_provider
+            selected_provider = get_active_provider()
+        except Exception:
+            selected_provider = "gemini"
+        if selected_provider in {"openai", "anthropic"}:
+            try:
+                from core.ai_providers import generate as _external_generate
+                value = _external_generate(
+                    contents, tier=tier, config=config, timeout_ms=timeout_ms
+                )
+                return _Reply(value)
+            except Exception as exc:
+                print(
+                    f"[AI Provider] {selected_provider} request failed "
+                    f"({type(exc).__name__}); no provider fallback was attempted."
+                )
+                return None
     ladder = _resolve_ladder(tier)
 
     resolved_key = key or api_key()

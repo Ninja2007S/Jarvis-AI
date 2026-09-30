@@ -124,9 +124,8 @@ def main() -> None:
 
     print("\n✅ Setup complete!")
     print("   1) Launch it:  python main.py")
-    print("   2) Paste your free Gemini API key when the setup screen appears.")
+    print("   2) On first launch, add Gemini (required for Live voice) and choose Gemini, GPT or Claude for one-shot tasks.")
     print("   3) (Optional) Enable 'Hey Jarvis' from ⚙ → WAKE WORD.")
-
-
+    print("   4) Change providers or model IDs later from ⚙ → AI PROVIDER / KEYS.")
 if __name__ == "__main__":
     main()
