@@ -18,15 +18,15 @@ WHY THIS EXISTS
     risky things can happen in a short window (which is what an injected
     instruction-loop looks like from the outside).
 
-THE LEDGER ("blockchain-style" tamper evidence)
-    There is no real blockchain here — a single-machine assistant has no
-    peers to reach consensus with, so a distributed ledger would add
-    complexity for nothing. What IS worth borrowing from that world is hash
-    chaining: every audit-log line embeds the SHA-256 of the previous line,
-    so if a log line is edited or deleted after the fact, every hash after
-    it stops matching and `verify_log()` tells you exactly where the chain
-    broke. That is the practical, honest reading of "protect this from
-    blockchain-style attacks" for a project with no blockchain in it.
+THE LEDGER
+    Audit records form a SHA-256 chain and each record is authenticated with
+    an HMAC key stored outside the checkout. An HMAC-protected checkpoint
+    anchors the current head, record count, and file size, so ordinary edits
+    and truncation after anchoring are detected. The cached verified tail
+    keeps normal appends constant-time. A legacy SHA-only ledger is anchored
+    at its first upgrade; older deletion cannot be proven retroactively. The
+    key and checkpoint are available to the same OS account, so this does not
+    protect against a full compromise of that account.
 
 HOW TO WIRE THIS IN — see INTEGRATION_GUIDE.md for exact diffs. Summary:
     1. main.py: `security.bind(logger=self.ui.write_log)` next to the
@@ -38,7 +38,11 @@ HOW TO WIRE THIS IN — see INTEGRATION_GUIDE.md for exact diffs. Summary:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
+import secrets
+import sys
 import threading
 import time
 from collections import deque
@@ -53,6 +57,24 @@ BASE_DIR   = Path(__file__).resolve().parent.parent
 LOG_DIR    = BASE_DIR / "security"
 LOG_FILE   = LOG_DIR / "audit_log.jsonl"
 _GENESIS   = "0" * 64
+
+
+def _audit_data_dir() -> Path:
+    """Keep audit authentication material outside the repository checkout."""
+    if os.name == "nt":
+        root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        return root / "JarvisAI" / "security"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "JarvisAI" / "security"
+    root = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return root / "jarvisai" / "security"
+
+
+_AUDIT_STATE_DIR = _audit_data_dir()
+_AUDIT_KEY_FILE = _AUDIT_STATE_DIR / "audit_hmac.key"
+_AUDIT_CHECKPOINT_FILE = _AUDIT_STATE_DIR / "audit_checkpoint.json"
+_audit_key_cache: bytes | None = None
+_audit_key_lock = threading.Lock()
 
 _log_cb: Optional[Callable[[str], None]] = None
 _voice_id_required_cb: Optional[Callable[[], bool]] = None
@@ -352,48 +374,120 @@ _SAFE_ACTIONS: dict[str, set[str]] = {
 _chain_lock = threading.RLock()
 _ledger_tail_hash: str | None = None
 _ledger_size: int | None = None
+_ledger_entries: int | None = None
 
 
-def _last_hash() -> str:
-    if not LOG_FILE.exists():
-        return _GENESIS
-    with LOG_FILE.open("rb") as f:
-        f.seek(0, 2)
-        size = f.tell()
-        block = 4096
-        data = b""
-        while size > 0 and b"\n" not in data.strip():
-            step = min(block, size)
-            size -= step
-            f.seek(size)
-            data = f.read()
-        last_line = data.strip().split(b"\n")[-1]
-    return json.loads(last_line)["hash"]
+def _audit_key() -> bytes:
+    """Load or create a random HMAC key in the current user's data directory."""
+    global _audit_key_cache
+    with _audit_key_lock:
+        if _audit_key_cache is not None:
+            return _audit_key_cache
+        _AUDIT_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(str(_AUDIT_KEY_FILE), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            fd = None
+        if fd is not None:
+            key = secrets.token_bytes(32)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(key.hex().encode("ascii"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.chmod(_AUDIT_KEY_FILE, 0o600)
+            except OSError:
+                pass
+        try:
+            raw = _AUDIT_KEY_FILE.read_text(encoding="ascii").strip()
+            key = bytes.fromhex(raw)
+        except Exception as exc:
+            raise RuntimeError("Audit authentication key is missing or unreadable.") from exc
+        if len(key) != 32:
+            raise RuntimeError("Audit authentication key has an invalid length.")
+        _audit_key_cache = key
+        return key
+
+
+def _canonical_json(value: dict) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _checkpoint_mac(payload: dict, key: bytes) -> str:
+    return hmac.new(key, _canonical_json(payload), hashlib.sha256).hexdigest()
+
+
+def _read_checkpoint(key: bytes) -> dict | None:
+    if not _AUDIT_CHECKPOINT_FILE.exists():
+        return None
+    try:
+        record = json.loads(_AUDIT_CHECKPOINT_FILE.read_text(encoding="utf-8"))
+        mac = str(record.pop("hmac"))
+        if not hmac.compare_digest(mac, _checkpoint_mac(record, key)):
+            raise ValueError("checkpoint HMAC mismatch")
+        if (record.get("version") != 1 or not isinstance(record.get("head"), str)
+                or not isinstance(record.get("entries"), int)
+                or not isinstance(record.get("size"), int)):
+            raise ValueError("checkpoint fields are invalid")
+        return record
+    except Exception as exc:
+        raise RuntimeError(f"Audit checkpoint is invalid: {exc}") from exc
+
+
+def _write_checkpoint(head: str, entries: int, size: int, key: bytes) -> None:
+    payload = {"version": 1, "head": head, "entries": entries, "size": size}
+    record = {**payload, "hmac": _checkpoint_mac(payload, key)}
+    temp = _AUDIT_CHECKPOINT_FILE.with_name(
+        _AUDIT_CHECKPOINT_FILE.name + "." + secrets.token_hex(6) + ".tmp"
+    )
+    with temp.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(record, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        os.chmod(temp, 0o600)
+    except OSError:
+        pass
+    os.replace(temp, _AUDIT_CHECKPOINT_FILE)
 
 
 def _append_entry(entry: dict) -> None:
-    global _ledger_tail_hash, _ledger_size
+    global _ledger_tail_hash, _ledger_size, _ledger_entries
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with _chain_lock:
-        # Full verification is required on first use, startup checks, or when
-        # the ledger changed outside this process. Normal appends use the
-        # cached verified tail, so cost stays constant as the log grows.
+        key = _audit_key()
+        # Full verification is required on first use or after file-size changes.
+        # Normal appends use a cached HMAC-verified tail and external checkpoint.
         current_size = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
-        if _ledger_tail_hash is None or _ledger_size != current_size:
+        checkpoint = _read_checkpoint(key)
+        cache_matches_checkpoint = bool(
+            checkpoint
+            and _ledger_tail_hash == checkpoint["head"]
+            and _ledger_size == checkpoint["size"] == current_size
+            and _ledger_entries == checkpoint["entries"]
+        )
+        if (not cache_matches_checkpoint or _ledger_tail_hash is None
+                or _ledger_size != current_size):
             intact, reason = verify_log()
         else:
             intact, reason = True, "cached verified ledger tail"
         if not intact:
             raise RuntimeError(f"Security audit ledger is invalid: {reason}")
         prev = _ledger_tail_hash or _GENESIS
-        payload = json.dumps(entry, sort_keys=True, default=str)
-        entry_hash = hashlib.sha256((prev + payload).encode("utf-8")).hexdigest()
+        # Preserve the established SHA-chain serialization so existing
+        # pre-HMAC logs remain verifiable during one-time checkpoint migration.
+        payload = json.dumps(entry, sort_keys=True, default=str).encode("utf-8")
+        entry_hash = hashlib.sha256(prev.encode("utf-8") + payload).hexdigest()
         record = {**entry, "prev_hash": prev, "hash": entry_hash}
+        record["hmac"] = _checkpoint_mac(record, key)
         with LOG_FILE.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, sort_keys=True, default=str) + "\n")
             f.flush()
+            os.fsync(f.fileno())
         _ledger_tail_hash = entry_hash
         _ledger_size = LOG_FILE.stat().st_size
+        _ledger_entries = (_ledger_entries or 0) + 1
+        _write_checkpoint(_ledger_tail_hash, _ledger_entries, _ledger_size, key)
 
 
 def audit(event: str, name: str, tier: str, decision: str, detail: str = "") -> None:
@@ -408,43 +502,82 @@ def audit(event: str, name: str, tier: str, decision: str, detail: str = "") -> 
 
 
 def verify_log() -> tuple[bool, str]:
-    """Walk the whole ledger and confirm every hash matches. Call this from a
-    startup self-check or an admin action — a break means the log file was
-    edited or truncated outside of this module."""
-    global _ledger_tail_hash, _ledger_size
-    if not LOG_FILE.exists():
-        _ledger_tail_hash = _GENESIS
-        _ledger_size = 0
-        return True, "No audit log yet."
-    prev = _GENESIS
-    line_no = 0
-    try:
-        with LOG_FILE.open("r", encoding="utf-8") as f:
-            for line_no, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                rec = json.loads(line)
-                claimed_hash = rec.pop("hash")
-                claimed_prev = rec.pop("prev_hash")
-                if claimed_prev != prev:
-                    _ledger_tail_hash = None
-                    _ledger_size = None
-                    return False, f"Chain broken before line {line_no}: prev_hash mismatch."
-                payload = json.dumps(rec, sort_keys=True, default=str)
-                recomputed = hashlib.sha256((prev + payload).encode("utf-8")).hexdigest()
-                if recomputed != claimed_hash:
-                    _ledger_tail_hash = None
-                    _ledger_size = None
-                    return False, f"Line {line_no} was altered — hash does not match its content."
-                prev = claimed_hash
-    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
-        _ledger_tail_hash = None
-        _ledger_size = None
-        return False, f"Could not verify audit ledger near line {line_no + 1}: {exc}"
-    _ledger_tail_hash = prev
-    _ledger_size = LOG_FILE.stat().st_size
-    return True, f"Ledger intact — verified through line {line_no}."
+    """Verify the hash chain, per-record HMACs, and external rollback anchor."""
+    global _ledger_tail_hash, _ledger_size, _ledger_entries
+    with _chain_lock:
+        try:
+            key = _audit_key()
+            checkpoint = _read_checkpoint(key)
+        except RuntimeError as exc:
+            _ledger_tail_hash = _ledger_size = _ledger_entries = None
+            return False, str(exc)
+
+        if not LOG_FILE.exists():
+            if checkpoint and (checkpoint["entries"] != 0 or checkpoint["head"] != _GENESIS or checkpoint["size"] != 0):
+                _ledger_tail_hash = _ledger_size = _ledger_entries = None
+                return False, "Audit log is missing but the external checkpoint records prior entries."
+            if checkpoint is None:
+                _write_checkpoint(_GENESIS, 0, 0, key)
+            _ledger_tail_hash, _ledger_size, _ledger_entries = _GENESIS, 0, 0
+            return True, "No audit entries; external HMAC checkpoint initialized."
+
+        prev = _GENESIS
+        line_no = 0
+        byte_offset = 0
+        checkpoint_matched = checkpoint is None or checkpoint["entries"] == 0
+        saw_hmac = False
+        try:
+            with LOG_FILE.open("rb") as stream:
+                for raw_line in stream:
+                    byte_offset += len(raw_line)
+                    line_no += 1
+                    line = raw_line.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    claimed_mac = rec.pop("hmac", None)
+                    if claimed_mac is not None:
+                        saw_hmac = True
+                        if not hmac.compare_digest(str(claimed_mac), _checkpoint_mac(rec, key)):
+                            raise ValueError(f"Line {line_no} HMAC does not match.")
+                    elif checkpoint is not None and line_no > checkpoint["entries"]:
+                        raise ValueError(f"Line {line_no} after the checkpoint has no HMAC.")
+
+                    claimed_hash = rec.pop("hash")
+                    claimed_prev = rec.pop("prev_hash")
+                    if claimed_prev != prev:
+                        raise ValueError(f"Chain broken before line {line_no}: prev_hash mismatch.")
+                    payload = json.dumps(rec, sort_keys=True, default=str).encode("utf-8")
+                    recomputed = hashlib.sha256(prev.encode("utf-8") + payload).hexdigest()
+                    if recomputed != claimed_hash:
+                        raise ValueError(f"Line {line_no} hash does not match its content.")
+                    prev = claimed_hash
+
+                    if checkpoint and line_no == checkpoint["entries"]:
+                        if prev != checkpoint["head"] or byte_offset != checkpoint["size"]:
+                            raise ValueError("Audit history no longer matches its external checkpoint.")
+                        checkpoint_matched = True
+
+            size = LOG_FILE.stat().st_size
+            if checkpoint and not checkpoint_matched:
+                raise ValueError("Audit log was truncated before its external checkpoint.")
+            if checkpoint and line_no < checkpoint["entries"]:
+                raise ValueError("Audit log is missing entries recorded in its external checkpoint.")
+            if checkpoint and line_no == checkpoint["entries"]:
+                if prev != checkpoint["head"] or size != checkpoint["size"]:
+                    raise ValueError("Audit log tail does not match its external checkpoint.")
+            if checkpoint is None and saw_hmac:
+                raise ValueError("External audit checkpoint is missing; refusing to trust authenticated history.")
+
+            # Existing SHA-only logs are verified once and anchored now; their
+            # earlier history cannot be proven against deletion before upgrade.
+            if checkpoint is None or line_no > checkpoint["entries"]:
+                _write_checkpoint(prev, line_no, size, key)
+            _ledger_tail_hash, _ledger_size, _ledger_entries = prev, size, line_no
+            return True, f"Ledger and external HMAC checkpoint intact — verified through entry {line_no}."
+        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, AttributeError, ValueError) as exc:
+            _ledger_tail_hash = _ledger_size = _ledger_entries = None
+            return False, f"Could not verify audit ledger near line {line_no + 1}: {exc}"
 
 
 # ── rate limiting ────────────────────────────────────────────────────────────

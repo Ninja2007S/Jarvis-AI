@@ -18,7 +18,7 @@ import socket
 import string
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse, urlsplit, urlunsplit
 
 _DEPS_OK = False
 try:
@@ -41,6 +41,13 @@ BASE_DIR    = Path(__file__).resolve().parent.parent
 STATIC_DIR  = Path(__file__).parent / "static"
 PORT        = 8000
 MAX_UPLOAD_MB = 500
+
+
+def _twilio_stream_request_url(base_url: str, token: str) -> str:
+    """Build the pinned public WSS URL covered by Twilio's signature."""
+    parsed = urlsplit(base_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path,
+                       "token=" + quote(token, safe=""), ""))
 
 
 def _make_uploads_dir() -> Path:
@@ -499,6 +506,7 @@ class DashboardServer:
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
         self.app                          = self._build_app()
+        self.twilio_app                   = self._build_twilio_app()
 
     # ── one-time key management ───────────────────────────────────────────
 
@@ -789,79 +797,6 @@ class DashboardServer:
                 self._wake_callback()
             return JSONResponse({"ok": True})
 
-        # ── Twilio Voice — incoming call handling ────────────────────────────
-
-        @app.post("/api/twilio/call")
-        async def twilio_call_ep(req: Request):
-            """Twilio Voice webhook for incoming calls. Returns raw TwiML."""
-            try:
-                body = await req.form()
-                params = dict(body)
-            except Exception:
-                try:
-                    params = await req.json()
-                except Exception:
-                    params = {}
-
-            # Import the phone call handler
-            try:
-                from plugins.phone_call import handle_incoming_call, is_twilio_configured
-            except Exception as e:
-                return PlainTextResponse(
-                    f'<?xml version="1.0" encoding="UTF-8"?>'
-                    f'<Response><Say voice="alice">The phone call handler is unavailable.</Say></Response>',
-                    media_type="application/xml",
-                )
-
-            if not is_twilio_configured():
-                return PlainTextResponse(
-                    f'<?xml version="1.0" encoding="UTF-8"?>'
-                    f'<Response><Say voice="alice">Phone calls are not configured.</Say></Response>',
-                    media_type="application/xml",
-                )
-
-            # Build the TwiML response — return it as plain text/XML, not JSON
-            result = handle_incoming_call(params)
-            return PlainTextResponse(result, media_type="application/xml")
-
-        @app.websocket("/media-stream")
-        async def twilio_media_stream_ws(websocket: WebSocket):
-            """Twilio Media Stream WebSocket endpoint.
-
-            Bidirectionally forwards audio between Twilio and a dedicated
-            Gemini Live session managed by the phone_call plugin.
-            """
-            await websocket.accept()
-
-            # Read the initial "start" event from Twilio to get metadata
-            call_sid = "unknown"
-            caller_name = "Caller"
-            caller_number = "Unknown"
-            try:
-                msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
-                if msg.get("event") == "start":
-                    start = msg.get("start", {})
-                    call_sid = start.get("callSid", "unknown")
-                    params = msg.get("customParameters", {})
-                    caller_name = params.get("caller_name", caller_name)
-                    caller_number = params.get("caller_number", caller_number)
-            except Exception:
-                pass
-
-            try:
-                from plugins.phone_call import handle_media_stream
-                await handle_media_stream(websocket, {
-                    "call_sid": call_sid,
-                    "caller_name": caller_name,
-                    "caller_number": caller_number,
-                })
-            except Exception as e:
-                print(f"[Dashboard] Media stream error: {e}")
-                try:
-                    await websocket.close(code=1011)
-                except Exception:
-                    pass
-
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 
         @app.websocket("/ws/phone-audio")
@@ -1017,6 +952,94 @@ class DashboardServer:
 
         return app
 
+    def _build_twilio_app(self) -> "FastAPI":
+        """A public-tunnel-safe app containing only Twilio endpoints.
+
+        It binds to a different loopback port from the authenticated phone
+        dashboard. Tunneling this listener cannot expose dashboard routes.
+        """
+        app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+        @app.post("/api/twilio/call")
+        async def twilio_call_ep(req: Request):
+            from plugins.phone_call import (
+                handle_incoming_call, is_twilio_configured,
+                twilio_public_urls, validate_twilio_request,
+            )
+            if not is_twilio_configured():
+                return PlainTextResponse("Phone service unavailable.", status_code=503)
+            try:
+                form = await req.form()
+            except Exception:
+                return PlainTextResponse("Expected Twilio form request.", status_code=400)
+
+            urls = twilio_public_urls()
+            signature = req.headers.get("X-Twilio-Signature", "")
+            if not urls or not signature:
+                return PlainTextResponse("Forbidden", status_code=403)
+
+            # Pin the host and route to the configured public callback rather
+            # than trusting Host/X-Forwarded-* supplied by an arbitrary tunnel.
+            callback = urls[0]
+            incoming_query = req.scope.get("query_string", b"").decode("latin-1")
+            if incoming_query:
+                from urllib.parse import urlsplit, urlunsplit
+                parsed = urlsplit(callback)
+                callback = urlunsplit((parsed.scheme, parsed.netloc, parsed.path,
+                                       incoming_query, ""))
+            if not validate_twilio_request(callback, form, signature):
+                return PlainTextResponse("Forbidden", status_code=403)
+
+            return PlainTextResponse(
+                handle_incoming_call(dict(form)), media_type="application/xml"
+            )
+
+        @app.websocket("/media-stream")
+        async def twilio_media_stream_ws(websocket: WebSocket, token: str = ""):
+            from plugins.phone_call import (
+                handle_media_stream, get_twilio_config, twilio_public_urls,
+                validate_twilio_stream,
+            )
+            urls = twilio_public_urls()
+            signature = websocket.headers.get("X-Twilio-Signature", "")
+            if not urls or not validate_twilio_stream(
+                _twilio_stream_request_url(urls[1], token), signature, token
+            ):
+                await websocket.close(code=1008)
+                return
+
+            await websocket.accept()
+            # Twilio may send `connected` before `start`; require a valid start
+            # from the configured account before opening a Gemini session.
+            try:
+                msg = None
+                for _ in range(3):
+                    candidate = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+                    if candidate.get("event") == "start":
+                        msg = candidate
+                        break
+                start = (msg or {}).get("start", {})
+                account_sid = str(get_twilio_config().get("account_sid", ""))
+                call_sid = str(start.get("callSid", ""))
+                if (not msg or not call_sid.startswith("CA")
+                        or str(start.get("accountSid", "")) != account_sid):
+                    await websocket.close(code=1008)
+                    return
+                custom = start.get("customParameters", {})
+                await handle_media_stream(websocket, {
+                    "call_sid": call_sid,
+                    "caller_name": custom.get("caller_name", "Caller"),
+                    "caller_number": custom.get("caller_number", "Unknown"),
+                })
+            except Exception as exc:
+                print(f"[Twilio] Media stream rejected or failed ({type(exc).__name__}).")
+                try:
+                    await websocket.close(code=1011)
+                except Exception:
+                    pass
+
+        return app
+
     # ── serve ─────────────────────────────────────────────────────────────
 
     async def _serve_alias(self) -> None:
@@ -1045,8 +1068,15 @@ class DashboardServer:
 
         proto = "https" if use_ssl else "http"
         print(f"[Dashboard] Local-only listener: {proto}://127.0.0.1:{PORT}")
+        print("[Twilio] Dedicated local-only listener: http://127.0.0.1:8001 (tunnel only this port)")
         if self._remote_url:
             print(f"[Dashboard] Private remote URL: {self._remote_url}")
         else:
             print("[Dashboard] Remote pairing disabled; set JARVIS_REMOTE_URL to a private HTTPS VPN URL.")
-        await uvicorn.Server(cfg).serve()
+        twilio_cfg = uvicorn.Config(
+            self.twilio_app, host="127.0.0.1", port=8001, log_level="warning"
+        )
+        await asyncio.gather(
+            uvicorn.Server(cfg).serve(),
+            uvicorn.Server(twilio_cfg).serve(),
+        )

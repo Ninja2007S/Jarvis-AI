@@ -46,6 +46,9 @@ class _Pending:
 
 _pending: Optional[_Pending] = None
 _lock = threading.Lock()
+_MANUAL_CLICK_ONLY_KEYS = {
+    "sec-phone_call", "sec-computer_control", "sec-code_helper",
+}
 
 # Set once at startup by main.py. Signature: (title, detail) -> None for show,
 # and () -> None for hide. Both are marshalled onto the Qt thread by the UI.
@@ -167,8 +170,16 @@ def resolve_by_voice(text: str) -> str | None:
     else:
         return None
 
-    if not pending_title():
-        return None
+    global _pending
+    with _lock:
+        pending = _pending
+        if pending is None or time.monotonic() - pending.at > TIMEOUT_SECONDS:
+            if pending is not None:
+                _pending = None
+            return None
+        if decision and pending.key in _MANUAL_CLICK_ONLY_KEYS:
+            _log(f"SEC: Voice approval ignored — manual HUD click required for {pending.title}.")
+            return "manual_click_required"
     resolve(decision, source="voice")
     return label
 

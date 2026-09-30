@@ -228,22 +228,14 @@ def _run_file(path: Path, args: list, timeout: int) -> str:
     def _do_run() -> str:
         return _sandbox.run_sandboxed(path, args, timeout)
 
-    if flags:
-        # Something matched a known-destructive pattern (recursive delete,
-        # registry edits, curl-pipe-shell, credential access, etc.) — don't
-        # auto-run it. code_helper is tiered DANGEROUS in core/security.py,
-        # so this puts a real on-screen CONFIRM/CANCEL in front of it via
-        # core/confirm.py, and shows the user exactly what was flagged.
-        output = _security.guard(
-            "code_helper",
-            {"file": str(path), "flagged": flags},
-            _do_run,
-        )
-        return _injection_guard.wrap_untrusted(
-            str(output), f"code_execution:{path.name}"
-        )
-
-    output = _do_run()
+    # The scanner is only a heuristic: a no-match result cannot establish that
+    # code is safe. Every execution therefore passes through the dangerous
+    # action confirmation gate, and the panel shows any scanner findings.
+    output = _security.guard(
+        "code_helper",
+        {"file": str(path), "flagged": flags},
+        _do_run,
+    )
     return _injection_guard.wrap_untrusted(str(output), f"code_execution:{path.name}")
 
 

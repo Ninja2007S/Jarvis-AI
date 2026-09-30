@@ -11,6 +11,7 @@ config/google_token.json
 config/voice_id.dat
 config/voice_id_model/
 config/phone_handoff.json
+config/earth_map_cache/
 **/*token*.json
 **/*secret*.json
 **/client_secret*.json

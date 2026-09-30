@@ -1817,10 +1817,16 @@ class JarvisLive:
                                     decision = confirm_gate.resolve_by_voice(txt)
                                     if decision:
                                         voice_confirmation_consumed = True
-                                        self.ui.write_log(
-                                            f"SEC: Voice confirmation {decision}; "
-                                            "the phrase was handled locally."
-                                        )
+                                        if decision == "manual_click_required":
+                                            self.ui.write_log(
+                                                "SEC: This action needs a manual HUD click; "
+                                                "the voice phrase did not approve it."
+                                            )
+                                        else:
+                                            self.ui.write_log(
+                                                f"SEC: Voice confirmation {decision}; "
+                                                "the phrase was handled locally."
+                                            )
                                     else:
                                         in_buf.append(txt)
 

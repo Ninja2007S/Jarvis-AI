@@ -20,9 +20,14 @@ import asyncio
 import base64
 import json
 import os
+import secrets
 import sys
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
+from xml.sax.saxutils import escape, quoteattr
 
 try:
     from fastapi import WebSocket, WebSocketDisconnect
@@ -205,15 +210,91 @@ def is_twilio_configured() -> bool:
 
 def validate_twilio_request(uri: str, params: dict, signature: str) -> bool:
     """Validate that a Twilio request is legitimate."""
-    if not _TWILIO_OK:
+    if not _TWILIO_OK or not uri or not signature:
         return False
 
     cfg = get_twilio_config()
     if not cfg["auth_token"]:
         return False
 
-    validator = RequestValidator(cfg["auth_token"])
-    return validator.validate(uri, params, signature)
+    try:
+        validator = RequestValidator(cfg["auth_token"])
+        return bool(validator.validate(uri, params or {}, signature))
+    except Exception:
+        return False
+
+
+_stream_token_lock = threading.Lock()
+_pending_stream_tokens: dict[str, float] = {}
+_STREAM_TOKEN_TTL = 300
+
+
+def twilio_public_urls() -> tuple[str, str] | None:
+    """Return the configured public Voice callback and secure stream URLs.
+
+    TWILIO_WEBHOOK_URL may be an origin, the old `/api/twilio` base, or the
+    exact callback URL. The actual listener remains a separate loopback port.
+    """
+    raw = str(get_twilio_config().get("webhook_url", "")).strip()
+    try:
+        parsed = urlsplit(raw)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            return None
+        path = parsed.path.rstrip("/")
+        if path.endswith("/api/twilio/call"):
+            callback_path = path
+        elif path.endswith("/api/twilio"):
+            callback_path = path + "/call"
+        else:
+            callback_path = path + "/api/twilio/call"
+        callback = urlunsplit(("https", parsed.netloc, callback_path, parsed.query, ""))
+        # Twilio Media Streams requires WSS. Its stream endpoint is deliberately
+        # on the dedicated Twilio listener, never the remote-control server.
+        stream = urlunsplit(("wss", parsed.netloc, "/media-stream", "", ""))
+        return callback, stream
+    except Exception:
+        return None
+
+
+def new_twilio_stream_url() -> str:
+    """Create a one-use, expiring stream URL for a signed Twilio call."""
+    urls = twilio_public_urls()
+    if not urls:
+        return ""
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    with _stream_token_lock:
+        for old, expires in list(_pending_stream_tokens.items()):
+            if expires <= now:
+                _pending_stream_tokens.pop(old, None)
+        _pending_stream_tokens[token] = now + _STREAM_TOKEN_TTL
+    return urls[1] + "?token=" + quote(token, safe="")
+
+
+def validate_twilio_stream(uri: str, signature: str, token: str) -> bool:
+    """Authenticate and consume a one-use Media Stream handshake token."""
+    now = time.time()
+    with _stream_token_lock:
+        expires = _pending_stream_tokens.get(token, 0.0)
+        if not token or expires <= now:
+            _pending_stream_tokens.pop(token, None)
+            return False
+
+    valid = validate_twilio_request(uri, {}, signature)
+    if not valid:
+        # Twilio notes that WSS signatures can require the slash form.
+        parsed = urlsplit(uri)
+        if parsed.path and not parsed.path.endswith("/"):
+            slash_uri = urlunsplit((parsed.scheme, parsed.netloc, parsed.path + "/", parsed.query, ""))
+            valid = validate_twilio_request(slash_uri, {}, signature)
+    if not valid:
+        return False
+
+    with _stream_token_lock:
+        if _pending_stream_tokens.get(token, 0.0) <= time.time():
+            return False
+        _pending_stream_tokens.pop(token, None)
+    return True
 
 # ── Message Management ────────────────────────────────────────────────────────
 
@@ -291,22 +372,28 @@ def handle_incoming_call(params: dict) -> str:
 
 def build_unavailable_twiml(caller_name: str = "", caller_number: str = "", call_sid: str = "") -> str:
     """Build TwiML response for unavailable calls."""
-    base_url = get_twilio_config().get("webhook_url", "")
+    stream_url = new_twilio_stream_url()
+    if not stream_url:
+        return '''<?xml version="1.0" encoding="UTF-8"?>
+<Response><Say voice="alice" language="en-US">The JARVIS phone service is not fully configured. Please try again later.</Say><Hangup/></Response>'''
 
-    # Use media stream for conversational interaction
-    # The media stream will be handled by the dashboard server
+    # Bidirectional media requires <Connect><Stream> and a WSS URL. The
+    # one-use token binds the signed Twilio callback to its stream handshake.
+    caller_name = caller_name or "Caller"
+    caller_number = caller_number or "Unknown"
+    call_sid = call_sid or "current"
     twiml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Start>
-    <Stream url="{base_url}/media-stream" method="POST">
-      <Parameter name="caller_name" value="{caller_name or "Caller"}"/>
-      <Parameter name="caller_number" value="{caller_number or "Unknown"}"/>
-      <Parameter name="call_sid" value="{call_sid or "current"}"/>
-    </Stream>
-  </Start>
   <Say voice="alice" language="en-US">
-    My boss is currently unavailable right now. Please leave your message and I will let them know when they return.
+    My boss is currently unavailable. You can leave a message after the tone.
   </Say>
+  <Connect>
+    <Stream url={quoteattr(stream_url)}>
+      <Parameter name="caller_name" value={quoteattr(caller_name)}/>
+      <Parameter name="caller_number" value={quoteattr(caller_number)}/>
+      <Parameter name="call_sid" value={quoteattr(call_sid)}/>
+    </Stream>
+  </Connect>
 </Response>'''
     return twiml
 
@@ -477,10 +564,10 @@ async def handle_twilio_webhook(request_body: dict, twilio_signature: str = "", 
     if not _TWILIO_OK:
         return {"error": "Twilio package not installed", "response": None}
 
-    # Validate request (if signature provided)
-    if twilio_signature and request_uri:
-        if not validate_twilio_request(request_uri, request_body, twilio_signature):
-            return {"error": "Invalid Twilio signature", "response": None}
+    # This helper must not have an unsigned bypass: it is also used by any
+    # future webhook adapter that does not call DashboardServer directly.
+    if not validate_twilio_request(request_uri, request_body, twilio_signature):
+        return {"error": "Invalid or missing Twilio signature", "response": None}
 
     # Get caller info
     caller_name = request_body.get("CallerName", "").strip()

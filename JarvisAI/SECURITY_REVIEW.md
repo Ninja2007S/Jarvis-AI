@@ -21,12 +21,23 @@
   place.
 - Pending or canceled confirmations no longer consume the dangerous-action
   rate limit. The limit is charged when an approved operation begins.
-- Audit records are hash-chained and verified at startup. Normal appends use a
-  cached verified tail; a full scan happens at startup or when an external file
-  size change is detected. If the log cannot be verified or written, guarded
-  actions fail closed. The chain is tamper-evident, not a remote or
-  cryptographically signed record; a local administrator can still replace the
-  whole application and log.
+- Audit records are hash-chained and HMAC-authenticated. The random HMAC key
+  and authenticated latest-head/count/size checkpoint are stored under the
+  user's local application-data directory, outside the repository. A full
+  ledger scan happens at startup or after an external size change; ordinary
+  appends use the verified cached tail. Truncation after a checkpoint is
+  detected. An existing hash-only log is anchored at its first upgrade, so
+  earlier deletions cannot be detected retroactively. This does not protect
+  against a process or attacker controlling the same OS account, which can
+  access both the key and checkpoint.
+- Twilio runs in a separate ASGI app on `127.0.0.1:8001`. That app exposes only
+  the call webhook and media WebSocket; the paired dashboard remains on
+  `127.0.0.1:8000`. Both endpoints validate `X-Twilio-Signature`; the media
+  stream additionally requires an expiring, one-use token issued only after a
+  signed call webhook. A public tunnel must target port 8001 only. The isolated
+  phone Gemini Live session has `tools=[]`, and cannot invoke Jarvis's local
+  confirmation handler. Phone calls, broad computer-control operations, and
+  generated-code execution require the HUD click; voice cannot approve them.
 - The supplied shared TLS certificate is identified and rotated on startup.
   The dashboard no longer opens firewall rules or binds to all network
   interfaces. It listens on loopback; remote access requires an explicit
@@ -41,13 +52,23 @@ removes most inherited environment variables, limits runtime and monitored
 process-tree memory, kills descendants on timeout, and caps captured output.
 If `psutil` is unavailable, code execution is disabled.
 
-This is **best-effort process containment, not a security sandbox**. The child
-still runs as the same Windows user, can access files allowed to that user, and
-may access the network. A subprocess, static pattern scan, and environment
-scrubbing do not create an OS security boundary. Do not run code you do not
-trust. For stronger isolation, use a separate low-privilege Windows account or
-a properly configured VM/Windows Sandbox, and restrict its filesystem and
-network access.
+This is **best-effort process containment, not a security sandbox**. Pattern
+scanning is heuristic and can be bypassed; it does not stop absolute-path reads
+of `config/api_keys.json` or network access. The child runs as the same OS user
+and may read any files available to that user, including plaintext credentials.
+The 512 MB memory ceiling is polled and the process is killed after crossing
+it; the OS does not enforce a hard memory/job-object boundary here. Do not run
+untrusted code. Use a separate low-privilege account or an isolated VM/container
+with restricted files and networking for stronger containment.
+
+## Voice ID and confirmation
+
+Voice ID uses Windows DPAPI and is disabled on macOS/Linux. Even with Voice ID
+enabled, speech verification is only used where available. Phone-call and broad
+computer-control dangerous actions require a manual HUD confirmation click, so
+their approval does not depend on the platform's voice-identification support.
+Other actions that allow spoken confirmation are not speaker-verified on
+platforms where Voice ID is unavailable.
 
 ## Before sharing or rebuilding the package
 

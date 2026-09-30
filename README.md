@@ -126,15 +126,31 @@ JARVIS chooses a model tier based on the work. Ordinary voice conversation stays
 on the low-latency Live session. Difficult open-ended questions can be handed to
 the `deep_reasoning` plugin; code generation and developer-agent work use the
 deep tier; routine classification uses the fast tier; and grounded web searches
-use the search tier. The deep tier starts with Gemini 3.1 Pro Preview and falls
-back through Gemini Flash models if a model is throttled or unavailable. Google
-currently lists Pro Preview as a paid-tier model, so check its [model and billing
-requirements](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview)
-before using it. If your key cannot use Pro, JARVIS cools that model and routes
-deep work through Flash instead.
+use the search tier. Fast and deep one-shot requests share the default
+free-tier quota-first ladder in `core/gemini.py`: `gemma-4-26b-a4b-it`,
+`gemma-4-31b-it`, `gemini-3.5-flash-lite`, then `gemini-3.1-flash-lite`.
+`DEEP` is a compatibility alias for the configured reasoning tier, not a
+separate model. Google lists both Gemma 4 IDs for the Gemini API and describes
+Gemini 3.1 Flash-Lite as a cost-efficient high-volume model. Availability and
+quotas depend on the project; see Google's [model list](https://ai.google.dev/gemini-api/docs/models)
+and [Gemma API guide](https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api).
 
-One-shot Gemini calls keep a per-model cooldown after a `429`/quota response and
-try the next model in that task's ladder. If the always-on Live model is
+Free-tier grounded search currently tries Gemini 2.5 Flash-Lite and then
+Gemini 2.5 Flash. Google restricts access to these legacy models for some new
+projects; when unavailable, JARVIS falls back to its non-Gemini search path.
+Google's pricing page lists 500 free grounded Search requests per day shared by
+Gemini 2.5 Flash and Flash-Lite. Gemini 3.x grounded search uses separate paid
+monthly allowances and pricing. Keep `JARVIS_GEMINI_FREE_TIER=true` for the
+free-tier ladder unless the project is intentionally configured for paid use.
+Check Google's [pricing](https://ai.google.dev/gemini-api/docs/pricing) and
+[rate limits](https://ai.google.dev/gemini-api/docs/rate-limits) for current
+account-specific quotas.
+
+One-shot Gemini calls cool a model for five minutes after a `429`/quota
+response and for 30 seconds after transient `5xx` errors, then try the next
+model in that task's ladder. The four-second per-model free-tier request gap is
+deliberate pacing and can be adjusted with `JARVIS_GEMINI_REQUEST_GAP_SECONDS`.
+If the always-on Live model is
 rate-limited, JARVIS reconnects on a lower-cost native-audio model, then tries
 the next configured Live option if needed. The most recent completed transcript
 is carried into the replacement session; the Live resumption token itself is
@@ -285,7 +301,7 @@ Actions routed through the confirmation gate include operations such as:
 * Phone calls
 * Other actions classified as dangerous
 
-You can approve or cancel a pending request by clicking **CONFIRM** or **CANCEL** on the HUD, or by saying **"confirm action"** or **"cancel action"**. Voice phrases are accepted only while a confirmation is pending; a plain "yes" is not enough. With Voice ID enabled, spoken confirmation also requires a local speaker match.
+You can approve or cancel a pending request by clicking **CONFIRM** or **CANCEL** on the HUD, or by saying **"confirm action"** or **"cancel action"**. Voice phrases are accepted only while a confirmation is pending; a plain "yes" is not enough. Phone calls, broad computer-control requests, and generated-code execution require the HUD **CONFIRM** click; saying "confirm action" cannot approve those categories. Other voice approvals use Voice ID only when it is enabled and available on that platform.
 
 ### Self-Healing System — Version 1
 
@@ -341,9 +357,9 @@ cache is under your user profile's Hugging Face cache and is outside the Git
 repository.
 
 SpeechBrain currently documents support through Python 3.12 and does not list
-Windows among its officially supported operating systems. If installation
-fails under your current Python 3.14 setup, use a Python 3.12 environment for
-JARVIS and install the optional requirements there.
+Windows among its officially supported operating systems. Voice ID is
+therefore optional and is only validated in a separate Python 3.12 environment;
+the rest of JARVIS supports Python 3.11–3.13.
 
 Voice ID is a convenience check, not proof against replayed recordings or
 voice-cloning attacks. Keep the manual confirmation path for sensitive actions.
@@ -454,6 +470,15 @@ Hash 3
 
 If an existing entry is modified, the subsequent hash chain no longer matches.
 
+The ledger now uses an HMAC-authenticated hash chain plus an HMAC-protected
+latest-head checkpoint. The random key and checkpoint are stored in the current
+user's application-data directory, outside the repository. This detects
+tampering and tail deletion relative to that anchor. Existing SHA-only logs are
+anchored on first upgrade, so earlier truncation cannot be detected
+retroactively. A process running as your account can still access or replace
+the key and checkpoint; this is not protection against malware or an attacker
+controlling your account.
+
 The ledger can be verified using:
 
 ```python
@@ -512,7 +537,10 @@ Examples include:
 * `.aws/credentials`
 * `api_keys.json`
 
-Detected danger does not automatically mean that an operation can never be performed. Instead, dangerous operations can be routed into the appropriate security and confirmation flow.
+These patterns are heuristic. Obfuscation can bypass them; ordinary text can
+match them; and they do not prevent absolute-path file reads, imports, or
+network access. A match may route generated code through confirmation, but no
+match does not establish that the code is safe.
 
 ---
 
@@ -534,7 +562,12 @@ It does not automatically execute inside the user's project directory.
 
 The sandbox receives a restricted environment containing only the variables required for execution.
 
-Sensitive API keys and application credentials are not intentionally inherited into the sandbox environment.
+Sensitive API keys and application credentials are not intentionally inherited
+into the sandbox environment. Python's isolated mode also ignores user-site
+packages and Python environment overrides. Neither control prevents hostile
+code from reading an absolute path such as plaintext `config/api_keys.json` or
+accessing the network: the child runs as the same OS user. This is best-effort
+process containment, not an OS security boundary.
 
 ### 3. Memory ceiling
 
@@ -546,7 +579,9 @@ The current memory ceiling is:
 512 MB RSS
 ```
 
-Processes exceeding the configured limit can be terminated.
+The parent polls process-tree memory and kills the child after a reading exceeds
+the configured limit. The OS does not enforce a hard job-object or container
+memory limit here.
 
 ### 4. Wall-clock timeout
 
@@ -793,7 +828,10 @@ Live media connection:
 WebSocket /media-stream
 ```
 
-The dashboard server handles the Twilio connection and forwards the media stream to the phone-call plugin.
+The paired mobile dashboard listens on `127.0.0.1:8000`. Twilio runs on a
+separate app bound to `127.0.0.1:8001`, containing only its signed call webhook
+and media WebSocket. Point a public tunnel at port `8001` only. Do not tunnel
+port `8000` or use Tailscale Funnel for the dashboard.
 
 ---
 
@@ -821,10 +859,23 @@ For development, a public HTTPS tunneling service such as ngrok can be used.
 Example:
 
 ```text
-https://your-domain/api/twilio/call
+https://your-ngrok-host.ngrok-free.app/api/twilio/call
 ```
 
-Configure the Twilio phone number's **Voice webhook** to point to this endpoint.
+Set `TWILIO_WEBHOOK_URL` in the local environment/config to that exact HTTPS
+callback URL, then configure the Twilio phone number's **Voice webhook** to the
+same endpoint. Start a tunnel to the Twilio-only local port:
+
+```bash
+ngrok http 8001
+```
+
+Use the generated HTTPS host in `TWILIO_WEBHOOK_URL`. JARVIS derives a `wss://`
+media URL from that host and adds a one-use, expiring stream token. The HTTP
+webhook and media WebSocket both validate Twilio's `X-Twilio-Signature`. The
+dashboard pairing, command, file, and phone-audio routes remain on port `8000`
+behind their existing pairing/session-token checks; they are not part of the
+port `8001` Twilio app.
 
 > Phone calls require an active Twilio account/number and applicable Twilio usage charges. Jarvis itself does not operate a telephony network.
 
@@ -1428,6 +1479,7 @@ JarvisAI/
 ├── ui.py
 ├── setup.py
 ├── requirements.txt
+├── requirements-voice-id.txt
 │
 ├── actions/
 │   ├── web_search.py
@@ -1450,6 +1502,7 @@ JarvisAI/
 │   ├── game_updater.py
 │   ├── code_helper.py
 │   ├── dev_agent.py
+│   ├── self_heal.py
 │   └── desktop.py
 │
 ├── plugins/
@@ -1459,6 +1512,8 @@ JarvisAI/
 │   ├── email_gmail.py
 │   ├── calendar_google.py
 │   ├── phone_call.py
+│   ├── instagram_account.py
+│   ├── deep_reasoning.py
 │   ├── _google_core.py
 │   └── _template.py
 │
@@ -1483,6 +1538,8 @@ JarvisAI/
 │   ├── undo.py
 │   ├── audio_devices.py
 │   ├── gemini.py
+│   ├── earth_globe.py
+│   ├── earth_globe.html
 │   ├── plugin_loader.py
 │   ├── action_loader.py
 │   └── wake_word.py
@@ -1507,8 +1564,9 @@ JarvisAI/
 
 # ⚡ Quick Start
 
-JARVIS is a native PyQt desktop app. Use Python **3.11–3.13** (Python 3.12 is
-recommended) and create a virtual environment for the project. Follow the
+JARVIS is a native PyQt desktop app. The supported range is Python
+**3.11–3.13** (Python 3.12 is recommended); Python 3.14 is not supported yet.
+Create a virtual environment for the project. Follow the
 commands for your operating system **in order**. Run each command, wait for it
 to finish, then continue to the next step.
 
@@ -1772,8 +1830,6 @@ not encrypted by this plugin), so keep your Windows account protected and use
 device/disk encryption. If `config/api_keys.json` was committed in the past,
 `.gitignore` does not remove it from Git history: revoke the exposed token and
 remove the file from tracking/history before pushing.
-Meta requires a Professional Instagram account and the relevant API permissions; messaging is subject to Meta’s recipient rules, so this cannot cold-DM arbitrary users. See Meta’s Instagram API guide and Send API requirements.
-
 ### Email & Calendar
 
 Create a Google Cloud OAuth client, enable the Gmail and Calendar APIs, and save the downloaded credentials as:
@@ -1831,10 +1887,13 @@ config/api_keys.json
 Then configure your Twilio phone number's Voice webhook to:
 
 ```text
-https://your-domain/api/twilio/call
+https://your-ngrok-host.ngrok-free.app/api/twilio/call
 ```
 
-For local development, use a public HTTPS tunnel such as ngrok.
+Set `TWILIO_WEBHOOK_URL` to that exact URL and run `ngrok http 8001`; do not
+tunnel the dashboard's port `8000`. The Twilio app validates the webhook and
+WebSocket signatures and contains no dashboard pairing or remote-control
+routes.
 
 ---
 
