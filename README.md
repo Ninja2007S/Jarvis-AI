@@ -118,6 +118,37 @@ When the local **"Hey Jarvis"** detector is installed and ready, saying **"Hey J
 
 Install or enable the detector from **⚙ → WAKE WORD**. The feature is unavailable if the model is not ready. Mute, phone-call audio, and push-to-talk settings also gate the microphone path. The HUD's **INTERRUPT [ESC]** control remains available as a manual option.
 
+When wake-word mode is enabled and Jarvis is asleep, clap twice to wake it. Jarvis then gives the wake greeting, tells you the local date and time, and reads every retrieved Newsfirst/Ada Derana news topic. Startup briefings do the same when Morning Brief is enabled. JARVIS remembers whether the user's latest clearly recognized speech was Sinhala or English in local memory and speaks the briefing in that language, translating headlines and context where needed. The clap detector runs locally; its audio stays on the computer.
+
+## 🧠 Task-Aware Model Routing
+
+JARVIS chooses a model tier based on the work. Ordinary voice conversation stays
+on the low-latency Live session. Difficult open-ended questions can be handed to
+the `deep_reasoning` plugin; code generation and developer-agent work use the
+deep tier; routine classification uses the fast tier; and grounded web searches
+use the search tier. The deep tier starts with Gemini 3.1 Pro Preview and falls
+back through Gemini Flash models if a model is throttled or unavailable. Google
+currently lists Pro Preview as a paid-tier model, so check its [model and billing
+requirements](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview)
+before using it. If your key cannot use Pro, JARVIS cools that model and routes
+deep work through Flash instead.
+
+One-shot Gemini calls keep a per-model cooldown after a `429`/quota response and
+try the next model in that task's ladder. If the always-on Live model is
+rate-limited, JARVIS reconnects on a lower-cost native-audio model, then tries
+the next configured Live option if needed. The most recent completed transcript
+is carried into the replacement session; the Live resumption token itself is
+not reused across models. A switch briefly interrupts audio. If the Google
+project or API key has exhausted a quota shared by all available models, model
+switching cannot bypass that account-wide limit. Gemini 3.8 Live is skipped
+when proactive audio is disabled because that model keeps proactive audio on;
+Google bills input while the Live session listens, so model fallback may change
+usage costs.
+
+Model ladders are maintained in `core/gemini.py`; the Live fallback list and
+cooldown are in `main.py`. Google can change model availability and quotas, so
+an individual fallback only works if that model is enabled for your API key.
+
 ---
 
 # 🛡️ Security Architecture
@@ -916,8 +947,10 @@ All discovered capabilities are passed through the security layer before executi
 | Plugin                | What it does                                   | Setup needed            |
 | --------------------- | ---------------------------------------------- | ----------------------- |
 | 📧 `email_gmail`      | Read, search, and send Gmail                   | Google OAuth            |
+| 🧠 `deep_reasoning`   | Delegate complex questions to the deep model tier | Gemini API            |
 | 📅 `calendar_google`  | List, check, and create Google Calendar events | Google OAuth            |
 | 📞 `phone_call`       | Answer calls and capture caller messages       | Twilio                  |
+| 📷 `instagram_account` | Read Instagram DMs, send/reply, publish and schedule image posts | Meta Instagram API + Professional account |
 | 🏠 `home_automation`  | Control Tuya / Smart Life devices              | Device IDs + local keys |
 | 🖨️ `printer_control` | Control a 3D printer over MQTT                 | MQTT configuration      |
 | 🧠 `quiz`             | Interactive spoken quiz/study mode             | None                    |
@@ -1699,6 +1732,47 @@ system settings depend on the host OS, desktop session, permissions, and
 installed native tools.
 
 ## Configure optional integrations
+
+### Instagram Account
+
+The Instagram plugin uses Meta's supported Instagram API. It requires an
+Instagram **Professional** account (Business or Creator) and a Meta developer
+app with the appropriate Instagram permissions, including
+`instagram_business_basic`, `instagram_business_manage_messages`, and
+`instagram_business_content_publish`. Follow Meta's [Instagram API setup
+guide](https://www.postman.com/meta/instagram/collection/6yqw8pt/instagram-api)
+to create the app and obtain an access token and Instagram account ID.
+
+In JARVIS, open **Settings → Plugin Settings → INSTAGRAM ACCOUNT — Meta API**,
+enter the Instagram Professional account ID and access token, then choose
+**TEST INSTAGRAM CONNECTION**. The token is stored in
+`config/api_keys.json`, which is ignored by Git. Do not paste credentials into
+source files, README files, screenshots, or GitHub issues. Instagram scheduled
+post data (caption, image URL, and time) is stored locally in
+`config/instagram_schedule.json`; that file is ignored by Git too.
+
+Supported actions include reading recent inbox messages, sending a message or
+reply to an Instagram-scoped recipient ID shown by the inbox, publishing a
+single image now, scheduling an image post, listing scheduled posts, and
+cancelling a queued post. **Every Instagram action requires JARVIS's security
+confirmation.** Scheduled posts publish only while JARVIS is running. The image
+must be reachable by Meta through a public HTTPS URL; a local file path will not
+work. Meta's messaging API generally only permits replying after that Instagram
+user has contacted the account; it is not a cold-DM tool. See Meta's [Send API
+requirements](https://www.postman.com/meta/instagram/folder/uxudqu0/send-api).
+
+The plugin does not save DM message bodies to its own files or log them. When
+you ask JARVIS to read or respond to a DM, its text is returned to the active
+assistant conversation so JARVIS can understand it. With the configured Gemini
+service, that content is sent to Gemini as part of the current conversation;
+sending or publishing also sends the requested content to Meta/Instagram. These
+API calls are never sent to GitHub by this integration. The access token is
+stored locally in `config/api_keys.json` (the app's current settings store is
+not encrypted by this plugin), so keep your Windows account protected and use
+device/disk encryption. If `config/api_keys.json` was committed in the past,
+`.gitignore` does not remove it from Git history: revoke the exposed token and
+remove the file from tracking/history before pushing.
+Meta requires a Professional Instagram account and the relevant API permissions; messaging is subject to Meta’s recipient rules, so this cannot cold-DM arbitrary users. See Meta’s Instagram API guide and Send API requirements.
 
 ### Email & Calendar
 
