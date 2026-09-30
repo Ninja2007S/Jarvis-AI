@@ -138,7 +138,7 @@ _TIERS: dict[str, str] = {
     # state-changing but reversible / low blast-radius
     "save_memory":      TIER_SENSITIVE,
     "reminder":         TIER_SENSITIVE,
-    "open_app":         TIER_SENSITIVE,
+    "open_app":         TIER_DANGEROUS,
     "spotify_control":  TIER_SENSITIVE,
     "send_message":     TIER_DANGEROUS,
     "email_gmail":      TIER_DANGEROUS,
@@ -151,17 +151,17 @@ _TIERS: dict[str, str] = {
     "flight_finder":    TIER_SENSITIVE,
     "youtube_video":    TIER_SENSITIVE,
     "browser_control":  TIER_SENSITIVE,
-    "desktop":          TIER_SENSITIVE,
-    "desktop_control":  TIER_SENSITIVE,
+    "desktop":          TIER_DANGEROUS,
+    "desktop_control":  TIER_DANGEROUS,
     "file_processor":   TIER_SENSITIVE,
     # Health checks are read-only; actual repairs have their own individual
     # confirmation inside actions/self_heal.py. Keep provenance/rate controls.
-    "self_heal":        TIER_SENSITIVE,
+    "self_heal":        TIER_DANGEROUS,
 
     # writes/executes code or touches the filesystem/OS broadly — DANGEROUS
     "code_helper":        TIER_DANGEROUS,
-    "file_controller":    TIER_SENSITIVE,
-    "computer_control":   TIER_SENSITIVE,
+    "file_controller":    TIER_DANGEROUS,
+    "computer_control":   TIER_DANGEROUS,
     # This tool contains both routine controls (pause, volume, tabs) and a few
     # explicitly irreversible actions. Those specific actions already use the
     # UI confirmation gate inside actions/computer_settings.py; gating the whole

@@ -194,6 +194,25 @@ def _is_quota_error(error) -> bool:
     )
 
 
+def _is_transient_live_disconnect(error) -> bool:
+    """Recognize temporary Gemini Live/WebSocket server failures, including
+    API errors wrapped by asyncio.TaskGroup into an ExceptionGroup."""
+    code = getattr(error, "code", None) or getattr(error, "status_code", None)
+    if code in (1011, 500, 502, 503, 504):
+        return True
+
+    children = getattr(error, "exceptions", ()) or ()
+    if any(_is_transient_live_disconnect(child) for child in children):
+        return True
+
+    text = _error_text(error).upper()
+    return (
+        "1011" in text
+        or "INTERNAL ERROR ENCOUNTERED" in text
+        or ("CONNECTIONCLOSEDERROR" in text and "1011" in text)
+    )
+
+
 # ── Viseme extraction ─────────────────────────────────────────────────────────
 # The avatar's mouth used to be driven by one RMS value per ~200 ms write batch,
 # which is five updates a second averaged over a fifth of a second — it could
@@ -681,6 +700,8 @@ class JarvisLive:
         self._turn_done_event: asyncio.Event | None = None
         self._dashboard     = None
         self._briefing_sent    = False          # morning briefing fires once per process
+        self._briefing_active  = False          # true until the current briefing turn ends
+        self._briefing_cancelled = False         # user interrupted; don't inject delayed news
         self._sys_monitor      = SystemMonitor()  # persistent cooldown state
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
@@ -1106,6 +1127,12 @@ class JarvisLive:
     def interrupt(self) -> None:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
         self._interrupted = True
+        if self._briefing_active:
+            self._briefing_cancelled = True
+            self.ui.write_log("SYS: Briefing paused for your request.")
+            # Wake the phase coordinator if it is waiting for the greeting turn.
+            if self._turn_done_event:
+                self._turn_done_event.set()
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -1788,6 +1815,13 @@ class JarvisLive:
                             self.set_speaking(False)
                             self._visemes.reset()
                             self._play_cursor = 0.0
+                            # This server event confirms the old assistant turn
+                            # was cancelled. Clear the local discard gate now so
+                            # the user's following transcription/answer can be
+                            # retained even if the server sends no turn_complete
+                            # for the cancelled audio.
+                            self._interrupted = False
+                            out_buf = []
                             print("[JARVIS] ✋ Live session reported user interruption.")
 
                         if sc.output_transcription and sc.output_transcription.text:
@@ -1810,6 +1844,13 @@ class JarvisLive:
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
+                                # Some Live responses deliver the user's
+                                # transcription before the interrupted marker.
+                                # Once speech is transcribed, it belongs to the
+                                # new user turn, not the cancelled assistant turn.
+                                if self._interrupted:
+                                    self._interrupted = False
+                                    out_buf = []
                                 self._remember_spoken_language(txt)
                                 self._last_user_speech = time.monotonic()
                                 security.mark_user_turn_started()
@@ -1911,6 +1952,11 @@ class JarvisLive:
                             and response.server_content.turn_complete):
                         voice_confirmation_consumed = False
         except Exception as e:
+            if _is_transient_live_disconnect(e):
+                # Let the session TaskGroup unwind so run() can rebuild the
+                # socket, but keep this temporary server close out of the
+                # normal error/traceback path.
+                raise
             print(f"[JARVIS] ❌ Recv: {e}")
             traceback.print_exc()
             raise
@@ -2179,10 +2225,16 @@ class JarvisLive:
         if self._turn_done_event:
             self._turn_done_event.clear()
 
-        await self.session.send_client_content(
-            turns={"role": "user", "parts": [{"text": p1}]},
-            turn_complete=True,
-        )
+        self._briefing_active = True
+        self._briefing_cancelled = False
+        try:
+            await self.session.send_client_content(
+                turns={"role": "user", "parts": [{"text": p1}]},
+                turn_complete=True,
+            )
+        except Exception:
+            self._briefing_active = False
+            raise
         print("[JARVIS] Briefing phase 1 (greeting) sent.")
 
         # ── Phase 2: fire as soon as Phase 1 audio is done ───────────────────
@@ -2215,6 +2267,12 @@ class JarvisLive:
                 else:
                     await asyncio.sleep(1.0)
 
+                # A wake-word interruption turns the mic back over to the user.
+                # Do not let a slow news search send a second briefing prompt
+                # over the user's new request.
+                if self._briefing_cancelled:
+                    return
+
                 try:
                     # The publisher searches run concurrently and may need up
                     # to 18 seconds per attempt on a slow connection. Allow
@@ -2225,6 +2283,8 @@ class JarvisLive:
                     news_text = ""
 
                 if not self.session:
+                    return
+                if self._briefing_cancelled:
                     return
 
                 failed = (not news_text) or news_text.startswith(
@@ -2260,15 +2320,28 @@ class JarvisLive:
                         f"Let the user know briefly.{lang_str}"
                     )
 
+                if self._briefing_cancelled:
+                    return
+                if self._turn_done_event:
+                    self._turn_done_event.clear()
                 await self.session.send_client_content(
                     turns={"role": "user", "parts": [{"text": p2}]},
                     turn_complete=True,
                 )
                 print("[JARVIS] Briefing phase 2 (news) sent.")
+                # Keep the briefing marked active while the news audio is
+                # playing so a wake-word interrupt can cancel it cleanly.
+                if self._turn_done_event:
+                    try:
+                        await asyncio.wait_for(self._turn_done_event.wait(), timeout=120.0)
+                    except asyncio.TimeoutError:
+                        pass
             except Exception as e:
                 print(f"[Briefing] Phase 2 error: {e}")
                 print(f"[JARVIS] Briefing phase 2 failed: {e}")
                 self.ui.write_log("SYS: Could not fetch the news for the briefing.")
+            finally:
+                self._briefing_active = False
 
         asyncio.create_task(_deliver_news())
 
@@ -2694,6 +2767,20 @@ class JarvisLive:
                     continue
 
                 err_str = _error_text(e)
+                transient_live_disconnect = _is_transient_live_disconnect(e)
+                if transient_live_disconnect:
+                    self._conn_backoff = min(
+                        max(getattr(self, "_conn_backoff", 3), 3) * 2, 60
+                    )
+                    message = (
+                        "NET: Gemini Live closed the session unexpectedly; "
+                        f"reconnecting in {self._conn_backoff}s."
+                    )
+                    print(f"[JARVIS] ⚠️ {message}")
+                    self.ui.write_log(message)
+                    await asyncio.sleep(self._conn_backoff)
+                    continue
+
                 print(f"[JARVIS] Error ({type(e).__name__}): {e}")
                 traceback.print_exc()
 
