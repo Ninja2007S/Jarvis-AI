@@ -74,7 +74,10 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
             lines = [_fmt_event(e) for e in events]
             if player:
                 try:
-                    player.show_content("CALENDAR — upcoming", "\n".join(lines))
+                    if hasattr(player, "show_calendar_cards"):
+                        player.show_calendar_cards(events, "TODAY / UPCOMING AGENDA")
+                    else:
+                        player.show_content("CALENDAR — upcoming", "\n".join(lines))
                 except Exception:
                     pass
             return (f"You have {len(events)} upcoming event"

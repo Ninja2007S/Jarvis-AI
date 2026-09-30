@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
 from core.earth_globe import EarthGlobePanel
+from core.hud_workspace import HudWorkspace
 
 try:
     from core.avatar import HoloAvatar
@@ -3435,10 +3436,12 @@ class AIProviderOverlay(_HudOverlay):
 
 
 class MainWindow(QMainWindow):
+    _close_sig       = pyqtSignal()
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
     _hud_pulse_sig  = pyqtSignal(str)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
+    _workspace_sig  = pyqtSignal(str, object) # (view type, payload) — thread-safe HUD viewer
     _earth_sig      = pyqtSignal(str, str, str)  # destination, origin, mode
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
@@ -3561,8 +3564,13 @@ class MainWindow(QMainWindow):
         self._earth_panel = EarthGlobePanel()
         self._earth_panel.close_requested.connect(self._close_earth)
         self._hud_cam_stack.addWidget(self._earth_panel)
+        self._workspace = HudWorkspace()
+        self._workspace.close_requested.connect(self._close_workspace)
+        self._workspace.route_requested.connect(lambda destination, origin: self._show_earth(destination, origin, "flight_route"))
+        self._hud_cam_stack.addWidget(self._workspace)
         self._earth_open = False
         self._cam_active = False
+        self._workspace_open = False
 
         self._center_split = QSplitter(Qt.Orientation.Vertical)
         self._center_split.setStyleSheet(f"""
@@ -3605,10 +3613,12 @@ class MainWindow(QMainWindow):
         self._metric_tmr.start(2000)
         self._update_metrics()
 
+        self._close_sig.connect(self.close)
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
         self._hud_pulse_sig.connect(self._on_hud_activity)
         self._content_sig.connect(self._show_content)
+        self._workspace_sig.connect(self._show_workspace)
         self._earth_sig.connect(self._show_earth)
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
@@ -3669,12 +3679,64 @@ class MainWindow(QMainWindow):
     def _show_earth(self, destination: str = "", origin: str = "", mode: str = "show") -> None:
         if self._cam_active:
             self.stop_camera_stream()
+        self._workspace_open = False
         self._earth_open = True
         self._earth_panel.open_view(destination, origin, mode)
         self._hud_cam_stack.setCurrentWidget(self._earth_panel)
 
     def _close_earth(self) -> None:
         self._earth_open = False
+        self._hud_cam_stack.setCurrentIndex(1 if self._cam_active else 0)
+
+    def _show_workspace(self, kind: str, payload) -> None:
+        if self._cam_active:
+            self.stop_camera_stream()
+        self._earth_open = False
+        self._workspace_open = True
+        data = payload if isinstance(payload, dict) else {"value": payload}
+        if kind == "video_pause":
+            self._workspace._pause_video()
+        elif kind == "video_mute":
+            self._workspace.set_video_muted(bool(data.get("muted", True)))
+        elif kind == "video":
+            self._workspace.show_video(data.get("source", ""), data.get("title", "VIDEO"))
+        elif kind == "web":
+            self._workspace.show_webpage(data.get("url", ""), data.get("title", "ARTICLE"))
+        elif kind == "images":
+            self._workspace.show_images(data.get("images", []), data.get("query", "IMAGE RESULTS"))
+        elif kind == "document":
+            self._workspace.show_document(data.get("path", ""), data.get("summary", ""))
+        elif kind == "news":
+            self._workspace.show_news(data.get("items", data.get("text", "")), data.get("title", "HEADLINES"))
+        elif kind == "email":
+            self._workspace.show_email(data.get("items", []), data.get("title", "INBOX"))
+        elif kind == "calendar":
+            self._workspace.show_calendar(data.get("items", []), data.get("title", "AGENDA"))
+        elif kind == "weather":
+            self._workspace.show_weather(data.get("report", {}))
+        elif kind == "flights":
+            self._workspace.show_flights(data.get("items", []), data.get("origin", ""), data.get("destination", ""), data.get("date", ""))
+        elif kind == "reminder":
+            target = data.get("target")
+            if isinstance(target, str):
+                try:
+                    from datetime import datetime
+                    target = datetime.fromisoformat(target)
+                except Exception:
+                    target = None
+            if target is not None:
+                self._workspace.add_reminder(data.get("message", "Reminder"), target)
+            self._workspace.show_view("timers", "COUNTDOWN / REMINDERS")
+        elif kind == "timer":
+            self._workspace.start_countdown(data.get("minutes", 25), data.get("label", "COUNTDOWN"))
+        elif kind == "market":
+            self._workspace.show_market_query(data.get("symbol", ""))
+        else:
+            self._workspace.show_view(kind)
+        self._hud_cam_stack.setCurrentWidget(self._workspace)
+
+    def _close_workspace(self) -> None:
+        self._workspace_open = False
         self._hud_cam_stack.setCurrentIndex(1 if self._cam_active else 0)
 
     def _on_cam_frame(self, data: bytes) -> None:
@@ -6094,13 +6156,79 @@ class JarvisUI:
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
 
-    def wait_for_api_key(self):
-        while not self._win._ready:
+    def wait_for_api_key(self, stop_event=None):
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                return False
+            try:
+                if self._win._ready:
+                    return True
+            except RuntimeError:
+                # The native window was closed while setup was still open.
+                return False
             time.sleep(0.1)
+
+    def request_close(self):
+        """Thread-safe request to close the native desktop window."""
+        try:
+            self._win._close_sig.emit()
+        except RuntimeError:
+            # The user may already have closed the Qt window.
+            pass
 
     def show_content(self, title: str, text: str):
         """Thread-safe: display content in the panel below the HUD."""
         self._win._content_sig.emit(title[:48], text[:4000])
+
+    def _show_workspace_view(self, kind: str, payload: dict):
+        """Queue a typed viewer update onto the Qt GUI thread."""
+        self._win._workspace_sig.emit(str(kind), dict(payload or {}))
+
+    def show_video(self, source: str, title: str = "VIDEO"):
+        self._show_workspace_view("video", {"source": str(source or ""), "title": str(title or "VIDEO")})
+
+    def pause_video(self):
+        self._show_workspace_view("video_pause", {})
+
+    def set_video_muted(self, muted: bool):
+        self._show_workspace_view("video_mute", {"muted": bool(muted)})
+
+    def show_webpage(self, url: str, title: str = "ARTICLE"):
+        self._show_workspace_view("web", {"url": str(url or ""), "title": str(title or "ARTICLE")})
+
+    def show_images(self, images, query: str = "IMAGE RESULTS"):
+        self._show_workspace_view("images", {"images": list(images or []), "query": str(query or "IMAGE RESULTS")})
+
+    def show_document(self, path: str, summary: str = ""):
+        self._show_workspace_view("document", {"path": str(path or ""), "summary": str(summary or "")})
+
+    def show_news_cards(self, items, title: str = "HEADLINES"):
+        self._show_workspace_view("news", {"items": items, "title": str(title or "HEADLINES")})
+
+    def show_email_cards(self, items, title: str = "INBOX"):
+        self._show_workspace_view("email", {"items": list(items or []), "title": str(title or "INBOX")})
+
+    def show_calendar_cards(self, items, title: str = "AGENDA"):
+        self._show_workspace_view("calendar", {"items": list(items or []), "title": str(title or "AGENDA")})
+
+    def show_weather(self, report: dict):
+        self._show_workspace_view("weather", {"report": dict(report or {})})
+
+    def show_flight_cards(self, items, origin: str, destination: str, date: str):
+        self._show_workspace_view("flights", {"items": list(items or []), "origin": origin, "destination": destination, "date": date})
+
+    def add_reminder_card(self, message: str, target):
+        value = target.isoformat() if hasattr(target, "isoformat") else str(target or "")
+        self._show_workspace_view("reminder", {"message": message, "target": value})
+
+    def start_timer(self, minutes: int, label: str = "COUNTDOWN"):
+        self._show_workspace_view("timer", {"minutes": int(minutes), "label": str(label or "COUNTDOWN")})
+
+    def show_market_chart(self, symbol: str):
+        self._show_workspace_view("market", {"symbol": str(symbol or "")})
+
+    def show_live_panel(self, name: str):
+        self._show_workspace_view(str(name or "system"), {})
 
     def show_earth(self, destination: str = "", origin: str = "", mode: str = "show") -> None:
         """Thread-safe: show the in-window globe, locate a place, or plot a route."""

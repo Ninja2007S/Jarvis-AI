@@ -221,6 +221,25 @@ def _ddg_search(
     return results
 
 
+def _ddg_images(query: str, max_results: int = 12) -> list[dict]:
+    """Return a small, display-only image gallery payload from DDGS."""
+    DDGS = _get_ddgs()
+    with DDGS() as ddgs:
+        results = list(ddgs.images(query, max_results=max_results))
+    out = []
+    for row in results:
+        image_url = str(row.get("image") or row.get("thumbnail") or "").strip()
+        if not image_url.startswith("https://"):
+            continue
+        out.append({
+            "url": image_url,
+            "title": str(row.get("title") or row.get("source") or "Image result")[:120],
+        })
+        if len(out) >= max_results:
+            break
+    return out
+
+
 def _ddg_news(
     query: str,
     max_results: int = 8,
@@ -797,8 +816,25 @@ def web_search(
         elif mode == "price":
             raw = _price(query)
 
+        elif mode in ("image", "images"):
+            images = _ddg_images(query, max_results=12)
+            if player and images and hasattr(player, "show_images"):
+                player.show_images(images, query)
+            raw = (
+                f"Found {len(images)} image results for {query}. "
+                "The thumbnails are displayed in the JARVIS HUD."
+                if images else f"No image results were found for {query}."
+            )
+
         else:
             raw = _search(query)
+
+        if mode == "news" and player and hasattr(player, "show_news_cards"):
+            player.show_news_cards(raw, f"HEADLINES / {query}")
+        elif mode == "search" and player and hasattr(player, "show_news_cards") and "http" in raw.lower():
+            player.show_news_cards(raw, f"SEARCH RESULTS / {query}")
+        elif mode == "price" and player and hasattr(player, "show_market_chart"):
+            player.show_market_chart(query)
 
         return injection_guard.wrap_untrusted(
             raw,
@@ -824,7 +860,8 @@ TOOL = {
         "For Sri Lankan local news, use news mode and return headlines from "
         "Newsfirst and Ada Derana in both English and Sinhala when available. "
         "'research' (deep comprehensive answer), 'price' (product cost "
-        "lookup), 'compare' (side-by-side comparison of items)."
+        "lookup), 'images' (show a thumbnail gallery), 'compare' (side-by-side "
+        "comparison of items). Search and news results appear as HUD cards."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -836,7 +873,7 @@ TOOL = {
             "mode": {
                 "type": "STRING",
                 "description": (
-                    "search | news | research | price | compare"
+                    "search | news | research | price | images | compare"
                 ),
             },
             "items": {

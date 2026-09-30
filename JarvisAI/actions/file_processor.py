@@ -850,6 +850,10 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
 
     try:
         result = handler(path, action, params, speak)
+        if player and file_type in {"pdf", "docx", "text"} and hasattr(player, "show_document"):
+            player.show_document(str(path), str(result or ""))
+        elif player and file_type == "image" and hasattr(player, "show_images"):
+            player.show_images([{"path": str(path), "title": path.name}], "IMAGE / FILE VIEWER")
         return injection_guard.wrap_untrusted(
             str(result or "Done."), f"file:{path.name}"
         )

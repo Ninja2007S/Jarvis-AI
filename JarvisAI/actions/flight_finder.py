@@ -342,6 +342,9 @@ def flight_finder(parameters: dict, player=None, speak=None) -> str:
         flights = _parse_flights_with_gemini(raw_text, origin, destination, date)
         spoken  = _format_spoken(flights, origin, destination, date)
 
+        if player and hasattr(player, "show_flight_cards"):
+            player.show_flight_cards(flights, origin, destination, date)
+
         if speak:
             speak(spoken)
 

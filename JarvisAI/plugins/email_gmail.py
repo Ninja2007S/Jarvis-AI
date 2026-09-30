@@ -99,10 +99,13 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
 
             if player:
                 try:
-                    player.show_content(
-                        f"EMAIL — {query or 'recent'}",
-                        "\n".join(lines),
-                    )
+                    if hasattr(player, "show_email_cards"):
+                        player.show_email_cards(items, f"EMAIL — {query or 'recent'}")
+                    else:
+                        player.show_content(
+                            f"EMAIL — {query or 'recent'}",
+                            "\n".join(lines),
+                        )
                 except Exception:
                     pass
 

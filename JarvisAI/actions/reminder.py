@@ -291,6 +291,18 @@ def reminder(
     session_memory=None,
 ) -> str:
 
+    action = str(parameters.get("action", "reminder")).strip().lower()
+    if action in {"timer", "countdown", "pomodoro"}:
+        try:
+            minutes = int(parameters.get("duration_minutes") or (25 if action == "pomodoro" else 1))
+        except Exception:
+            minutes = 25 if action == "pomodoro" else 1
+        minutes = max(1, min(24 * 60, minutes))
+        if player and hasattr(player, "start_timer"):
+            player.start_timer(minutes, "POMODORO / FOCUS" if action == "pomodoro" else "COUNTDOWN")
+            return f"{('Pomodoro focus' if action == 'pomodoro' else 'Countdown timer')} started for {minutes} minutes in the HUD."
+        return "The HUD timer is unavailable in this session."
+
     date_str = parameters.get("date", "").strip()
     time_str = parameters.get("time", "").strip()
     message  = parameters.get("message", "Reminder").strip()
@@ -332,6 +344,11 @@ def reminder(
 
     if player:
         player.write_log(f"[Reminder] ✅ {date_str} {time_str} — {safe_msg[:40]}")
+        if hasattr(player, "add_reminder_card"):
+            try:
+                player.add_reminder_card(safe_msg, target_dt)
+            except Exception as exc:
+                print(f"[Reminder] HUD countdown registration failed: {exc}")
 
     friendly_time = target_dt.strftime("%B %d at %I:%M %p")
     return f"Reminder set for {friendly_time}."
@@ -340,10 +357,12 @@ def reminder(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "reminder",
-    "description": "Sets a timed reminder using Task Scheduler.",
+    "description": "Sets a dated reminder or starts a visible HUD countdown/Pomodoro timer. Use action='timer' with duration_minutes for a countdown or action='pomodoro' for a 25-minute focus timer. For a scheduled reminder use action='reminder' with date, time, message.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
+            "action": {"type": "STRING", "description": "reminder (default) | timer | countdown | pomodoro"},
+            "duration_minutes": {"type": "INTEGER", "description": "Countdown length in minutes; for timer/countdown actions"},
             "date": {
                 "type": "STRING",
                 "description": "Date in YYYY-MM-DD format"
@@ -357,11 +376,7 @@ TOOL = {
                 "description": "Reminder message text"
             }
         },
-        "required": [
-            "date",
-            "time",
-            "message"
-        ]
+        "required": []
     },
     "handler": reminder,
 }

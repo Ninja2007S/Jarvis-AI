@@ -1,0 +1,882 @@
+"""Native, in-HUD media and live-data workspace for JARVIS.
+
+The workspace replaces the avatar canvas only while a user-requested view is
+open. It keeps video muted until the user asks for sound and treats web pages
+as display-only content; no page is given access to JARVIS tools.
+"""
+from __future__ import annotations
+
+import html
+import json
+import os
+import re
+import time
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
+
+from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtWidgets import (
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QGraphicsOpacityEffect, QScrollArea, QSizePolicy, QStackedWidget, QTabWidget,
+    QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget,
+)
+
+try:
+    from PyQt6.QtWebEngineCore import QWebEngineSettings
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+except Exception:  # WebEngine is an optional feature on minimal installs.
+    QWebEngineSettings = QWebEngineView = None
+
+try:
+    from PyQt6.QtPdf import QPdfDocument
+    from PyQt6.QtPdfWidgets import QPdfView
+except Exception:
+    QPdfDocument = QPdfView = None
+
+
+_BG = "#080e12"
+_PANEL = "#10191d"
+_PANEL2 = "#151f22"
+_BORDER = "#34464a"
+_TEAL = "#71d4c2"
+_AMBER = "#d98a59"
+_TEXT = "#c8d9d5"
+_DIM = "#78908d"
+_WHITE = "#edf3e8"
+_VIDEO_SUFFIXES = {".mp4", ".m4v", ".webm", ".mov", ".mkv", ".avi", ".ogv"}
+
+
+def _valid_http_url(value: str) -> bool:
+    try:
+        return urlparse(value).scheme.lower() in {"http", "https"}
+    except Exception:
+        return False
+
+
+def _youtube_id(value: str) -> str | None:
+    try:
+        u = urlparse(value)
+        if u.hostname and u.hostname.lower().endswith("youtu.be"):
+            candidate = u.path.strip("/").split("/")[0]
+        elif u.hostname and "youtube.com" in u.hostname.lower():
+            candidate = parse_qs(u.query).get("v", [""])[0]
+            if not candidate:
+                bits = [b for b in u.path.split("/") if b]
+                candidate = bits[1] if len(bits) > 1 and bits[0] in {"embed", "shorts", "live"} else ""
+        else:
+            return None
+        return candidate if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate or "") else None
+    except Exception:
+        return None
+
+
+class _MetricPlot(QWidget):
+    """Small dependency-free scrolling plot for resource/market history."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(170)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._series: dict[str, list[float | None]] = {}
+        self._colors = {"CPU": QColor(_TEAL), "RAM": QColor(_AMBER),
+                        "GPU": QColor("#91a7de"), "PRICE": QColor(_TEAL)}
+
+    def add_sample(self, values: dict[str, float | None], limit: int = 100):
+        keys = set(self._series) | set(values)
+        for key in keys:
+            row = self._series.setdefault(key, [])
+            row.append(values.get(key))
+            del row[:-limit]
+        self.update()
+
+    def set_values(self, key: str, values):
+        row = [float(v) for v in values if v is not None]
+        self._series[key] = row[-100:]
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QColor(_BG))
+        area = self.rect().adjusted(34, 14, -12, -22)
+        p.setPen(QPen(QColor(_BORDER), 1))
+        for i in range(5):
+            y = area.top() + i * area.height() / 4
+            p.drawLine(area.left(), int(y), area.right(), int(y))
+            p.setPen(QColor(_DIM))
+            p.setFont(QFont("Courier New", 7))
+            p.drawText(1, int(y) + 3, f"{100 - i * 25:>3}")
+            p.setPen(QPen(QColor(_BORDER), 1))
+        for key, row in self._series.items():
+            valid = [(i, v) for i, v in enumerate(row) if v is not None]
+            if len(valid) < 2:
+                continue
+            max_value = max(max(v for _, v in valid), 1.0)
+            n = max(len(row) - 1, 1)
+            points = []
+            for i, value in valid:
+                # Percentage series uses the 0–100 axis. PRICE rescales to its
+                # own range so small market changes remain visible.
+                if key == "PRICE":
+                    vals = [v for _, v in valid]
+                    low, high = min(vals), max(vals)
+                    norm = 0.5 if high == low else (value - low) / (high - low)
+                else:
+                    norm = max(0.0, min(1.0, value / max_value if max_value > 100 else value / 100.0))
+                x = area.left() + i * area.width() / n
+                y = area.bottom() - norm * area.height()
+                points.append((x, y))
+            color = self._colors.get(key, QColor(_TEAL))
+            p.setPen(QPen(color, 2))
+            for a, b in zip(points, points[1:]):
+                p.drawLine(int(a[0]), int(a[1]), int(b[0]), int(b[1]))
+        p.setPen(QColor(_DIM))
+        p.setFont(QFont("Courier New", 7))
+        legend = "   ".join(self._series.keys())
+        p.drawText(area.left(), self.height() - 4, legend)
+
+
+class HudWorkspace(QWidget):
+    """One native display surface for media, documents and live information."""
+
+    close_requested = pyqtSignal()
+    route_requested = pyqtSignal(str, str)
+    market_loaded = pyqtSignal(object)
+    thumbnail_loaded = pyqtSignal(int, bytes)
+
+    _TABS = (
+        ("video", "MEDIA"), ("web", "WEB"), ("images", "IMAGES"),
+        ("document", "DOCUMENT"), ("news", "HEADLINES"),
+        ("email", "INBOX"), ("calendar", "AGENDA"),
+        ("system", "SYSTEM"), ("weather", "WEATHER"),
+        ("flights", "FLIGHTS"), ("timers", "TIMERS"),
+        ("market", "MARKET"),
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("HudWorkspace")
+        self.setStyleSheet(f"background:{_BG}; color:{_TEXT};")
+        self._reminders: list[dict] = []
+        self._video_muted = True
+        self._timer_total = 0
+        self._timer_deadline = 0.0
+        self._timer_running = False
+        self._pomodoro_work = False
+        self._sample_timer = QTimer(self)
+        self._sample_timer.timeout.connect(self._sample_system)
+        self._sample_timer.start(2000)
+        self.market_loaded.connect(self._on_market_loaded)
+        self.thumbnail_loaded.connect(self._on_thumbnail_loaded)
+        self._gallery_buttons = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 7, 8, 8)
+        root.setSpacing(6)
+        top = QHBoxLayout()
+        brand = QLabel("◈  JARVIS / VISUAL FIELD")
+        brand.setStyleSheet(f"color:{_TEAL}; font: bold 9pt 'Courier New';")
+        top.addWidget(brand)
+        self._view_title = QLabel("LIVE VIEW")
+        self._view_title.setStyleSheet(f"color:{_DIM}; font: 8pt 'Courier New';")
+        top.addWidget(self._view_title)
+        top.addStretch(1)
+        close = QPushButton("RETURN TO AVATAR  ×")
+        close.setStyleSheet(self._button_style())
+        close.clicked.connect(self.close_requested.emit)
+        top.addWidget(close)
+        root.addLayout(top)
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border:1px solid {_BORDER}; background:{_BG}; }}
+            QTabBar::tab {{ background:{_PANEL}; color:{_DIM}; padding:6px 9px;
+                border:1px solid {_BORDER}; font: bold 7pt 'Courier New'; }}
+            QTabBar::tab:selected {{ color:{_TEAL}; background:{_PANEL2};
+                border-bottom:2px solid {_TEAL}; }}
+            QTabBar::tab:hover {{ color:{_WHITE}; }}
+        """)
+        self._page_index = {}
+        for key, title in self._TABS:
+            page = self._make_page(key)
+            self._page_index[key] = self.tabs.addTab(page, title)
+        root.addWidget(self.tabs, 1)
+
+    @staticmethod
+    def _button_style():
+        return f"QPushButton{{background:{_PANEL2};color:{_TEXT};border:1px solid {_BORDER};padding:5px 9px;font:8pt 'Courier New';}} QPushButton:hover{{color:{_TEAL};border-color:{_TEAL};}}"
+
+    def _make_page(self, key: str) -> QWidget:
+        if key == "video":
+            return self._make_video_page()
+        if key == "web":
+            return self._make_web_page()
+        if key == "images":
+            return self._make_image_page()
+        if key == "document":
+            return self._make_document_page()
+        if key == "system":
+            return self._make_system_page()
+        if key == "timers":
+            return self._make_timer_page()
+        if key == "market":
+            return self._make_market_page()
+        return self._make_cards_page(key)
+
+    def _placeholder(self, message: str) -> QLabel:
+        label = QLabel(message)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setWordWrap(True)
+        label.setStyleSheet(f"color:{_DIM}; padding:18px; background:{_BG};")
+        return label
+
+    def _make_video_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        bar = QHBoxLayout()
+        self._video_label = QLabel("VIDEO / MUTED BY DEFAULT")
+        self._video_label.setStyleSheet(f"color:{_TEAL}; font:bold 8pt 'Courier New';")
+        bar.addWidget(self._video_label)
+        bar.addStretch(1)
+        self._video_sound = QPushButton("ENABLE SOUND  ◌")
+        self._video_sound.setStyleSheet(self._button_style())
+        self._video_sound.clicked.connect(self._toggle_video_sound)
+        bar.addWidget(self._video_sound)
+        self._video_pause = QPushButton("PAUSE")
+        self._video_pause.setStyleSheet(self._button_style())
+        self._video_pause.clicked.connect(self._pause_video)
+        bar.addWidget(self._video_pause)
+        pick = QPushButton("LOAD LOCAL VIDEO…")
+        pick.setStyleSheet(self._button_style())
+        pick.clicked.connect(self._pick_video)
+        bar.addWidget(pick)
+        lay.addLayout(bar)
+        self._video_view = QWebEngineView() if QWebEngineView else None
+        if self._video_view:
+            self._configure_webview(self._video_view)
+            lay.addWidget(self._video_view, 1)
+        else:
+            lay.addWidget(self._placeholder("Embedded playback requires PyQt6-WebEngine. Install the project requirements to enable the HUD video player."), 1)
+        return page
+
+    def _make_web_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        bar = QHBoxLayout()
+        self._url_entry = QLineEdit()
+        self._url_entry.setPlaceholderText("https://…  Internal HUD page")
+        self._url_entry.setStyleSheet(f"background:{_PANEL};color:{_TEXT};border:1px solid {_BORDER};padding:6px;font:9pt 'Courier New';")
+        self._url_entry.returnPressed.connect(self._navigate_web)
+        bar.addWidget(self._url_entry, 1)
+        for label, callback in (("GO", self._navigate_web), ("BACK", self._web_back), ("RELOAD", self._web_reload)):
+            button = QPushButton(label)
+            button.setStyleSheet(self._button_style())
+            button.clicked.connect(callback)
+            bar.addWidget(button)
+        lay.addLayout(bar)
+        self._web_view = QWebEngineView() if QWebEngineView else None
+        if self._web_view:
+            self._configure_webview(self._web_view)
+            self._web_view.urlChanged.connect(lambda u: self._url_entry.setText(u.toString()))
+            lay.addWidget(self._web_view, 1)
+        else:
+            lay.addWidget(self._placeholder("Internal web pages require PyQt6-WebEngine."), 1)
+        return page
+
+    @staticmethod
+    def _configure_webview(view):
+        # QWebEngineView does not expose setBackgroundColor() in all PyQt6
+        # releases. Keep the widget's empty/loading area styled using the
+        # QWidget API available across supported versions.
+        view.setStyleSheet(f"background-color: {_BG};")
+        settings = view.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, False)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+
+    def _make_image_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        self._image_view = QWebEngineView() if QWebEngineView else None
+        if self._image_view:
+            self._configure_webview(self._image_view)
+            lay.addWidget(self._image_view, 1)
+        else:
+            self._image_view = QLabel("Install PyQt6-WebEngine for URL image previews.")
+            self._image_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(self._image_view, 1)
+        self._gallery = QWidget()
+        self._gallery_row = QHBoxLayout(self._gallery)
+        self._gallery_row.setContentsMargins(0, 3, 0, 0)
+        self._gallery_row.setSpacing(6)
+        self._gallery_scroll = QScrollArea()
+        self._gallery_scroll.setWidgetResizable(True)
+        self._gallery_scroll.setFixedHeight(92)
+        self._gallery_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._gallery_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._gallery_scroll.setWidget(self._gallery)
+        lay.addWidget(self._gallery_scroll)
+        return page
+
+    def _make_document_page(self) -> QWidget:
+        page = QWidget()
+        lay = QHBoxLayout(page)
+        self._doc_view_stack = QStackedWidget()
+        self._pdf_document = QPdfDocument(self) if QPdfDocument else None
+        if QPdfView and self._pdf_document:
+            # Some PyQt6 builds require the QWidget parent argument explicitly.
+            self._pdf_view = QPdfView(self._doc_view_stack)
+            self._pdf_view.setDocument(self._pdf_document)
+            self._doc_view_stack.addWidget(self._pdf_view)
+        else:
+            self._pdf_view = None
+        self._doc_text = QTextBrowser()
+        self._doc_text.setOpenExternalLinks(False)
+        self._doc_text.setStyleSheet(f"background:{_BG};color:{_TEXT};border:1px solid {_BORDER};padding:12px;")
+        self._doc_view_stack.addWidget(self._doc_text)
+        lay.addWidget(self._doc_view_stack, 3)
+        summary_frame = QFrame()
+        summary_frame.setStyleSheet(f"background:{_PANEL};border-left:1px solid {_BORDER};")
+        side = QVBoxLayout(summary_frame)
+        self._doc_title = QLabel("DOCUMENT NOTES")
+        self._doc_title.setStyleSheet(f"color:{_TEAL};font:bold 8pt 'Courier New';")
+        side.addWidget(self._doc_title)
+        self._doc_summary = QTextEdit()
+        self._doc_summary.setReadOnly(True)
+        self._doc_summary.setStyleSheet(f"background:{_BG};color:{_TEXT};border:1px solid {_BORDER};padding:7px;")
+        side.addWidget(self._doc_summary, 1)
+        lay.addWidget(summary_frame, 2)
+        return page
+
+    def _make_cards_page(self, key: str) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        self._cards_status = getattr(self, "_cards_status", {})
+        status = QLabel("Awaiting data")
+        status.setStyleSheet(f"color:{_DIM};font:8pt 'Courier New';padding:4px;")
+        self._cards_status[key] = status
+        status_row = QHBoxLayout()
+        status_row.addWidget(status, 1)
+        if key == "flights":
+            self._flight_route = ("", "")
+            route = QPushButton("PLOT AIR PATH ON GLOBE")
+            route.setStyleSheet(self._button_style())
+            route.clicked.connect(lambda: self.route_requested.emit(*self._flight_route))
+            status_row.addWidget(route)
+        lay.addLayout(status_row)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(f"QScrollArea{{border:0;background:{_BG};}}")
+        host = QWidget()
+        cards = QVBoxLayout(host)
+        cards.setContentsMargins(2, 2, 6, 2)
+        cards.setSpacing(7)
+        cards.addStretch(1)
+        scroll.setWidget(host)
+        lay.addWidget(scroll, 1)
+        self._card_hosts = getattr(self, "_card_hosts", {})
+        self._card_hosts[key] = (host, cards)
+        return page
+
+    def _make_system_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        self._system_status = QLabel("CPU  —    RAM  —    GPU  —    BATTERY  —")
+        self._system_status.setStyleSheet(f"color:{_TEAL};font:bold 9pt 'Courier New';padding:8px;")
+        lay.addWidget(self._system_status)
+        self._system_plot = _MetricPlot()
+        lay.addWidget(self._system_plot, 1)
+        return page
+
+    def _make_timer_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        title = QLabel("LOCAL COUNTDOWN / POMODORO")
+        title.setStyleSheet(f"color:{_TEAL};font:bold 9pt 'Courier New';")
+        lay.addWidget(title)
+        self._timer_face = QLabel("25:00")
+        self._timer_face.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._timer_face.setStyleSheet(f"color:{_WHITE};font:bold 42pt 'Courier New';background:{_PANEL};border:1px solid {_BORDER};padding:20px;")
+        lay.addWidget(self._timer_face, 1)
+        controls = QHBoxLayout()
+        self._timer_minutes = QLineEdit("25")
+        self._timer_minutes.setPlaceholderText("minutes")
+        self._timer_minutes.setMaximumWidth(90)
+        self._timer_minutes.setStyleSheet(f"background:{_PANEL};color:{_TEXT};border:1px solid {_BORDER};padding:5px;")
+        controls.addWidget(self._timer_minutes)
+        for label, callback in (("START / PAUSE", self._toggle_timer), ("RESET", self._reset_timer), ("POMODORO 25/5", self._start_pomodoro)):
+            b = QPushButton(label)
+            b.setStyleSheet(self._button_style())
+            b.clicked.connect(callback)
+            controls.addWidget(b)
+        controls.addStretch(1)
+        lay.addLayout(controls)
+        self._reminder_list = QLabel("No JARVIS reminders in this session.")
+        self._reminder_list.setWordWrap(True)
+        self._reminder_list.setStyleSheet(f"color:{_TEXT};background:{_PANEL};border:1px solid {_BORDER};padding:9px;")
+        lay.addWidget(self._reminder_list)
+        self._timer_tick = QTimer(self)
+        self._timer_tick.timeout.connect(self._tick_timer)
+        self._timer_tick.start(250)
+        return page
+
+    def _make_market_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        row = QHBoxLayout()
+        self._market_symbol = QLineEdit()
+        self._market_symbol.setPlaceholderText("Ticker / crypto pair (e.g. AAPL or BTC-USD)")
+        self._market_symbol.setStyleSheet(f"background:{_PANEL};color:{_TEXT};border:1px solid {_BORDER};padding:6px;")
+        self._market_symbol.returnPressed.connect(self._load_market)
+        row.addWidget(self._market_symbol, 1)
+        load = QPushButton("LOAD 1-DAY CHART")
+        load.setStyleSheet(self._button_style())
+        load.clicked.connect(self._load_market)
+        row.addWidget(load)
+        lay.addLayout(row)
+        self._market_status = QLabel("Public quote history; no API key is stored by JARVIS.")
+        self._market_status.setStyleSheet(f"color:{_DIM};font:8pt 'Courier New';padding:4px;")
+        lay.addWidget(self._market_status)
+        self._market_plot = _MetricPlot()
+        lay.addWidget(self._market_plot, 1)
+        return page
+
+    def _select(self, key: str, title: str | None = None):
+        index = self._page_index.get(key, self._page_index["system"])
+        self.tabs.setCurrentIndex(index)
+        self._view_title.setText((title or key.replace("_", " ")).upper()[:45])
+
+    def show_view(self, key: str, title: str | None = None):
+        self._select(key, title)
+
+    def show_video(self, source: str, title: str = "JARVIS VIDEO"):
+        source = str(source or "").strip()
+        if not self._video_view or not source:
+            return
+        path = Path(source).expanduser()
+        local = path.is_file()
+        if local:
+            source_url = QUrl.fromLocalFile(str(path.resolve())).toString()
+            base_url = QUrl.fromLocalFile(str(path.resolve().parent) + os.sep)
+            suffix = path.suffix.lower()
+        elif _valid_http_url(source):
+            source_url = source
+            base_url = QUrl(source)
+            suffix = Path(urlparse(source).path).suffix.lower()
+        else:
+            return
+
+        yt = _youtube_id(source_url)
+        if yt:
+            # Give YouTube a stable HTTPS app origin. Its current embedded
+            # player rejects clients that provide neither a Referer nor an
+            # equivalent client identity (player error 153).
+            app_origin = "https://jarvis.local"
+            base_url = QUrl(app_origin + "/")
+            watch_url = f"https://www.youtube.com/watch?v={yt}&autoplay=1&mute=1"
+            media_html = """<!doctype html><html><head><meta charset='utf-8'>
+            <style>html,body{margin:0;width:100%;height:100%;background:#05090b;overflow:hidden}
+            #yt{width:100%;height:100%;border:0} #ytError{position:fixed;left:12px;right:12px;bottom:10px;
+            color:#f0c58b;background:#111b20;padding:8px;font:13px 'Courier New';z-index:5}</style></head>
+            <body><iframe id='yt' src='https://www.youtube-nocookie.com/embed/__VIDEO_ID__?autoplay=1&mute=1&controls=1&playsinline=1&enablejsapi=1&origin=https%3A%2F%2Fjarvis.local'
+            allow='autoplay; encrypted-media; picture-in-picture' allowfullscreen></iframe>
+            <div id='ytError' hidden></div><script>
+            const fallbackUrl=__WATCH_URL__;
+            function fallbackToWatch(reason){const box=document.getElementById('ytError');box.hidden=false;box.textContent=reason+' — opening the YouTube watch page inside the HUD…';setTimeout(()=>location.replace(fallbackUrl),900);}
+            let apiReady=false;
+            function onYouTubeIframeAPIReady(){apiReady=true;new YT.Player('yt',{events:{onError:(event)=>{
+              const messages={2:'Invalid video request',5:'HTML5 playback error',100:'Video unavailable or private',101:'This video blocks embedded playback',150:'This video blocks embedded playback',153:'YouTube did not receive an HTTP Referer/client identity'};
+              const message='YouTube player error '+event.data+': '+(messages[event.data]||'Playback failed');
+              if([101,150,153].includes(event.data))fallbackToWatch(message);else{const box=document.getElementById('ytError');box.hidden=false;box.textContent=message;}
+            }}});}
+            setTimeout(()=>{if(!apiReady)fallbackToWatch('YouTube player did not initialize');},12000);
+            </script><script async src='https://www.youtube.com/iframe_api'></script></body></html>"""
+            media_html = media_html.replace("__VIDEO_ID__", yt).replace(
+                "__WATCH_URL__", json.dumps(watch_url)
+            )
+            self._video_view.page().setAudioMuted(True)
+        else:
+            if not local and suffix not in _VIDEO_SUFFIXES:
+                self._open_web_url(source)
+                return
+            media_html = f"""<!doctype html><html><body style='margin:0;background:#05090b;display:grid;place-items:center;height:100vh'>
+            <video id='jarvisVideo' src='{html.escape(source_url, quote=True)}' controls autoplay muted playsinline style='width:100%;height:100%;object-fit:contain'></video>
+            </body></html>"""
+            self._video_view.page().setAudioMuted(True)
+        self._video_label.setText((title or path.name if local else title or "VIDEO")[:70].upper())
+        self._video_muted = True
+        self._video_sound.setText("ENABLE SOUND  ◌")
+        self._video_view.setHtml(media_html, base_url)
+        self._select("video", title or "VIDEO / MUTED")
+
+    def _toggle_video_sound(self):
+        if not self._video_view:
+            return
+        self.set_video_muted(not self._video_muted)
+
+    def set_video_muted(self, muted: bool):
+        if not self._video_view:
+            return
+        self._video_muted = bool(muted)
+        self._video_view.page().setAudioMuted(self._video_muted)
+        if not self._video_muted:
+            self._video_view.page().runJavaScript("""(()=>{const v=document.querySelector('video'); if(v){v.muted=false;v.volume=1;} const f=document.querySelector('iframe'); if(f){f.contentWindow.postMessage(JSON.stringify({event:'command',func:'unMute',args:[]}), '*');}})()""")
+            self._video_sound.setText("MUTE SOUND  ◖))")
+        else:
+            self._video_view.page().runJavaScript("""(()=>{const v=document.querySelector('video'); if(v)v.muted=true; const f=document.querySelector('iframe'); if(f)f.contentWindow.postMessage(JSON.stringify({event:'command',func:'mute',args:[]}), '*');})()""")
+            self._video_sound.setText("ENABLE SOUND  ◌")
+
+    def _pause_video(self):
+        if self._video_view:
+            self._video_view.page().runJavaScript("""(()=>{const v=document.querySelector('video'); if(v)v.pause(); const f=document.querySelector('iframe'); if(f)f.contentWindow.postMessage(JSON.stringify({event:'command',func:'pauseVideo',args:[]}), '*');})()""")
+
+    def _pick_video(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a video", "", "Video (*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.ogv)")
+        if path:
+            self.show_video(path, Path(path).name)
+
+    def show_webpage(self, url: str, title: str = "ARTICLE"):
+        self._open_web_url(url)
+        self._view_title.setText((title or "ARTICLE").upper()[:45])
+
+    def _open_web_url(self, url: str):
+        if not self._web_view:
+            return
+        url = str(url or "").strip()
+        if not _valid_http_url(url):
+            return
+        self._url_entry.setText(url)
+        self._web_view.setUrl(QUrl(url))
+        self._select("web", "ARTICLE / WEB PAGE")
+
+    def _navigate_web(self):
+        self._open_web_url(self._url_entry.text())
+
+    def _web_back(self):
+        if self._web_view:
+            self._web_view.back()
+
+    def _web_reload(self):
+        if self._web_view:
+            self._web_view.reload()
+
+    def show_images(self, images, query: str = "IMAGE RESULTS"):
+        items = []
+        for item in images or []:
+            if isinstance(item, dict):
+                source = str(item.get("url") or item.get("path") or item.get("image") or "").strip()
+                title = str(item.get("title") or item.get("name") or Path(source).name or "Image")
+            else:
+                source, title = str(item).strip(), "Image"
+            if source and (Path(source).expanduser().is_file() or _valid_http_url(source)):
+                items.append({"source": source, "title": title[:90]})
+        while self._gallery_row.count():
+            child = self._gallery_row.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        self._gallery_buttons = []
+        if not items:
+            if self._image_view:
+                self._image_view.setHtml(f"<body style='background:{_BG};color:{_DIM};font-family:monospace'>No image previews were returned.</body>")
+        else:
+            for item in items[:20]:
+                button = QToolButton()
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+                button.setIconSize(QSize(64, 48))
+                button.setText(item["title"][:22])
+                button.setToolTip(item["source"])
+                button.setMinimumWidth(120)
+                button.setMinimumHeight(76)
+                button.setMaximumWidth(180)
+                button.setStyleSheet(self._button_style().replace("QPushButton", "QToolButton"))
+                button.clicked.connect(lambda _checked=False, it=item: self._display_image(it))
+                self._gallery_row.addWidget(button)
+                index = len(self._gallery_buttons)
+                self._gallery_buttons.append(button)
+                local_path = Path(item["source"]).expanduser()
+                if local_path.is_file():
+                    px = QPixmap(str(local_path))
+                    if not px.isNull():
+                        button.setIcon(QIcon(px.scaled(64, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)))
+                else:
+                    import threading
+                    threading.Thread(target=self._fetch_thumbnail, args=(index, item["source"]), daemon=True, name="JarvisImageThumb").start()
+            self._gallery_row.addStretch(1)
+            self._display_image(items[0])
+        self._select("images", query)
+
+    def _fetch_thumbnail(self, index: int, url: str):
+        try:
+            req = Request(url, headers={"User-Agent": "JARVIS Desktop/1.0"})
+            with urlopen(req, timeout=6) as response:
+                mime = response.headers.get("Content-Type", "")
+                data = response.read(2_000_001)
+            if mime.startswith("image/") and 0 < len(data) <= 2_000_000:
+                self.thumbnail_loaded.emit(index, data)
+        except Exception:
+            pass
+
+    def _on_thumbnail_loaded(self, index: int, data: bytes):
+        if index < 0 or index >= len(self._gallery_buttons):
+            return
+        px = QPixmap()
+        if px.loadFromData(data):
+            self._gallery_buttons[index].setIcon(QIcon(px.scaled(64, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)))
+
+    def _display_image(self, item: dict):
+        source = item["source"]
+        if self._image_view and isinstance(self._image_view, QWebEngineView):
+            if Path(source).expanduser().is_file():
+                src = QUrl.fromLocalFile(str(Path(source).expanduser().resolve())).toString()
+            else:
+                src = source
+            page = f"<html><body style='margin:0;background:{_BG};display:grid;place-items:center;height:100vh'><img src='{html.escape(src, quote=True)}' style='max-width:100%;max-height:100%;object-fit:contain'><div style='position:fixed;bottom:8px;color:{_TEXT};font:12px monospace'>{html.escape(item['title'])}</div></body></html>"
+            self._image_view.setHtml(page, QUrl("https://jarvis-view.local/"))
+        elif Path(source).expanduser().is_file():
+            px = QPixmap(source)
+            if not px.isNull():
+                self._image_view.setPixmap(px.scaled(self._image_view.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+
+    def show_document(self, path: str, summary: str = ""):
+        file = Path(path).expanduser()
+        if not file.is_file():
+            return
+        self._doc_title.setText(file.name[:70])
+        self._doc_summary.setPlainText(str(summary or "Summary not available."))
+        if file.suffix.lower() == ".pdf" and self._pdf_view and self._pdf_document:
+            self._pdf_document.load(str(file.resolve()))
+            self._doc_view_stack.setCurrentWidget(self._pdf_view)
+        else:
+            text = ""
+            try:
+                if file.suffix.lower() == ".docx":
+                    from docx import Document
+                    text = "\n\n".join(p.text for p in Document(file).paragraphs)
+                elif file.suffix.lower() == ".pdf":
+                    import pdfplumber
+                    with pdfplumber.open(file) as pdf:
+                        text = "\n\n".join(p.extract_text() or "" for p in pdf.pages)
+                else:
+                    text = file.read_text(encoding="utf-8", errors="replace")
+            except Exception as exc:
+                text = f"In-HUD preview unavailable: {exc}\n\n{file}"
+            self._doc_text.setPlainText(text[:250_000])
+            self._doc_view_stack.setCurrentWidget(self._doc_text)
+        self._select("document", "DOCUMENT / SUMMARY")
+
+    def show_news(self, data, title: str = "NEWSFIRST / ADA DERANA"):
+        items = []
+        if isinstance(data, list):
+            items = [dict(x) if isinstance(x, dict) else {"title": str(x)} for x in data]
+        else:
+            text = str(data or "")
+            url_re = re.compile(r"https?://[^\s<>]+", re.I)
+            for block in re.split(
+                r"\n\s*\n|(?=^(?:Newsfirst|Ada Derana|English|Sinhala)\b)",
+                text,
+                flags=re.MULTILINE,
+            ):
+                block = block.strip(" \n-•")
+                if not block:
+                    continue
+                urls = url_re.findall(block)
+                items.append({"title": block.splitlines()[0][:160], "detail": "\n".join(block.splitlines()[1:])[:600], "url": urls[0].rstrip(".,)") if urls else ""})
+        self._set_cards("news", items, title, link_label="OPEN STORY")
+
+    def show_email(self, items, title: str = "UNREAD / RECENT EMAIL"):
+        self._set_cards("email", items, title, field_map=("subject", "from", "snippet", "date"))
+
+    def show_calendar(self, events, title: str = "TODAY / UPCOMING AGENDA"):
+        normalized = []
+        for ev in events or []:
+            if isinstance(ev, dict):
+                start = ev.get("start", {})
+                when = start.get("dateTime") or start.get("date") if isinstance(start, dict) else start
+                normalized.append({"title": ev.get("summary", "(untitled)"), "time": when or "Time not set", "detail": ev.get("description", "")})
+            else:
+                normalized.append({"title": str(ev)})
+        self._set_cards("calendar", normalized, title, field_map=("title", "time", "detail"))
+
+    def show_weather(self, report: dict):
+        self._set_cards("weather", report.get("days", []), f"WEATHER / {report.get('location','FORECAST')}", field_map=("day", "summary", "detail"))
+
+    def show_flights(self, flights, origin: str, destination: str, date: str):
+        self._flight_route = (destination, origin)
+        items = []
+        for flight in flights or []:
+            if isinstance(flight, dict):
+                items.append({"title": flight.get("airline", "Flight option"), "time": f"{flight.get('departure','--:--')} → {flight.get('arrival','--:--')}", "detail": f"{flight.get('duration','')} · {flight.get('stops',0)} stop(s) · {flight.get('price','')} {flight.get('currency','')}"})
+        self._set_cards("flights", items, f"FLIGHTS / {origin} → {destination} / {date}", field_map=("title", "time", "detail"))
+
+    def _set_cards(self, key: str, items, title: str, field_map=None, link_label: str = "OPEN"):
+        self._select(key, title)
+        host, layout = self._card_hosts[key]
+        while layout.count():
+            child = layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        self._cards_status[key].setText(f"{len(items or [])} ITEMS  /  UPDATED {datetime.now().strftime('%H:%M:%S')}")
+        for item_index, item in enumerate(list(items or [])[:40]):
+            if not isinstance(item, dict):
+                item = {"title": str(item)}
+            card = QFrame()
+            card.setStyleSheet(f"QFrame{{background:{_PANEL};border:1px solid {_BORDER};}}")
+            row = QHBoxLayout(card)
+            row.setContentsMargins(10, 8, 10, 8)
+            detail_col = QVBoxLayout()
+            title_key = (field_map or ("title",))[0]
+            heading = QLabel(str(item.get(title_key) or item.get("title") or item.get("subject") or "Untitled")[:220])
+            heading.setWordWrap(True)
+            heading.setStyleSheet(f"color:{_WHITE};font:bold 9pt 'Courier New';border:0;")
+            detail_col.addWidget(heading)
+            for field in (field_map or ("title",))[1:]:
+                value = item.get(field)
+                if value:
+                    label = QLabel(str(value)[:900])
+                    label.setWordWrap(True)
+                    label.setStyleSheet(f"color:{_TEXT if field not in ('date','time') else _TEAL};font:8pt 'Courier New';border:0;")
+                    detail_col.addWidget(label)
+            row.addLayout(detail_col, 1)
+            url = str(item.get("url") or item.get("link") or "")
+            if url and _valid_http_url(url):
+                btn = QPushButton(link_label)
+                btn.setStyleSheet(self._button_style())
+                btn.clicked.connect(lambda _checked=False, target=url: self.show_webpage(target, "STORY"))
+                row.addWidget(btn)
+            layout.addWidget(card)
+            # Brief staggered arrival: reads as the instrument board populating
+            # its results, not a generic full-screen modal animation.
+            effect = QGraphicsOpacityEffect(card)
+            card.setGraphicsEffect(effect)
+            animation = QPropertyAnimation(effect, b"opacity", card)
+            animation.setDuration(260)
+            animation.setStartValue(0.0)
+            animation.setEndValue(1.0)
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            card._jarvis_card_animation = animation
+            QTimer.singleShot(min(item_index * 38, 500), animation.start)
+        layout.addStretch(1)
+
+    def _sample_system(self):
+        try:
+            import psutil
+            cpu = float(psutil.cpu_percent(interval=None))
+            ram = float(psutil.virtual_memory().percent)
+            gpu = None
+            try:
+                from actions.system_monitor import _get_gpu_usage
+                value = _get_gpu_usage()
+                gpu = float(value) if value is not None and value >= 0 else None
+            except Exception:
+                pass
+            battery = psutil.sensors_battery()
+            batt = f"{battery.percent:.0f}%" + (" / AC" if battery.power_plugged else " / BATTERY") if battery else "N/A"
+            self._system_status.setText(f"CPU {cpu:4.0f}%    RAM {ram:4.0f}%    GPU {f'{gpu:.0f}%' if gpu is not None else 'N/A'}    BATTERY {batt}")
+            self._system_plot.add_sample({"CPU": cpu, "RAM": ram, "GPU": gpu})
+        except Exception:
+            pass
+
+    def _load_market(self):
+        symbol = self._market_symbol.text().strip().upper()
+        if not re.fullmatch(r"[A-Z0-9.^=_-]{1,24}", symbol):
+            self._market_status.setText("Enter a ticker such as AAPL or BTC-USD.")
+            return
+        self._market_status.setText(f"Fetching {symbol}…")
+        import threading
+        threading.Thread(target=self._market_fetch, args=(symbol,), daemon=True, name="JarvisMarketFetch").start()
+
+    def show_market_query(self, query: str):
+        raw = str(query or "").strip()
+        lowered = raw.lower()
+        aliases = {"bitcoin": "BTC-USD", "btc": "BTC-USD", "ethereum": "ETH-USD", "eth": "ETH-USD", "solana": "SOL-USD", "sol": "SOL-USD"}
+        symbol = next((value for name, value in aliases.items() if re.search(rf"\b{re.escape(name)}\b", lowered)), "")
+        if not symbol:
+            candidates = re.findall(r"\b[A-Z][A-Z0-9.^=_-]{0,12}\b", raw.upper())
+            ignored = {"PRICE", "STOCK", "CHART", "SHOW", "QUOTE", "TODAY", "MARKET", "COST", "VALUE"}
+            symbol = next((item for item in candidates if item not in ignored), "")
+        self._market_symbol.setText(symbol)
+        self._select("market", "MARKET HISTORY")
+        if symbol:
+            self._load_market()
+        else:
+            self._market_status.setText("Enter a ticker (for example AAPL) or crypto pair (BTC-USD) to load its chart.")
+
+    def _market_fetch(self, symbol: str):
+        try:
+            from urllib.request import Request, urlopen
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=5m"
+            req = Request(url, headers={"User-Agent": "JARVIS Desktop/1.0"})
+            with urlopen(req, timeout=12) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            result = body["chart"]["result"][0]
+            closes = [v for v in result.get("indicators", {}).get("quote", [{}])[0].get("close", []) if v is not None]
+            meta = result.get("meta", {})
+            self.market_loaded.emit({"symbol": symbol, "values": closes, "price": meta.get("regularMarketPrice"), "currency": meta.get("currency", ""), "error": "" if closes else "No intraday history was returned."})
+        except Exception as exc:
+            self.market_loaded.emit({"symbol": symbol, "values": [], "error": str(exc)[:180]})
+
+    def _on_market_loaded(self, result: dict):
+        if result.get("values"):
+            self._market_plot.set_values("PRICE", result["values"])
+            price = result.get("price")
+            price_text = f"{price:,.4f} {result.get('currency','')}" if isinstance(price, (int, float)) else ""
+            self._market_status.setText(f"{result['symbol']}  {price_text}  ·  1-DAY / 5-MINUTE PUBLIC HISTORY")
+        else:
+            self._market_status.setText(f"{result['symbol']}: {result.get('error') or 'No chart data available.'}")
+
+    def add_reminder(self, message: str, target: datetime):
+        self._reminders.append({"message": str(message), "target": target})
+        self._reminder_list.setText("\n".join(f"{item['target']:%b %d, %I:%M %p}  ·  {item['message']}" for item in self._reminders[-10:]))
+
+    def start_countdown(self, minutes: int, label: str = "COUNTDOWN"):
+        minutes = max(1, min(24 * 60, int(minutes)))
+        self._timer_minutes.setText(str(minutes))
+        self._timer_total = minutes * 60
+        self._timer_deadline = time.monotonic() + self._timer_total
+        self._timer_running = True
+        self._timer_face.setStyleSheet(f"color:{_WHITE};font:bold 42pt 'Courier New';background:{_PANEL};border:1px solid {_BORDER};padding:20px;")
+        self._select("timers", label)
+        self._tick_timer()
+
+    def _toggle_timer(self):
+        if self._timer_running:
+            self._timer_running = False
+            self._timer_total = max(0, int(self._timer_deadline - time.monotonic()))
+        else:
+            if self._timer_total <= 0:
+                try:
+                    self._timer_total = max(1, min(24 * 3600, int(self._timer_minutes.text()) * 60))
+                except Exception:
+                    self._timer_total = 25 * 60
+            self._timer_deadline = time.monotonic() + self._timer_total
+            self._timer_running = True
+        self._tick_timer()
+
+    def _reset_timer(self):
+        self._timer_running = False
+        try:
+            self._timer_total = max(1, min(24 * 3600, int(self._timer_minutes.text()) * 60))
+        except Exception:
+            self._timer_total = 25 * 60
+        self._timer_face.setText(f"{self._timer_total // 60:02d}:{self._timer_total % 60:02d}")
+
+    def _start_pomodoro(self):
+        self._pomodoro_work = not getattr(self, "_pomodoro_work", True)
+        minutes = 25 if self._pomodoro_work else 5
+        self._timer_minutes.setText(str(minutes))
+        self._timer_total = minutes * 60
+        self._timer_running = True
+        self._timer_deadline = time.monotonic() + self._timer_total
+        self._tick_timer()
+
+    def _tick_timer(self):
+        remaining = max(0, int(self._timer_deadline - time.monotonic())) if self._timer_running else self._timer_total
+        self._timer_face.setText(f"{remaining // 60:02d}:{remaining % 60:02d}")
+        if self._timer_running and remaining <= 0:
+            self._timer_running = False
+            self._timer_face.setStyleSheet(f"color:{_AMBER};font:bold 42pt 'Courier New';background:{_PANEL};border:1px solid {_BORDER};padding:20px;")
+            self._timer_face.setText("TIME")
+

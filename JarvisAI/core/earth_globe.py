@@ -194,6 +194,11 @@ class EarthGlobePanel(QWidget):
                 self._origin.setFocus()
             elif destination.strip():
                 self.route_query()
+        elif mode == "flight_route":
+            if origin.strip() and destination.strip():
+                self._start_lookup("flight_route", origin.strip(), destination.strip())
+            else:
+                self._status.setText("AIR ROUTE NEEDS AN ORIGIN AND DESTINATION")
         elif destination.strip():
             self.locate_query()
         else:
@@ -322,6 +327,41 @@ class EarthGlobePanel(QWidget):
             "end": end,
         }
 
+    @staticmethod
+    def _flight_route(start: dict, end: dict, steps: int = 80) -> dict:
+        """Build a great-circle arc between geocoded cities for globe display.
+
+        This is an illustrative air path, not a live airline airway/track.
+        """
+        import math
+        lat1, lon1 = math.radians(start["lat"]), math.radians(start["lon"])
+        lat2, lon2 = math.radians(end["lat"]), math.radians(end["lon"])
+        a = (math.cos(lat2) * math.sin(lon2 - lon1)) ** 2
+        b = (math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(lon2 - lon1)) ** 2
+        c = math.sin(lat1) * math.sin(lat2) + math.cos(lat1) * math.cos(lat2) * math.cos(lon2 - lon1)
+        angle = math.atan2(math.sqrt(a + b), c)
+        coords = []
+        for index in range(steps + 1):
+            f = index / steps
+            if angle < 1e-9:
+                lat, lon = lat1, lon1
+            else:
+                sin_angle = math.sin(angle)
+                left, right = math.sin((1 - f) * angle) / sin_angle, math.sin(f * angle) / sin_angle
+                x = left * math.cos(lat1) * math.cos(lon1) + right * math.cos(lat2) * math.cos(lon2)
+                y = left * math.cos(lat1) * math.sin(lon1) + right * math.cos(lat2) * math.sin(lon2)
+                z = left * math.sin(lat1) + right * math.sin(lat2)
+                lat, lon = math.atan2(z, math.sqrt(x * x + y * y)), math.atan2(y, x)
+            coords.append([math.degrees(lon), math.degrees(lat)])
+        return {
+            "geometry": {"type": "LineString", "coordinates": coords},
+            "distance_m": 6_371_000 * angle,
+            "duration_s": 0,
+            "start": start,
+            "end": end,
+            "route_type": "air",
+        }
+
     def _lookup_worker(self, mode: str, origin: str, destination: str):
         try:
             end = self._geocode(destination)
@@ -329,7 +369,8 @@ class EarthGlobePanel(QWidget):
                 self._lookup_signal.ready.emit({"mode": "locate", "destination": end})
                 return
             start = self._geocode(origin)
-            route = self._route(start, end)
+            route = (self._flight_route(start, end) if mode == "flight_route"
+                     else self._route(start, end))
             self._lookup_signal.ready.emit({"mode": "route", "route": route})
         except Exception as exc:
             self._lookup_signal.ready.emit({"mode": mode, "error": str(exc)[:200]})
@@ -355,11 +396,17 @@ class EarthGlobePanel(QWidget):
         self._js("showRoute", route)
         self._rotation_button.setText("RESUME ROTATION")
         distance_km = route["distance_m"] / 1000.0
-        minutes = max(1, round(route["duration_s"] / 60.0))
-        self._status.setText(
-            f"DRIVING ROUTE  ·  {route['start']['name'][:48]} → "
-            f"{route['end']['name'][:48]}  ·  {distance_km:.1f} km  ·  ~{minutes} min"
-        )
+        if route.get("route_type") == "air":
+            self._status.setText(
+                f"GREAT-CIRCLE AIR PATH  ·  {route['start']['name'][:48]} → "
+                f"{route['end']['name'][:48]}  ·  {distance_km:.1f} km  ·  illustrative"
+            )
+        else:
+            minutes = max(1, round(route["duration_s"] / 60.0))
+            self._status.setText(
+                f"DRIVING ROUTE  ·  {route['start']['name'][:48]} → "
+                f"{route['end']['name'][:48]}  ·  {distance_km:.1f} km  ·  ~{minutes} min"
+            )
         self._origin.clear()  # Each new route requires a fresh starting point.
 
     def _toggle_rotation(self):

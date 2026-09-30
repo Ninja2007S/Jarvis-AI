@@ -1389,6 +1389,113 @@ counter in the HUD. Choose the mode from the HUD selector beside the audio
 controls. The network is an activity visualization driven by JARVIS's live
 state and audio; it does not expose the AI model's internal activations.
 
+---
+
+# 🖥️ Native HUD Workspace — User Guide
+
+The **Visual Field** opens inside the desktop PyQt app and temporarily replaces
+the avatar area. It does not open a separate browser window. Use **RETURN TO
+AVATAR** at the top of the workspace to restore the face/logo/neural view. The
+tabs remain available while the workspace is open; choosing a tab does not run
+an action by itself.
+
+## Video player
+
+* Say **“Play [song/video] on YouTube”** to search and load the first matching
+  video into the HUD. YouTube starts muted.
+* Say **“Play this video URL”** and provide a YouTube link, or a direct media
+  URL ending in a supported video extension such as `.mp4`, `.webm`, or `.m4v`.
+  A normal webpage URL is shown in the internal web tab; it is not treated as a
+  direct video stream.
+* For a file on the PC, open **MEDIA** and click **LOAD LOCAL VIDEO…**, then
+  choose the file. Playback and supported codecs depend on the Qt WebEngine
+  build installed on the PC.
+* Click **ENABLE SOUND** or say **“Jarvis, enable video sound.”** Say **“mute
+  video”** to silence it again. Click **PAUSE** or say **“pause the video.”**
+* If YouTube blocks embedding (errors 101/150) or refuses the player identity
+  (153), JARVIS attempts to open the regular YouTube watch page **inside the
+  HUD**. Unavailable/private videos can still fail. If an error banner remains,
+  note its code; the GPU/WebGPU console warning alone is not a YouTube player
+  error.
+
+## Web pages and articles
+
+* Say **“Search for [topic]”** to show linked results as cards. Click **OPEN**
+  on a result to view it in the HUD's **WEB** tab.
+* Say **“Show/open this article in the HUD”** with a URL, or use the
+  `browser_control` action `view` with the `url` parameter. The HUD viewer is
+  for reading/navigation. Existing `go_to` and `search` browser actions still
+  use the normal desktop browser.
+* Use **GO**, **BACK**, and **RELOAD** in the WEB tab to navigate. Only HTTP and
+  HTTPS URLs are accepted by this viewer.
+
+## Image gallery
+
+* Say **“Show image results for [subject]”** to search images and populate the
+  **IMAGES** tab. Click a thumbnail in the strip to view it larger.
+* Screenshots saved by the browser action and images opened by the file
+  processor use the same gallery. Remote thumbnails require internet access;
+  local images remain on the PC.
+
+## PDF and document reader
+
+* Ask JARVIS to summarize or read a PDF, DOCX, or text/Markdown file and provide
+  its file path when requested. The **DOCUMENT** tab shows the preview beside
+  the generated summary.
+* PDFs use `QPdfView` when the Qt PDF module is available. Otherwise, JARVIS
+  displays extracted PDF text. DOCX/text files use a text preview. Scanned
+  image-only PDFs may have no extractable text unless OCR is run separately.
+
+## News, email, and calendar cards
+
+* A Sri Lankan news briefing and `web_search` news results populate **HEADLINES**.
+  Story cards arrive with a short fade animation. Select **OPEN STORY** to read
+  the linked article in the internal WEB tab.
+* Use the existing Gmail plugin to ask for recent/unread mail; its results
+  populate **INBOX** after Google OAuth is configured. The HUD displays message
+  cards; it does not send/reply to mail from a card.
+* Use the Calendar plugin to ask for today's or upcoming events. Results appear
+  as **AGENDA** cards with their event time and details. Google OAuth must be
+  connected for live account data.
+
+## Live data panels
+
+* Say **“Show system charts”** or open **SYSTEM** for a scrolling CPU/RAM chart,
+  available GPU readings, and battery/AC state. GPU readings depend on the
+  detected hardware and optional NVIDIA monitoring support.
+* Ask **“Weather in Colombo”** (or another city) to fetch a five-day forecast
+  into **WEATHER**. It uses [Open-Meteo](https://open-meteo.com/en/docs); an
+  internet connection is required.
+* Ask for flights between two locations to populate **FLIGHTS**. Choose
+  **PLOT AIR PATH ON GLOBE** to draw a geocoded great-circle route on the globe.
+  This is an illustrative air path, not live aircraft tracking or an airline's
+  exact airway.
+* For a price request, the **MARKET** tab can show one-day, five-minute quote
+  history. Enter a ticker such as `AAPL` or a pair such as `BTC-USD`; common
+  crypto names are mapped to pairs. This public Yahoo Finance endpoint can be
+  rate-limited or unavailable and is not investment advice.
+
+## Timers and reminders
+
+* Say **“Start a 20 minute timer”** for a visible local countdown, or
+  **“Start a Pomodoro”** for the 25-minute focus timer. The **TIMERS** tab has
+  start/pause, reset, and Pomodoro controls.
+* A dated reminder scheduled through JARVIS appears in the reminders list. The
+  operating system scheduler handles its alert; the HUD card is a visual record
+  for the current app session.
+
+## Setup and troubleshooting
+
+The app needs the existing `PyQt6-WebEngine` requirement for embedded webpages,
+YouTube, and remote image previews. PDF page rendering is optional; the text
+fallback is used without Qt PDF support. Weather, web search, market data, and
+remote media need internet access. YouTube may restrict individual videos from
+embedded playback; JARVIS falls back to the watch page in the HUD where
+possible. If a panel stays blank, first check the connection, the exact URL/file
+path, and the HUD error message. The GPU message `Failed to create WebGPU
+Context Provider` is a Chromium rendering warning; it does not by itself mean
+the YouTube player failed.
+
 
 ---
 
@@ -1586,6 +1693,7 @@ JarvisAI/
 │   ├── undo.py
 │   ├── audio_devices.py
 │   ├── gemini.py
+│   ├── hud_workspace.py
 │   ├── earth_globe.py
 │   ├── earth_globe.html
 │   ├── plugin_loader.py

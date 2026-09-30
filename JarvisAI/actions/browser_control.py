@@ -957,6 +957,28 @@ def browser_control(
         _log(player, result)
         return result
 
+    # Display-only in-HUD navigation is the user-facing choice for articles,
+    # help pages and search results. It does not attach the page to browser
+    # automation or expose any JARVIS tools to page JavaScript.
+    if action in ("view", "view_article") or bool(params.get("in_hud")):
+        url = str(params.get("url", "")).strip()
+        if not url and action == "search":
+            base = _SEARCH_ENGINES.get(
+                params.get("engine", "google").lower(), _SEARCH_ENGINES["google"]
+            )
+            url = base + params.get("query", "").replace(" ", "+")
+        if not url:
+            result = "Please provide a URL to show inside the JARVIS HUD."
+        elif not url.lower().startswith(("https://", "http://")):
+            result = "The in-HUD web viewer accepts HTTP or HTTPS pages only."
+        elif player and hasattr(player, "show_webpage"):
+            player.show_webpage(url, "ARTICLE / WEB PAGE")
+            result = f"Showing inside the JARVIS HUD: {url}"
+        else:
+            result = "The in-HUD web viewer is unavailable."
+        _log(player, result)
+        return result
+
     # ── Navigation is ALWAYS native ──────────────────────────────────────────
     # go_to / search / new_tab open the site in the user's own browser —
     # their own profile, logged-in accounts and start page; exactly as if the
@@ -1039,6 +1061,9 @@ def browser_control(
             result = sess.run(sess.close_tab())
         elif action == "screenshot":
             result = sess.run(sess.screenshot(params.get("path")))
+            if result.startswith("Screenshot saved:") and player and hasattr(player, "show_images"):
+                screenshot_path = result.partition(":")[2].strip()
+                player.show_images([{"path": screenshot_path, "title": "Browser screenshot"}], "SCREENSHOT")
         elif action == "back":
             result = sess.run(sess.back())
         elif action == "forward":
@@ -1067,13 +1092,13 @@ def _log(player, text: str):
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "browser_control",
-    "description": "Controls any web browser. Use for: opening websites, searching the web, clicking elements, filling forms, scrolling, screenshots, navigation, any web-based task. Simple open/search requests launch the user's own browser normally (their real profile and logged-in accounts); interactive actions (click, type, fill_form...) attach an automation browser. Always pass the 'browser' parameter when the user specifies a browser (e.g. 'open in Edge', 'use Firefox', 'open Chrome'). Multiple browsers can run simultaneously.",
+    "description": "Controls web pages. Use action='view' to render an article/page inside the JARVIS HUD (especially when the user says 'show/open that article here' or 'in the HUD'); this is display-only and does not use the user's external browser. Use go_to/search/new_tab for the existing native browser. Other actions click/type/scroll/read/screenshot in the controlled browser. Always pass 'browser' when the user names one.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"
+                "description": "view (internal HUD page/article) | go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"
             },
             "browser": {
                 "type": "STRING",
@@ -1081,7 +1106,11 @@ TOOL = {
             },
             "url": {
                 "type": "STRING",
-                "description": "URL for go_to / new_tab action"
+                "description": "URL for view / go_to / new_tab. Use view for an internal HUD article/page."
+            },
+            "in_hud": {
+                "type": "BOOLEAN",
+                "description": "Set true to show a URL in JARVIS's internal HUD instead of the external browser."
             },
             "query": {
                 "type": "STRING",

@@ -283,6 +283,28 @@ def _scrape_trending(region: str = "TR", max_results: int = 8) -> list[dict]:
 
 def _handle_play(parameters: dict, player) -> str:
     query = parameters.get("query", "").strip()
+    direct = str(parameters.get("url", "")).strip()
+    candidate = direct or query
+    if not query:
+        if direct:
+            query = direct
+        else:
+            return "Please tell me what you'd like to watch, sir."
+
+    # A supplied media URL or local path is opened in JARVIS's own HUD player.
+    # Playback starts muted; sound changes only after a direct user request
+    # through the HUD control or the sound_on/sound_off action.
+    candidate_path = Path(candidate).expanduser()
+    if player and hasattr(player, "show_video") and (
+        candidate_path.is_file()
+        or _is_valid_youtube_url(candidate)
+        or (candidate.lower().startswith(("https://", "http://"))
+            and any(candidate.split("?", 1)[0].lower().endswith(ext) for ext in
+                    (".mp4", ".m4v", ".webm", ".mov", ".mkv", ".avi", ".ogv")))
+    ):
+        player.show_video(candidate, Path(candidate).name if candidate_path.is_file() else query)
+        return f"Playing in the HUD, muted: {query}"
+
     if not query:
         return "Please tell me what you'd like to watch, sir."
 
@@ -295,7 +317,11 @@ def _handle_play(parameters: dict, player) -> str:
 
     if video_url:
         print(f"[YouTube] ▶️ Opening: {video_url}")
-        _open_url(video_url)
+        if player and hasattr(player, "show_video"):
+            player.show_video(video_url, query)
+            return f"Playing in the HUD, muted: {query}"
+        else:
+            _open_url(video_url)
         return f"Playing: {query}"
 
     print(f"[YouTube] ⚠️ Scrape failed, opening filtered search page")
@@ -304,18 +330,31 @@ def _handle_play(parameters: dict, player) -> str:
         f"?search_query={quote_plus(query)}"
         f"&sp={_YT_VIDEO_FILTER}"
     )
-    _open_url(fallback_url)
+    if player and hasattr(player, "show_webpage"):
+        player.show_webpage(fallback_url, "YOUTUBE SEARCH")
+    else:
+        _open_url(fallback_url)
     return f"Opened YouTube search for: {query} (manual selection required)"
 
 
 def _handle_pause(parameters: dict, player=None, speak=None) -> str:
     """Pause the active YouTube browser media session using the shared control."""
+    if player and hasattr(player, "pause_video"):
+        player.pause_video()
+        return "Paused the video in the JARVIS HUD."
     try:
         from actions.computer_settings import computer_settings
         return computer_settings({"action": "pause_video"}, player=player)
     except Exception as e:
         print(f"[YouTube] ⚠️ Pause failed: {e}")
         return f"Could not pause YouTube playback: {e}"
+
+
+def _handle_sound(parameters: dict, player, muted: bool) -> str:
+    if not player or not hasattr(player, "set_video_muted"):
+        return "The HUD video player is not available."
+    player.set_video_muted(muted)
+    return "Video sound enabled in the HUD." if not muted else "Video sound muted in the HUD."
 
 
 def _handle_summarize(parameters: dict, player, speak) -> str:
@@ -417,6 +456,10 @@ _ACTION_MAP = {
     "play":      _handle_play,
     "pause":     _handle_pause,
     "play_pause": _handle_pause,
+    "sound_on":  lambda parameters, player, speak=None: _handle_sound(parameters, player, False),
+    "unmute":    lambda parameters, player, speak=None: _handle_sound(parameters, player, False),
+    "sound_off": lambda parameters, player, speak=None: _handle_sound(parameters, player, True),
+    "mute":      lambda parameters, player, speak=None: _handle_sound(parameters, player, True),
     "summarize": _handle_summarize,
     "get_info":  _handle_get_info,
     "trending":  _handle_trending,
@@ -441,7 +484,7 @@ def youtube_video(
     if handler is None:
         return (
             f"Unknown YouTube action: '{action}'. "
-            "Available: play, summarize, get_info, trending."
+            "Available: play, pause, sound_on, sound_off, summarize, get_info, trending."
         )
 
     try:
@@ -456,17 +499,21 @@ def youtube_video(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "youtube_video",
-    "description": "Controls YouTube. Use for playing a searched video, pausing/resuming the active YouTube video, summarizing a video's content, getting video info, or showing trending videos. For pause/resume call action='pause' or 'play_pause'; do not use browser_control or computer_settings for YouTube playback.",
+    "description": "Controls video in the native JARVIS HUD. Use action='play' with a query for YouTube search, or pass url for a YouTube/direct video URL or local file path. HUD playback always starts muted. Enable sound only when the user explicitly asks by using action='sound_on' (or 'unmute'); use action='sound_off' (or 'mute') to silence it and 'pause' to pause. Summarize/get_info/trending remain available.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "play | pause | play_pause | summarize | get_info | trending (default: play)"
+                "description": "play | pause | sound_on | sound_off | summarize | get_info | trending (default: play)"
             },
             "query": {
                 "type": "STRING",
                 "description": "Search query for play action"
+            },
+            "url": {
+                "type": "STRING",
+                "description": "Optional YouTube/direct video URL or full local video file path for HUD playback"
             },
             "save": {
                 "type": "BOOLEAN",

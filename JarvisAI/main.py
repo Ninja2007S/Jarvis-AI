@@ -616,6 +616,15 @@ def _keep_context_of(exc: BaseException) -> bool:
     return True
 
 
+def _contains_cancelled_error(exc: BaseException) -> bool:
+    """Find cancellation inside a TaskGroup exception tree."""
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_contains_cancelled_error(sub) for sub in exc.exceptions)
+    return False
+
+
 class JarvisLive:
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
@@ -624,6 +633,9 @@ class JarvisLive:
         self.audio_in_queue       = None
         self.out_queue            = None
         self._loop                     = None
+        self._run_task: asyncio.Task | None = None
+        self._shutdown_event: asyncio.Event | None = None
+        self._shutdown_requested = False
         self._is_speaking         = False
         self._barge_in_until      = 0.0
         self._speaking_lock       = threading.Lock()
@@ -934,12 +946,32 @@ class JarvisLive:
         `keep_context=False` drops the resumption handle so the new session
         starts empty — only for changes the server cannot apply to a resumed
         session."""
+        if self._shutdown_requested:
+            return
         loop = getattr(self, "_loop", None)
         ev   = self._reconnect_event
         self._reconnect_keep   = keep_context
         self._reconnect_reason = reason
         if loop and ev is not None:
             loop.call_soon_threadsafe(ev.set)
+
+    def request_shutdown(self) -> None:
+        """Stop the Live run loop and its TaskGroup without reconnecting."""
+        self._shutdown_requested = True
+        loop = getattr(self, "_loop", None)
+        event = getattr(self, "_shutdown_event", None)
+        if loop is not None and event is not None and loop.is_running():
+            loop.call_soon_threadsafe(event.set)
+
+    async def _watch_shutdown_request(self) -> None:
+        """Cancel an in-progress connect/session await when shutdown is requested."""
+        event = self._shutdown_event
+        run_task = self._run_task
+        if event is None or run_task is None:
+            return
+        await event.wait()
+        if not run_task.done():
+            run_task.cancel()
 
     def _on_voice_change(self):
         """Voice picker applied.
@@ -1460,6 +1492,8 @@ class JarvisLive:
                     None,
                     lambda: security.guard(name, args, get_system_status),
                 )
+                if hasattr(self.ui, "show_live_panel"):
+                    self.ui.show_live_panel("system")
                 result = str(r)
 
             elif name == "manage_monitor":
@@ -1480,18 +1514,27 @@ class JarvisLive:
 
             elif name == "shutdown_jarvis":
                 async def _do_shutdown():
-                    await self._save_session_summary()
-                    if self.session:
-                        try:
-                            await self.session.send_client_content(
-                                turns={"role": "user", "parts": [{"text": "Say a brief natural goodbye to the user."}]},
-                                turn_complete=True,
-                            )
-                        except Exception:
-                            pass
-                    await asyncio.sleep(1.5)
-                    import os as _os
-                    _os._exit(0)
+                    if self._shutdown_requested:
+                        return
+                    # Stop background polling immediately, let the current
+                    # session speak its goodbye, then cancel the root run task
+                    # so its TaskGroup closes before asyncio shuts executors.
+                    self._shutdown_requested = True
+                    try:
+                        if self.session:
+                            try:
+                                await asyncio.wait_for(
+                                    self.session.send_client_content(
+                                        turns={"role": "user", "parts": [{"text": "Say a brief natural goodbye to the user."}]},
+                                        turn_complete=True,
+                                    ),
+                                    timeout=2.0,
+                                )
+                            except Exception:
+                                pass
+                        await asyncio.sleep(1.5)
+                    finally:
+                        self.request_shutdown()
                 def _trigger_shutdown():
                     # Confirmation callbacks run on a worker thread, which has
                     # no running asyncio loop. Submit shutdown to the live
@@ -2299,6 +2342,10 @@ class JarvisLive:
                 if not failed:
                     # Show on UI content panel immediately
                     self.ui.show_content("SRI LANKA NEWS — Newsfirst + Ada Derana", news_text)
+                    if hasattr(self.ui, "show_news_cards"):
+                        self.ui.show_news_cards(
+                            news_text, "NEWSFIRST + ADA DERANA / HEADLINES"
+                        )
 
                     p2 = (
                         f"[BRIEFING — LANGUAGE: {briefing_lang}] Read out EVERY news topic/headline "
@@ -2379,9 +2426,21 @@ class JarvisLive:
 
     async def _run_system_monitor(self) -> None:
         """Background task: voice alerts when metrics exceed thresholds."""
-        while True:
+        while not self._shutdown_requested:
             await asyncio.sleep(10)
-            alert = await asyncio.to_thread(self._sys_monitor.check)
+            if self._shutdown_requested:
+                return
+            try:
+                alert = await asyncio.to_thread(self._sys_monitor.check)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if self._shutdown_requested:
+                    return
+                print(f"[Monitor] ⚠️ System monitor check failed: {exc}")
+                continue
+            if self._shutdown_requested:
+                return
             if not alert or not self.session or not self._awake:
                 continue
             # Don't interrupt an active conversation
@@ -2402,7 +2461,7 @@ class JarvisLive:
     async def _run_background_monitor(self) -> None:
         """Check user-configured topics once per day; speak alerts when new headlines appear."""
         await asyncio.sleep(300)          # wait 5 min after startup before first check
-        while True:
+        while not self._shutdown_requested:
             if self.session and self._awake:
                 # Don't interrupt if user spoke recently or JARVIS is mid-sentence
                 with self._speaking_lock:
@@ -2567,6 +2626,10 @@ class JarvisLive:
     async def run(self):
         self._loop = asyncio.get_event_loop()
         self._reconnect_event = asyncio.Event()
+        self._shutdown_event = asyncio.Event()
+        self._run_task = asyncio.current_task()
+        if not self._shutdown_requested:
+            asyncio.create_task(self._watch_shutdown_request())
 
         # ── Wire the shared core services to the interface ───────────────────
         # The confirmation gate is useless without a way to ask, and a memory
@@ -2606,7 +2669,7 @@ class JarvisLive:
             print(f"[Dashboard] Disabled: {e}")
             self._dashboard = None
 
-        while True:
+        while not self._shutdown_requested:
             try:
                 selected_model = self._select_live_model()
                 if selected_model != self._active_live_model:
@@ -2709,6 +2772,10 @@ class JarvisLive:
 
                     self._reconnect_event.clear()  # ignore requests from before this session
                     tg.create_task(self._watch_reconnect())
+                    # A shutdown requested by the user or app window cancels
+                    # this root task, unwinding every session task before the
+                    # asyncio executor is closed.
+                    # The watcher itself lives outside the session TaskGroup.
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())
@@ -2731,14 +2798,24 @@ class JarvisLive:
                 raise
             except SystemExit:
                 raise
+            except asyncio.CancelledError:
+                if not self._shutdown_requested:
+                    raise
+                print("[JARVIS] Shutdown requested; stopping session tasks.")
+                if len(self._session_log) >= 3:
+                    await self._save_session_summary()
+                return
             except BaseException as e:
-                # Catches both Exception and BaseExceptionGroup (Python 3.11+
-                # TaskGroup raises BaseExceptionGroup when tasks are cancelled
-                # externally, which `except Exception` would miss, letting the
-                # exception escape the while-loop and causing asyncio.run() to
-                # start shutdown — resulting in "executor after shutdown" errors).
-                # Voluntary reconnect (voice change) — not an error. Rebuild the
-                # session immediately with no backoff and no scary logs.
+                # TaskGroup can wrap child failures in ExceptionGroup. Treat
+                # requested shutdown as terminal; propagate unrelated
+                # cancellation so asyncio.run() can close the loop normally.
+                if self._shutdown_requested:
+                    print("[JARVIS] Shutdown requested; stopping session tasks.")
+                    if len(self._session_log) >= 3:
+                        await self._save_session_summary()
+                    return
+                if _contains_cancelled_error(e):
+                    raise
                 if _is_reconnect_signal(e):
                     print("[JARVIS] Voluntary reconnect requested.")
                     if not _keep_context_of(e):
@@ -2901,7 +2978,7 @@ class JarvisLive:
             finally:
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns)
-                if len(self._session_log) >= 3:
+                if len(self._session_log) >= 3 and not self._shutdown_requested:
                     asyncio.create_task(self._save_session_summary())
 
             self.set_speaking(False)
@@ -2920,7 +2997,18 @@ def main():
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
-    startup = {"ui": None, "splash": None}
+    startup = {
+        "ui": None, "splash": None, "jarvis": None,
+        "stop_event": threading.Event(),
+    }
+
+    def stop_live_on_app_exit():
+        startup["stop_event"].set()
+        live = startup.get("jarvis")
+        if live is not None:
+            live.request_shutdown()
+
+    app.aboutToQuit.connect(stop_live_on_app_exit)
 
     def launch_jarvis():
         if startup["ui"] is not None:
@@ -2933,14 +3021,19 @@ def main():
         startup["ui"] = ui
 
         def runner():
-            ui.wait_for_api_key()
+            if not ui.wait_for_api_key(startup["stop_event"]):
+                return
             jarvis = JarvisLive(ui)
+            startup["jarvis"] = jarvis
             try:
                 asyncio.run(jarvis.run())
             except KeyboardInterrupt:
                 print("\n🔴 Shutting down...")
+            finally:
+                if jarvis._shutdown_requested:
+                    ui.request_close()
 
-        threading.Thread(target=runner, daemon=True).start()
+        threading.Thread(target=runner, daemon=False).start()
 
     try:
         from core.startup_video import create_startup_splash
