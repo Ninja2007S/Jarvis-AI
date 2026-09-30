@@ -2100,7 +2100,7 @@ Third-party components, libraries, services, and assets remain under their respe
 
 Engineered by a developer building a real-world JARVIS-style personal AI assistant.
 
-⭐ **Star the repository to support the journey to Mark 100.**
+⭐ **Star the repository to support the journey.**
 
 | Platform  | Link                                                                           |
 | --------- | ------------------------------------------------------------------------------ |
