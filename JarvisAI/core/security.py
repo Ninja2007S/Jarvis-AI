@@ -106,9 +106,9 @@ _TIERS: dict[str, str] = {
     "system_status":    TIER_SAFE,
     "system_monitor":   TIER_SAFE,
     "recall_memory":    TIER_SAFE,
-    # Capturing a screen or camera frame discloses private data to the model.
-    # Treat both as dangerous so the user must approve each capture.
-    "screen_process":   TIER_DANGEROUS,
+    # Captures disclose private data to the model, so they remain sensitive,
+    # audited and Voice-ID gated when enabled; they are not irreversible.
+    "screen_process":   TIER_SENSITIVE,
     "close_camera":     TIER_SAFE,
     "manage_monitor":   TIER_SENSITIVE,
     "quiz":             TIER_SAFE,
@@ -128,8 +128,9 @@ _TIERS: dict[str, str] = {
     "calendar_google":  TIER_SENSITIVE,
     "flight_finder":    TIER_SENSITIVE,
     "youtube_video":    TIER_SENSITIVE,
-    "browser_control":  TIER_DANGEROUS,
-    "desktop":          TIER_DANGEROUS,
+    "browser_control":  TIER_SENSITIVE,
+    "desktop":          TIER_SENSITIVE,
+    "desktop_control":  TIER_SENSITIVE,
     "file_processor":   TIER_SENSITIVE,
     # Health checks are read-only; actual repairs have their own individual
     # confirmation inside actions/self_heal.py. Keep provenance/rate controls.
@@ -137,8 +138,8 @@ _TIERS: dict[str, str] = {
 
     # writes/executes code or touches the filesystem/OS broadly — DANGEROUS
     "code_helper":        TIER_DANGEROUS,
-    "file_controller":    TIER_DANGEROUS,
-    "computer_control":   TIER_DANGEROUS,
+    "file_controller":    TIER_SENSITIVE,
+    "computer_control":   TIER_SENSITIVE,
     # This tool contains both routine controls (pause, volume, tabs) and a few
     # explicitly irreversible actions. Those specific actions already use the
     # UI confirmation gate inside actions/computer_settings.py; gating the whole
@@ -298,12 +299,59 @@ def _untrusted_context() -> bool:
         return _untrusted_content_active
 
 
-def tier_for(name: str) -> str:
-    return _TIERS.get(name, TIER_SENSITIVE)
+_DANGEROUS_ACTIONS: dict[str, set[str]] = {
+    # Require approval for operations that change state or could submit a
+    # transaction. Browsing/searching and reading remain audited only.
+    "browser_control": {
+        "click", "type", "fill_form", "smart_click", "smart_type", "press",
+    },
+    "desktop": {"wallpaper", "wallpaper_url", "organize", "clean", "task"},
+    "desktop_control": {"wallpaper", "wallpaper_url", "organize", "clean", "task"},
+    "file_controller": {
+        "create_file", "create_folder", "delete", "move", "copy", "rename",
+        "write", "organize_desktop",
+    },
+    "computer_control": {
+        "type", "smart_type", "click", "left_click", "double_click",
+        "right_click", "drag", "hotkey", "press", "paste", "screen_click",
+        "clear_field",
+    },
+    "phone_call": {"clear_messages"},
+    "instagram_account": {"send_message", "reply", "publish_now", "schedule_post", "cancel_scheduled"},
+    "email_gmail": {"send", "send_email", "delete", "trash", "archive"},
+}
+
+
+def tier_for(name: str, params: dict | None = None) -> str:
+    """Return the effective risk tier, using the requested operation when known."""
+    base = _TIERS.get(name, TIER_SENSITIVE)
+    if base == TIER_DANGEROUS:
+        return base
+    action = str((params or {}).get("action", "")).strip().lower()
+    if action in _DANGEROUS_ACTIONS.get(name, set()):
+        return TIER_DANGEROUS
+    # Unknown operations on broad-control tools fail closed to confirmation.
+    if name in _DANGEROUS_ACTIONS and action and action not in _SAFE_ACTIONS.get(name, set()):
+        return TIER_DANGEROUS
+    return base
+
+
+_SAFE_ACTIONS: dict[str, set[str]] = {
+    "browser_control": {"switch", "list_browsers", "close", "close_all", "go_to", "search", "new_tab", "scroll", "get_text", "get_url", "close_tab", "screenshot", "back", "forward", "reload"},
+    "desktop": {"current_wallpaper", "list", "stats"},
+    "desktop_control": {"current_wallpaper", "list", "stats"},
+    "file_controller": {"list", "read", "find", "largest", "disk_usage", "info"},
+    "computer_control": {"move", "scroll", "copy", "screenshot", "wait", "focus_window", "screen_find", "random_data", "user_data"},
+    "phone_call": {"get_availability", "list_messages", "play_message", "set_availability"},
+    "instagram_account": {"inbox", "read_messages", "list_scheduled"},
+    "email_gmail": {"inbox", "list", "read", "search", "get_email"},
+}
 
 
 # ── tamper-evident audit log ────────────────────────────────────────────────
-_chain_lock = threading.Lock()
+_chain_lock = threading.RLock()
+_ledger_tail_hash: str | None = None
+_ledger_size: int | None = None
 
 
 def _last_hash() -> str:
@@ -324,18 +372,28 @@ def _last_hash() -> str:
 
 
 def _append_entry(entry: dict) -> None:
+    global _ledger_tail_hash, _ledger_size
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with _chain_lock:
-        intact, reason = verify_log()
+        # Full verification is required on first use, startup checks, or when
+        # the ledger changed outside this process. Normal appends use the
+        # cached verified tail, so cost stays constant as the log grows.
+        current_size = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
+        if _ledger_tail_hash is None or _ledger_size != current_size:
+            intact, reason = verify_log()
+        else:
+            intact, reason = True, "cached verified ledger tail"
         if not intact:
             raise RuntimeError(f"Security audit ledger is invalid: {reason}")
-        prev = _last_hash()
+        prev = _ledger_tail_hash or _GENESIS
         payload = json.dumps(entry, sort_keys=True, default=str)
         entry_hash = hashlib.sha256((prev + payload).encode("utf-8")).hexdigest()
         record = {**entry, "prev_hash": prev, "hash": entry_hash}
         with LOG_FILE.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, sort_keys=True, default=str) + "\n")
             f.flush()
+        _ledger_tail_hash = entry_hash
+        _ledger_size = LOG_FILE.stat().st_size
 
 
 def audit(event: str, name: str, tier: str, decision: str, detail: str = "") -> None:
@@ -353,7 +411,10 @@ def verify_log() -> tuple[bool, str]:
     """Walk the whole ledger and confirm every hash matches. Call this from a
     startup self-check or an admin action — a break means the log file was
     edited or truncated outside of this module."""
+    global _ledger_tail_hash, _ledger_size
     if not LOG_FILE.exists():
+        _ledger_tail_hash = _GENESIS
+        _ledger_size = 0
         return True, "No audit log yet."
     prev = _GENESIS
     line_no = 0
@@ -367,19 +428,27 @@ def verify_log() -> tuple[bool, str]:
                 claimed_hash = rec.pop("hash")
                 claimed_prev = rec.pop("prev_hash")
                 if claimed_prev != prev:
+                    _ledger_tail_hash = None
+                    _ledger_size = None
                     return False, f"Chain broken before line {line_no}: prev_hash mismatch."
                 payload = json.dumps(rec, sort_keys=True, default=str)
                 recomputed = hashlib.sha256((prev + payload).encode("utf-8")).hexdigest()
                 if recomputed != claimed_hash:
+                    _ledger_tail_hash = None
+                    _ledger_size = None
                     return False, f"Line {line_no} was altered — hash does not match its content."
                 prev = claimed_hash
     except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
+        _ledger_tail_hash = None
+        _ledger_size = None
         return False, f"Could not verify audit ledger near line {line_no + 1}: {exc}"
+    _ledger_tail_hash = prev
+    _ledger_size = LOG_FILE.stat().st_size
     return True, f"Ledger intact — verified through line {line_no}."
 
 
 # ── rate limiting ────────────────────────────────────────────────────────────
-def _rate_check(tier: str) -> Optional[str]:
+def _rate_check(tier: str, *, consume: bool = True) -> Optional[str]:
     now = time.monotonic()
     with _rate_lock:
         if tier == TIER_DANGEROUS:
@@ -389,13 +458,15 @@ def _rate_check(tier: str) -> Optional[str]:
                 return (f"Too many high-risk actions requested in the last "
                         f"{_DANGEROUS_WINDOW_SEC // 60} minutes. Pausing — "
                         f"if this is really you, wait a bit and try again.")
-            _recent_dangerous.append(now)
+            if consume:
+                _recent_dangerous.append(now)
         elif tier == TIER_SENSITIVE:
             while _recent_sensitive and now - _recent_sensitive[0] > _SENSITIVE_WINDOW_SEC:
                 _recent_sensitive.popleft()
             if len(_recent_sensitive) >= _SENSITIVE_MAX_CALLS:
                 return "Too many actions requested in the last minute. Slowing down."
-            _recent_sensitive.append(now)
+            if consume:
+                _recent_sensitive.append(now)
     return None
 
 
@@ -413,7 +484,7 @@ def guard(name: str, params: dict, run: Callable[[], str]) -> str:
     string result (e.g. `lambda: self._action_registry.run(name, args, ctx)`).
     Returns the string that should go back to the model as the tool result.
     """
-    tier = tier_for(name)
+    tier = tier_for(name, params)
 
     # 1) provenance check — a state-changing action should not fire off the
     #    back of content Jarvis merely read (a web page, email, OCR, or file)
@@ -442,7 +513,9 @@ def guard(name: str, params: dict, run: Callable[[], str]) -> str:
             )
 
     # 2) rate limit — independent of confirmation, catches loops.
-    limited = _rate_check(tier)
+    # Preflight without charging the quota. A pending or rejected confirmation
+    # must not consume a real-action slot.
+    limited = _rate_check(tier, consume=False)
     if limited:
         audit("rate_limited", name, tier, "denied", limited)
         _log(f"RATE-LIMITED '{name}'")
@@ -463,6 +536,11 @@ def guard(name: str, params: dict, run: Callable[[], str]) -> str:
 
 
 def _run_and_audit(name: str, tier: str, run: Callable[[], str]) -> str:
+    limited = _rate_check(tier, consume=True)
+    if limited:
+        audit("rate_limited", name, tier, "denied", limited)
+        _log(f"RATE-LIMITED '{name}'")
+        return limited
     # Record intent before the side effect. A broken/unwritable ledger blocks
     # the action instead of allowing it to run and failing to record it later.
     audit("call", name, tier, "pending")

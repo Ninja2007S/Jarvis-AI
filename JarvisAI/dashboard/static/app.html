@@ -8,15 +8,15 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
-      --bg:      #07090f;
-      --surface: rgba(255,255,255,0.04);
-      --border:  rgba(255,255,255,0.07);
-      --accent:  #6366f1;
-      --adim:    rgba(99,102,241,0.14);
-      --text:    #dde3ed;
-      --muted:   #5e6a7e;
-      --green:   #22c55e;
-      --gdim:    rgba(34,197,94,0.14);
+      --bg:      #080e12;
+      --surface: rgba(113,212,194,0.055);
+      --border:  rgba(113,212,194,0.16);
+      --accent:  #71d4c2;
+      --adim:    rgba(113,212,194,0.12);
+      --text:    #c8d9d5;
+      --muted:   #78908d;
+      --green:   #9bd5a2;
+      --gdim:    rgba(155,213,162,0.12);
     }
     html, body {
       height: 100%; background: var(--bg); color: var(--text);
@@ -28,7 +28,7 @@
     header {
       flex-shrink: 0; display: flex; align-items: center; gap: 10px;
       padding: 12px 16px; border-bottom: 1px solid var(--border);
-      background: rgba(7,9,15,0.95);
+      background: rgba(8,14,18,0.97);
     }
     .logo { font-size: 15px; font-weight: 700; letter-spacing: 6px; }
     .logo em { color: var(--accent); font-style: normal; }
@@ -57,7 +57,7 @@
     main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.55; animation: pop 0.18s ease; }
     @keyframes pop { from { opacity:0; transform:translateY(4px); } }
-    .msg-j   { align-self:flex-start; background:var(--adim);   border:1px solid rgba(99,102,241,0.18); border-bottom-left-radius:4px; }
+    .msg-j   { align-self:flex-start; background:var(--adim);   border:1px solid rgba(113,212,194,0.20); border-bottom-left-radius:4px; }
     .msg-u   { align-self:flex-end;   background:var(--surface); border:1px solid var(--border);        border-bottom-right-radius:4px; }
     .msg-sys { align-self:center; font-size:11px; color:var(--muted); padding:2px 0; background:transparent; border:none; letter-spacing:0.3px; }
     .lbl { font-size:9px; font-weight:700; letter-spacing:2px; text-transform:uppercase; opacity:0.45; margin-bottom:4px; }
@@ -86,7 +86,7 @@
     .fc-dl:hover { opacity: 0.8; }
 
     /* ── FOOTER ── */
-    footer { flex-shrink:0; padding:10px 14px; border-top:1px solid var(--border); background:rgba(7,9,15,0.95); display:flex; gap:8px; align-items:center; }
+    footer { flex-shrink:0; padding:10px 14px; border-top:1px solid var(--border); background:rgba(8,14,18,0.97); display:flex; gap:8px; align-items:center; }
     #inp { flex:1; padding:11px 14px; background:var(--surface); border:1.5px solid var(--border); border-radius:12px; color:var(--text); font-size:14px; outline:none; transition:border-color 0.15s; }
     #inp:focus { border-color: var(--accent); }
     #inp::placeholder { color: var(--muted); }
@@ -411,6 +411,12 @@
     let _audioCtx = null;
     let _micStm   = null;
     let _audioNd  = null;
+    let _speakerCtx = null;
+    let _speakerCursor = 0;
+    let _speakerSources = new Set();
+    let _handoffPoll = null;
+    let _phoneHandoffActive = false;
+    let _nativeVoiceArmed = false;
 
     function _micIdle() {
       micBtn.innerHTML = '🎤';
@@ -434,19 +440,42 @@
       return out.buffer;
     }
 
+    // JARVIS replies are 24 kHz mono PCM16. They arrive on the same
+    // authenticated WebSocket as the phone microphone, but travel only to the
+    // paired phone that currently owns the live audio handoff.
+    function _playPhonePcm(buffer) {
+      if (!_speakerCtx || !(buffer instanceof ArrayBuffer) || buffer.byteLength < 2) return;
+      try {
+        const samples = new Int16Array(buffer);
+        const audio = _speakerCtx.createBuffer(1, samples.length, 24000);
+        const channel = audio.getChannelData(0);
+        for (let i = 0; i < samples.length; i++) channel[i] = samples[i] / 32768;
+        const source = _speakerCtx.createBufferSource();
+        source.buffer = audio;
+        source.connect(_speakerCtx.destination);
+        const now = _speakerCtx.currentTime;
+        if (_speakerCursor < now || _speakerCursor > now + 0.8) _speakerCursor = now + 0.04;
+        const startedAt = _speakerCursor;
+        _speakerCursor += samples.length / 24000;
+        _speakerSources.add(source);
+        source.onended = () => _speakerSources.delete(source);
+        source.start(startedAt);
+      } catch (_) { /* Audio ended or the context is shutting down. */ }
+    }
+
     function _showVoiceSetup() {
       if (document.getElementById('voice-setup')) return; // show once
       const origin = location.origin;
       const card = document.createElement('div');
       card.id = 'voice-setup';
       card.style.cssText = [
-        'align-self:stretch', 'background:rgba(99,102,241,0.07)',
-        'border:1px solid rgba(99,102,241,0.22)', 'border-radius:14px',
+        'align-self:stretch', 'background:rgba(113,212,194,0.07)',
+        'border:1px solid rgba(113,212,194,0.22)', 'border-radius:14px',
         'padding:16px 18px', 'font-size:13px', 'line-height:1.8',
         'animation:pop 0.18s ease'
       ].join(';');
       card.innerHTML =
-        '<div style="font-weight:700;color:#818cf8;letter-spacing:.5px;margin-bottom:10px">🎤 One-time voice setup</div>' +
+        '<div style="font-weight:700;color:#71d4c2;letter-spacing:.5px;margin-bottom:10px">🎤 One-time voice setup</div>' +
         '<ol style="padding-left:18px;color:#8899aa;margin:0;display:flex;flex-direction:column;gap:4px">' +
         '<li>Open a new tab → go to <span style="background:rgba(255,255,255,0.07);padding:1px 6px;border-radius:4px;font-family:monospace;font-size:12px">chrome://flags</span></li>' +
         '<li>Search: <strong style="color:#dde3ed">Insecure origins treated as secure</strong></li>' +
@@ -463,7 +492,13 @@
     }
 
     async function doMic() {
-      if (_voiceWs) { _stopVoice(); return; }
+      if (_voiceWs || _nativeVoiceArmed) { _stopVoice(); return; }
+
+      // Android uses native AudioRecord and BLE instead of WebView getUserMedia.
+      if (window.JarvisAndroid?.startVoice) {
+        await _startNativePhoneVoice();
+        return;
+      }
 
       if (!navigator.mediaDevices?.getUserMedia) {
         _showVoiceSetup();
@@ -486,14 +521,22 @@
       try { ctx = new AudioContext({ sampleRate: 16000 }); }
       catch (_) { ctx = new AudioContext(); }
       if (ctx.state === 'suspended') await ctx.resume();
+      try {
+        _speakerCtx = new AudioContext();
+        if (_speakerCtx.state === 'suspended') await _speakerCtx.resume();
+      } catch (_) { _speakerCtx = ctx; }
 
       const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(
         `${wsProto}://${location.host}/ws/phone-audio?token=${encodeURIComponent(_authToken)}`
       );
       ws.binaryType = 'arraybuffer';
+      ws.onmessage = e => {
+        if (e.data instanceof ArrayBuffer) _playPhonePcm(e.data);
+      };
 
       ws.onopen = async () => {
+        _phoneHandoffActive = true;
         const rate = ctx.sampleRate;
         const src  = ctx.createMediaStreamSource(stream);
 
@@ -513,27 +556,34 @@
             if (_plen >= 1024) {
               const out = new Int16Array(_plen); let off = 0;
               for (const c of _pbuf) { out.set(c, off); off += c.length; }
-              if (ws.readyState === 1) ws.send(out.buffer);
+              if (ws.readyState === 1 && _phoneHandoffActive) ws.send(out.buffer);
               _pbuf = []; _plen = 0;
             }
           };
           src.connect(nd);
+          // Keep the processor in the render graph while emitting silence to
+          // the phone speaker; the raw mic must never monitor locally.
+          nd.connect(ctx.destination);
           _audioNd = nd;
         } catch (_) {
           // ScriptProcessor fallback (deprecated, still works everywhere)
           const sp = ctx.createScriptProcessor(4096, 1, 1);
           sp.onaudioprocess = e => {
-            if (ws.readyState === 1) ws.send(_f32toPcm16(e.inputBuffer.getChannelData(0), rate));
+            if (ws.readyState === 1 && _phoneHandoffActive)
+              ws.send(_f32toPcm16(e.inputBuffer.getChannelData(0), rate));
           };
-          src.connect(sp); sp.connect(ctx.destination);
+          const silentMonitor = ctx.createGain();
+          silentMonitor.gain.value = 0;
+          src.connect(sp); sp.connect(silentMonitor); silentMonitor.connect(ctx.destination);
           _audioNd = sp;
         }
 
         micBtn.innerHTML = '⏹';
-        micBtn.title     = 'Tap to stop';
+        micBtn.title     = 'Auto handoff armed — tap to stop';
         micBtn.classList.add('recording');
-        sys('Voice live — speak now');
-        toast('🎤 Live');
+        try { window.JarvisAndroid?.setVoiceActive(true); } catch (_) {}
+        sys(`Auto handoff armed. Phone mic stays local while the PC is active; it takes over after ${_handoffIdleThreshold} seconds of PC inactivity.`);
+        toast('🎤 Auto handoff armed');
       };
 
       ws.onclose = () => { _stopVoice(); };
@@ -545,8 +595,23 @@
     }
 
     function _stopVoice() {
+      if (_handoffPoll) { clearInterval(_handoffPoll); _handoffPoll = null; }
+      _phoneHandoffActive = false;
+      if (_nativeVoiceArmed) {
+        _nativeVoiceArmed = false;
+        try { window.JarvisAndroid?.stopVoice(); } catch (_) {}
+      }
       if (_audioNd)  { try { _audioNd.disconnect(); }  catch (_) {}; _audioNd  = null; }
       if (_audioCtx) { try { _audioCtx.close(); }      catch (_) {}; _audioCtx = null; }
+      if (_speakerSources) {
+        for (const source of _speakerSources) { try { source.stop(); } catch (_) {} }
+        _speakerSources.clear();
+      }
+      if (_speakerCtx && _speakerCtx !== _audioCtx) {
+        try { _speakerCtx.close(); } catch (_) {}
+      }
+      _speakerCtx = null;
+      _speakerCursor = 0;
       if (_micStm)   { _micStm.getTracks().forEach(t => t.stop()); _micStm = null; }
       if (_voiceWs)  {
         const w = _voiceWs; _voiceWs = null;
@@ -554,6 +619,63 @@
       }
       _micIdle();
     }
+
+    async function _startNativePhoneVoice() {
+      try {
+        const response = await _authFetch('/api/handoff/status', { cache: 'no-store' });
+        const state = response.ok ? await response.json() : {};
+        if (!state.beaconEnabled || !state.beaconUuid) {
+          sys('Desktop proximity beacon is unavailable. Enable Bluetooth on the JARVIS PC and restart it.');
+          return;
+        }
+        const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const wsUrl = `${wsProto}://${location.host}/ws/phone-audio?token=${encodeURIComponent(_authToken)}`;
+        _speakerCtx = new AudioContext();
+        await _speakerCtx.resume();
+        _nativeVoiceArmed = true;
+        micBtn.innerHTML = '⏹';
+        micBtn.title = 'Proximity handoff armed — tap to stop';
+        micBtn.classList.add('recording');
+        JarvisAndroid.startVoice(wsUrl, state.beaconUuid);
+        sys('Proximity handoff armed. Keep the phone near the PC first; audio switches after Bluetooth detects you have moved away.');
+      } catch (e) {
+        sys('Could not start phone handoff: ' + (e.message || e));
+      }
+    }
+
+    window.onNativeProximity = function(state) {
+      if (!state) return;
+      if (state.startsWith('rssi:')) return;
+      if (state === 'far') {
+        _phoneHandoffActive = true;
+        sys('PC out of Bluetooth range — JARVIS audio is on this phone.');
+        toast('📱 Phone audio active');
+      } else if (state === 'near') {
+        _phoneHandoffActive = false;
+        sys('PC nearby — JARVIS audio returned to the computer.');
+        toast('🖥️ PC audio active');
+      } else if (state === 'stopped') {
+        _nativeVoiceArmed = false;
+        _phoneHandoffActive = false;
+        _micIdle();
+      } else if (state === 'mic-error' || state.startsWith('mic-')) {
+        sys('Phone microphone could not start. Allow microphone access and tap to arm again.');
+      } else if (state === 'bluetooth-permission' || state === 'bluetooth-unavailable') {
+        sys('Bluetooth permission or Bluetooth hardware is unavailable.');
+      } else if (state.startsWith('scan-error')) {
+        sys('Bluetooth scan failed. Turn Bluetooth on, allow Nearby devices, then arm again.');
+      } else if (state === 'link-error') {
+        sys('Phone audio link failed. Check the private VPN connection.');
+      }
+    };
+
+    window.onNativePcm = function(base64) {
+      if (!_speakerCtx || !base64) return;
+      const raw = atob(base64);
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      _playPhonePcm(bytes.buffer);
+    };
   </script>
 </body>
 </html>

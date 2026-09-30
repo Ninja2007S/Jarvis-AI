@@ -565,6 +565,9 @@ Keep responses concise but friendly. The goal is to get the caller to leave a co
         audio_data is already PCM at 16kHz from process_media_chunk().
         """
         if self.session:
+            # `types` imported inside start() is local to that method; importing
+            # here is required for every streamed audio chunk.
+            from google.genai import types
             await self.session.send_realtime_input(
                 audio=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000")
             )

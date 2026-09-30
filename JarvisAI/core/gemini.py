@@ -77,7 +77,11 @@ _FREE_HIGH_DAILY_LADDER = (
     "gemini-3.1-flash-lite",
 )
 
-# Model ladders.
+# Grounded search uses models that currently document Google Search support.
+# Gemini 2.5 is retained for existing free-tier projects; paid projects use
+# the current Gemini 3.x search-capable tier where enabled.
+_SEARCH_FREE_LADDER = ("gemini-2.5-flash-lite", "gemini-2.5-flash")
+_SEARCH_PAID_LADDER = ("gemini-3.8-flash", "gemini-3.5-flash-lite")
 
 _LADDERS = {
     # Free-tier priority: use the same high-quota models for every one-shot
@@ -85,11 +89,7 @@ _LADDERS = {
     FAST: _FREE_HIGH_DAILY_LADDER,
     SMART: _FREE_HIGH_DAILY_LADDER,
 
-    # Search grounding is skipped by default on free-tier projects below.
-    SEARCH: (
-        "gemini-3.8-flash",
-        "gemini-3.5-flash-lite",
-    ),
+    SEARCH: _SEARCH_PAID_LADDER,
 }
 
 
@@ -102,7 +102,12 @@ _LIVE_FALLBACK = "models/gemini-3.8-live"
 _FREE_TIER = os.environ.get("JARVIS_GEMINI_FREE_TIER", "true").strip().lower() not in {
     "0", "false", "no", "off",
 }
-_REQUEST_GAP_SECONDS = 4.0
+try:
+    _REQUEST_GAP_SECONDS = max(
+        0.0, min(float(os.environ.get("JARVIS_GEMINI_REQUEST_GAP_SECONDS", "4")), 60.0)
+    )
+except (TypeError, ValueError):
+    _REQUEST_GAP_SECONDS = 4.0
 _request_times: dict[str, float] = {}
 _request_lock = threading.Lock()
 
@@ -590,16 +595,17 @@ def _live_call(
 # ---------------------------------------------------------------------------
 
 _COOLDOWN_SECONDS = 300
+_TRANSIENT_COOLDOWN_SECONDS = 30
 
 _cooldown: dict[str, float] = {}
 _cool_lock = threading.Lock()
 
 
-def _cool(model: str) -> None:
+def _cool(model: str, seconds: int = _COOLDOWN_SECONDS) -> None:
     with _cool_lock:
         _cooldown[model] = (
             time.monotonic()
-            + _COOLDOWN_SECONDS
+            + max(1, int(seconds))
         )
 
 
@@ -661,6 +667,9 @@ def _resolve_ladder(tier: str):
     Explicit model:
         requested model -> SMART fallback ladder
     """
+
+    if tier == SEARCH:
+        return _SEARCH_FREE_LADDER if _FREE_TIER else _SEARCH_PAID_LADDER
 
     ladder = _LADDERS.get(tier)
 
@@ -743,12 +752,6 @@ def call(
         else config
     )
 
-    # Google does not list Search grounding as available on the Gemini 3 free
-    # tier. Search callers have non-Gemini fallbacks, so avoid a rejected call.
-    if tier == SEARCH and _FREE_TIER:
-        print("[Gemini] Search grounding disabled in free-tier mode; using caller fallback")
-        return None
-
     # Skip models currently known to be out of quota.
     tried = [
         model
@@ -815,16 +818,28 @@ def call(
 
             message = str(exc)
 
-            if (
-                "429" in message
-                or "RESOURCE_EXHAUSTED" in message
-            ):
-                _cool(model)
+            status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+            try:
+                status = int(status)
+            except (TypeError, ValueError):
+                status = None
+            upper_message = message.upper()
+            if status == 429 or "429" in upper_message or "RESOURCE_EXHAUSTED" in upper_message:
+                _cool(model, _COOLDOWN_SECONDS)
 
                 print(
                     f"[Gemini] {model}: out of quota — "
                     f"skipping it for "
                     f"{_COOLDOWN_SECONDS // 60} minutes"
+                )
+
+            elif (status is not None and 500 <= status <= 599) or any(
+                token in upper_message for token in (" 500", " 502", " 503", " 504", "INTERNAL", "UNAVAILABLE", "BAD GATEWAY", "GATEWAY TIMEOUT")
+            ):
+                _cool(model, _TRANSIENT_COOLDOWN_SECONDS)
+                print(
+                    f"[Gemini] {model}: temporary server failure; "
+                    f"cooling it for {_TRANSIENT_COOLDOWN_SECONDS}s and trying the next model"
                 )
 
             else:

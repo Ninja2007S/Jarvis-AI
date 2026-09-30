@@ -42,6 +42,7 @@ import json
 import sys
 import traceback
 import base64
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -608,6 +609,18 @@ class JarvisLive:
         self._barge_in_until      = 0.0
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
+        self._phone_route_offline_logged = False
+        self._phone_last_audio_at = 0.0
+        self._phone_beacon = None
+        try:
+            from core.phone_proximity import PhoneProximityBeacon
+            self._phone_beacon = PhoneProximityBeacon(BASE_DIR / "config")
+            if self._phone_beacon.start():
+                self.ui.write_log("SYS: Private BLE proximity beacon active for phone handoff.")
+            else:
+                self.ui.write_log(f"SYS: Phone proximity handoff unavailable: {self._phone_beacon.error}")
+        except Exception as exc:
+            self.ui.write_log(f"SYS: Phone proximity handoff unavailable: {exc}")
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
         self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
@@ -2019,10 +2032,24 @@ class JarvisLive:
                 except Exception:
                     pass
 
-                try:
-                    await asyncio.to_thread(stream.write, bytes(batch))
-                except (RuntimeError, asyncio.CancelledError):
-                    break   # executor shutting down — exit cleanly
+                # While the paired phone is streaming its microphone, route
+                # JARVIS's reply audio to that same phone session. Never fall
+                # back to PC speakers during an active phone handoff: a lost
+                # phone connection should fail quiet until its mic stops.
+                if self._phone_active:
+                    delivered = False
+                    if self._dashboard is not None and not self.ui.muted:
+                        try:
+                            delivered = await self._dashboard.send_phone_audio(bytes(batch))
+                        except Exception:
+                            delivered = False
+                    if not delivered:
+                        continue
+                else:
+                    try:
+                        await asyncio.to_thread(stream.write, bytes(batch))
+                    except (RuntimeError, asyncio.CancelledError):
+                        break   # executor shutting down — exit cleanly
         except Exception as e:
             print(f"[JARVIS] ❌ Play: {e}")
             raise
@@ -2368,23 +2395,37 @@ class JarvisLive:
     # ── Phone audio relay ────────────────────────────────────────────────────────
 
     async def _relay_phone_audio(self) -> None:
-        """Forward phone mic PCM chunks from dashboard queue into the Gemini Live session."""
+        """Forward phone mic PCM; the phone sends only after BLE says PC is far."""
         q = self._dashboard._phone_audio_queue
         while True:
             try:
-                chunk = await asyncio.wait_for(q.get(), timeout=1.0)
+                packet = await asyncio.wait_for(q.get(), timeout=1.0)
             except asyncio.TimeoutError:
-                # No audio for 1 s → phone mic inactive, give PC mic back
-                self._phone_active = False
+                if self._phone_active and time.monotonic() - self._phone_last_audio_at > 2.0:
+                    self._phone_active = False
+                    self.ui.write_log("SYS: Phone audio stopped; audio returned to this PC.")
                 continue
-            self._phone_active = True   # phone is streaming — silence PC mic
+            if not self._phone_active:
+                self._phone_active = True
+                self._phone_route_offline_logged = False
+                self.ui.write_log("SYS: BLE proximity changed to out of range; conversation transferred to phone.")
+            self._phone_last_audio_at = time.monotonic()
             with self._speaking_lock:
                 speaking = self._is_speaking
             if not speaking and not self.ui.muted:
                 try:
-                    self.out_queue.put_nowait(chunk)
+                    self.out_queue.put_nowait(packet)
                 except asyncio.QueueFull:
                     pass
+
+    def _phone_handoff_status(self) -> dict:
+        beacon = self._phone_beacon
+        return {
+            "detection": "bluetooth-rssi" if beacon and beacon.enabled else "unavailable",
+            "beaconEnabled": bool(beacon and beacon.enabled),
+            "beaconUuid": beacon.service_uuid if beacon and beacon.enabled else "",
+            "phoneRouteActive": self._phone_active,
+        }
 
     def _on_phone_connected(self) -> None:
         self.ui.write_log("SYS: Phone connected via Remote Dashboard.")
@@ -2478,6 +2519,7 @@ class JarvisLive:
             from dashboard.server import DashboardServer
             self._dashboard = DashboardServer()
             self._dashboard.set_connect_callback(self._on_phone_connected)
+            self._dashboard.set_handoff_status_callback(self._phone_handoff_status)
             asyncio.create_task(self._dashboard.serve())
             # Runs for the whole lifetime, not just inside an active session
             asyncio.create_task(self._process_dashboard_commands())

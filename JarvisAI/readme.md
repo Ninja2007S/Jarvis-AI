@@ -140,15 +140,30 @@ JARVIS chooses a model tier based on the work. Ordinary voice conversation stays
 on the low-latency Live session. Difficult open-ended questions can be handed to
 the `deep_reasoning` plugin; code generation and developer-agent work use the
 deep tier; routine classification uses the fast tier; and grounded web searches
-use the search tier. The deep tier starts with Gemini 3.1 Pro Preview and falls
-back through Gemini Flash models if a model is throttled or unavailable. Google
-currently lists Pro Preview as a paid-tier model, so check its [model and billing
-requirements](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview)
-before using it. If your key cannot use Pro, JARVIS cools that model and routes
-deep work through Flash instead.
+use the search tier. On the default free-tier route, fast and deep one-shot
+work share the quota-first ladder in `core/gemini.py`: Gemma 4, then Gemini
+Flash-Lite compatibility models. `DEEP` is retained as an alias for the
+reasoning tier used by older actions. Gemini 3.1 Pro Preview is not in this
+free-tier ladder; selecting it requires paid-tier access and would need an
+explicit model configuration.
 
-One-shot Gemini calls keep a per-model cooldown after a `429`/quota response and
-try the next model in that task's ladder. If the always-on Live model is
+Free-tier grounded search first tries Gemini 2.5 Flash-Lite, with Gemini 2.5
+Flash as a fallback. Google currently limits 2.5 model access for new projects;
+if unavailable, JARVIS falls back to the caller's non-Gemini search path.
+Google documents up to 500 free Google Search grounded requests per day for
+Gemini 2.5 Flash and Flash-Lite combined. Paid-tier routing uses the configured
+Gemini 3.x models, where grounding is billed/limited under Google's current
+pricing. Set `JARVIS_GEMINI_FREE_TIER=false` only if you intentionally want
+the paid-tier search models. See Google's current
+[model list](https://ai.google.dev/gemini-api/docs/models),
+[pricing](https://ai.google.dev/gemini-api/docs/pricing), and
+[rate-limit details](https://ai.google.dev/gemini-api/docs/rate-limits).
+
+One-shot Gemini calls cool a model for five minutes after quota errors and for
+30 seconds after transient server errors (5xx), then try the next model in that
+task's ladder. The per-model request gap defaults to four seconds for free-tier
+traffic and can be adjusted with `JARVIS_GEMINI_REQUEST_GAP_SECONDS`. Actual
+limits vary by project and model; check AI Studio. If the always-on Live model is
 rate-limited, JARVIS reconnects on a lower-cost native-audio model, then tries
 the next configured Live option if needed. The most recent completed transcript
 is carried into the replacement session; the Live resumption token itself is
@@ -159,9 +174,10 @@ when proactive audio is disabled because that model keeps proactive audio on;
 Google bills input while the Live session listens, so model fallback may change
 usage costs.
 
-Model ladders are maintained in `core/gemini.py`; the Live fallback list and
-cooldown are in `main.py`. Google can change model availability and quotas, so
-an individual fallback only works if that model is enabled for your API key.
+Model ladders and one-shot cooldowns are maintained in `core/gemini.py`; the
+Live fallback list and cooldown are in `main.py`. Google can change model
+availability and quotas, so an individual fallback only works if that model is
+enabled for your API project.
 
 ---
 
@@ -204,8 +220,14 @@ Every tool or action is classified into one of three risk tiers.
 | Tier          | Description                                       | Examples                                                                              |
 | ------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | **SAFE**      | Read-only or trivially reversible                 | `web_search`, `weather_report`, `battery_status`, `quiz`, `recall_memory`             |
-| **SENSITIVE** | Changes system state but is generally reversible  | `save_memory`, `open_app`, `send_message`, `file_processor`, `home_automation`, `self_heal` |
-| **DANGEROUS** | Irreversible, high-impact, or OS-level operations | `code_helper`, `file_controller`, `computer_control`, `shutdown_jarvis`, `phone_call` |
+| **SENSITIVE** | Private reads or reversible changes, audited and rate-limited | `save_memory`, `open_app`, file listing/reading, screen capture, `file_processor`, `home_automation`, `self_heal` |
+| **DANGEROUS** | Operations that can send, publish, execute code, or make high-impact changes; requires approval | `send_message`, `email_gmail`, `instagram_account`, file changes, computer input, `code_helper`, `shutdown_jarvis`, `phone_call` |
+
+Browser, desktop, file, and computer tools are classified per requested action:
+searches and inspection avoid a confirmation click, while file changes and
+computer input that can submit or change data remain approval-gated. Email,
+Instagram, and phone plugin actions still require confirmation for every
+request.
 
 Unknown tools are **never automatically treated as SAFE**.
 
@@ -290,10 +312,15 @@ confirmed = true
 
 and bypass the confirmation system.
 
-Actions routed through the confirmation gate include operations such as:
+Confirmation is selected per operation. Read-only search, listing, and
+inspection are audited without a click; writes, deletes, code execution,
+messages, publication, and desktop/computer actions that can submit or change
+data require approval. Screen and camera captures are logged and remain subject
+to Voice ID when enabled, but do not require a click each time. Unknown actions
+inside broad-control tools fail closed to confirmation. Examples include:
 
 * File deletion or bulk file operations
-* OS-level computer control
+* Computer input that types, clicks, pastes, or submits forms
 * Shutdown/restart operations
 * Potentially dangerous generated code
 * Phone calls
@@ -467,6 +494,8 @@ Hash 3
 ```
 
 If an existing entry is modified, the subsequent hash chain no longer matches.
+Normal appends use the cached verified tail and take constant time; the full
+ledger is checked at startup or when an external size change is detected.
 
 The ledger can be verified using:
 
@@ -548,7 +577,12 @@ It does not automatically execute inside the user's project directory.
 
 The sandbox receives a restricted environment containing only the variables required for execution.
 
-Sensitive API keys and application credentials are not intentionally inherited into the sandbox environment.
+Sensitive API keys and application credentials are not intentionally inherited
+into the sandbox environment. Python runs in isolated mode to ignore Python
+environment overrides and user-site packages. This does not stop hostile code
+from opening a known absolute path or accessing the network: the child still
+runs as your Windows user. Treat the scanner and subprocess limits as
+best-effort process hygiene, not an OS security boundary.
 
 ### 3. Memory ceiling
 
@@ -1245,7 +1279,30 @@ changes, update the variable and restart JARVIS.
 
 ## 4. Pair the phone
 
-In JARVIS's desktop UI, open **REMOTE CONTROL** and scan the QR code with the phone camera. The phone opens the private HTTPS dashboard and stores its pairing token in that browser. Keep the QR code private.
+In JARVIS's desktop UI, open **REMOTE CONTROL**. Scan the one-time QR with
+the phone camera or tap **Scan desktop QR** in the Jarvis Mobile Android app.
+The Android app validates the private HTTPS Tailscale host and asks before
+pairing. The phone opens the private dashboard and stores its pairing token in
+local app storage. Keep the QR code private.
+
+For automatic voice handoff, enable Bluetooth on the Windows PC and phone, open
+the paired dashboard in Jarvis Mobile, and tap its microphone button while you
+are near the PC. Android asks for microphone and nearby-device access and shows
+an ongoing microphone notification. The phone scans for the desktop's private,
+per-install BLE beacon. After it has detected the PC nearby, moving out of
+Bluetooth range transfers microphone input and JARVIS speech to the phone;
+returning near the PC routes audio back. Tap the microphone button to disarm.
+The app uses native Android audio capture, not WebView microphone device
+enumeration.
+
+BLE signal strength only estimates proximity; walls, the phone's position, and
+Bluetooth hardware affect its range, so it does not report exact meters. Arm
+the handoff while near the PC first. JARVIS stores the random beacon UUID in
+`config/phone_handoff.json`, which is ignored by Git. Install requirements on
+Windows so the optional `winrt-Windows.Devices.Bluetooth.Advertisement` package
+is present. If Windows BLE advertising is unavailable, the dashboard reports
+that proximity handoff is disabled. Android requires Bluetooth/Nearby devices,
+microphone permission, and its visible foreground-service notification.
 
 If QR pairing is unavailable, check that the dashboard dependencies are installed, JARVIS was restarted after setting `JARVIS_REMOTE_URL`, and `tailscale serve status` shows the expected hostname.
 

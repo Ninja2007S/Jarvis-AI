@@ -493,6 +493,8 @@ class DashboardServer:
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._login_attempts: dict[str, list] = {}    # ip → [timestamps]
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
+        self._phone_audio_ws: WebSocket | None    = None
+        self._handoff_status_callback = None
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
@@ -571,6 +573,10 @@ class DashboardServer:
     def set_connect_callback(self, fn) -> None:
         self._connect_callback = fn
 
+    def set_handoff_status_callback(self, fn) -> None:
+        """Provide authenticated proximity beacon metadata to a paired phone."""
+        self._handoff_status_callback = fn
+
     # ── broadcast ────────────────────────────────────────────────────────
 
     async def broadcast(self, msg: dict) -> None:
@@ -584,6 +590,19 @@ class DashboardServer:
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+
+    async def send_phone_audio(self, data: bytes) -> bool:
+        """Send one PCM playback frame to the currently active paired phone."""
+        ws = self._phone_audio_ws
+        if ws is None:
+            return False
+        try:
+            await ws.send_bytes(data)
+            return True
+        except Exception:
+            if self._phone_audio_ws is ws:
+                self._phone_audio_ws = None
+            return False
 
     # ── FastAPI app ───────────────────────────────────────────────────────
 
@@ -718,6 +737,22 @@ class DashboardServer:
             ))
             return JSONResponse({"ok": True, "token": tok, "key": session_key})
 
+        @app.get("/api/handoff/status")
+        async def handoff_status(req: Request):
+            """Authenticated proximity status; never includes audio or personal data."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            active_phone = self._phone_audio_ws is not None
+            state = {}
+            if self._handoff_status_callback:
+                try:
+                    state = self._handoff_status_callback() or {}
+                except Exception:
+                    state = {}
+            state["phoneConnected"] = active_phone
+            state["handoff"] = bool(active_phone and state.get("phoneRouteActive", False))
+            return JSONResponse(state, headers={"Cache-Control": "no-store"})
+
         @app.post("/api/revoke-devices")
         async def revoke_devices(req: Request):
             """Invalidate all persistent device tokens (admin action)."""
@@ -836,8 +871,15 @@ class DashboardServer:
                 await websocket.close(code=4001)
                 return
             await websocket.accept()
+            previous = self._phone_audio_ws
+            if previous is not None and previous is not websocket:
+                try:
+                    await previous.close(code=4002, reason="Phone voice session replaced")
+                except Exception:
+                    pass
+            self._phone_audio_ws = websocket
             asyncio.create_task(self.broadcast(
-                {"type": "sys", "text": "Phone microphone live."}
+                {"type": "sys", "text": "Phone automatic handoff armed."}
             ))
             try:
                 while True:
@@ -851,8 +893,10 @@ class DashboardServer:
             except WebSocketDisconnect:
                 pass
             finally:
+                if self._phone_audio_ws is websocket:
+                    self._phone_audio_ws = None
                 asyncio.create_task(self.broadcast(
-                    {"type": "sys", "text": "Phone microphone stopped."}
+                    {"type": "sys", "text": "Phone automatic handoff disarmed."}
                 ))
 
         # ── File sharing ──────────────────────────────────────────────────────

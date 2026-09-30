@@ -6,19 +6,27 @@
   memory writes, memory lookup, undo, screen/camera capture, camera close,
   system status, monitoring changes, and shutdown. Registered actions and
   plugins continue through the same gate.
-- Screen and camera capture require the dangerous-action confirmation gate.
-  Captures are not taken without a live session, and a failed image send is no
-  longer reported as successful.
-- Email, messaging, browser control, desktop control, generated-code execution,
-  filesystem control, computer control/settings, and shutdown use the dangerous
-  tier. Unknown plugins default to the sensitive tier.
+- Screen and camera capture are audited as sensitive actions and still require
+  Voice ID when that feature is enabled. Captures are not taken without a live
+  session, and a failed image send is no longer reported as successful.
+- Confirmation is action-aware for browser, desktop, file, and computer
+  controls: searches, reads, listings, and inspection do not require a click;
+  writes, deletes, code execution, and input that can submit or change data do.
+  Email, messaging, Instagram, phone calls, generated-code execution, and
+  shutdown retain confirmation for every operation. Unknown actions inside
+  broad-control tools fail closed to confirmation; unknown plugins default to
+  the sensitive tier.
 - Sensitive and dangerous actions are blocked if they are triggered from
   untrusted external content without a fresh user turn. Rate limits remain in
   place.
-- Audit records are hash-chained and verified at startup. If the log cannot be
-  verified or written, guarded actions fail closed. The chain is tamper-evident,
-  not a remote or cryptographically signed record; a local administrator can
-  still replace the whole application and log.
+- Pending or canceled confirmations no longer consume the dangerous-action
+  rate limit. The limit is charged when an approved operation begins.
+- Audit records are hash-chained and verified at startup. Normal appends use a
+  cached verified tail; a full scan happens at startup or when an external file
+  size change is detected. If the log cannot be verified or written, guarded
+  actions fail closed. The chain is tamper-evident, not a remote or
+  cryptographically signed record; a local administrator can still replace the
+  whole application and log.
 - The supplied shared TLS certificate is identified and rotated on startup.
   The dashboard no longer opens firewall rules or binds to all network
   interfaces. It listens on loopback; remote access requires an explicit

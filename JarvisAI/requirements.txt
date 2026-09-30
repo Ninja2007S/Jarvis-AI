@@ -61,6 +61,10 @@ win10toast; sys_platform == "win32"
 pywinauto;  sys_platform == "win32"
 pywin32;    sys_platform == "win32"
 wmi;        sys_platform == "win32"
+winrt-Windows.Devices.Bluetooth.Advertisement>=3.2.1; sys_platform == "win32"
+winrt-Windows.Foundation>=3.2.1; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=3.2.1; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=3.2.1; sys_platform == "win32"
 
 # ── Documents, media & hardware readouts ──────────────────────────────────────
 # Every one of these is imported inside a try/except at the point of use, so a

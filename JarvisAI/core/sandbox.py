@@ -50,7 +50,9 @@ _POLL_SEC     = 0.5
 _DANGER_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("recursive delete",   re.compile(r"rm\s+-rf|Remove-Item\s+.*-Recurse|shutil\.rmtree|rd\s+/s", re.I)),
     ("mass file delete",   re.compile(r"del\s+/f\s+/s|os\.remove\s*\(.*\*|glob.*unlink", re.I)),
-    ("disk/partition ops", re.compile(r"\bformat\b|diskpart|mkfs\.|dd\s+if=", re.I)),
+    # Match actual disk formatting commands, not Python's ubiquitous
+    # str.format()/format() calls.
+    ("disk/partition ops", re.compile(r"(?im)^\s*(?:format(?:\.com)?\s+(?:[A-Z]:|/FS:)|diskpart\b|mkfs\.[\w.-]+\b|dd\s+if=)", re.I)),
     ("registry edits",     re.compile(r"reg\s+(add|delete)|winreg\.", re.I)),
     ("privilege escalation", re.compile(r"\bsudo\b|runas\s+/user|New-Object\s+.*Elevate", re.I)),
     ("remote code fetch",  re.compile(r"curl\s+.*\|\s*(bash|sh)|iwr\s+.*\|\s*iex|Invoke-Expression|"
@@ -60,7 +62,7 @@ _DANGER_PATTERNS: list[tuple[str, re.Pattern]] = [
                                        r"Popen\s*\(.*shell\s*=\s*True", re.I)),
     ("process killing",    re.compile(r"taskkill\s+/f|os\.kill\s*\(|psutil\.Process\(.*\)\.kill", re.I)),
     ("credential access",  re.compile(r"api[_-]?key|\.aws/credentials|password[s]?\s*=\s*['\"]|"
-                                       r"config[/\\]api_keys\.json", re.I)),
+                                       r"config[/\\]api_keys\.json|(?:open|read_text|read_bytes)\s*\([^)]*(?:api_keys\.json|token[^/\\]*\.json|credentials\.json)", re.I)),
 ]
 
 
@@ -77,7 +79,9 @@ def scan_for_danger(code: str) -> list[str]:
 
 # ── isolated execution ───────────────────────────────────────────────────────
 _INTERPRETERS = {
-    ".py":  [sys.executable],
+    # Isolated mode ignores PYTHON* environment settings and user-site
+    # packages. This is hygiene, not an OS filesystem/network boundary.
+    ".py":  [sys.executable, "-I", "-B"],
     ".js":  ["node"],
     ".ts":  ["ts-node"],
     ".sh":  ["bash"],
