@@ -43,6 +43,7 @@ import sys
 import traceback
 import base64
 import os
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -659,6 +660,14 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        # Keep a short, local-only mic pre-roll while an assistant turn is
+        # gated for wake-word interruption. The detector runs on another
+        # thread; replaying this after a match preserves the first words of the
+        # request that follows "Hey Jarvis" instead of losing them to inference
+        # latency. This buffer is cleared on every interrupt and never written
+        # to disk.
+        self._wake_interrupt_audio = deque(maxlen=12)  # ~768 ms at 16 kHz
+        self._wake_interrupt_lock = threading.Lock()
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
         self._visemes              = VisemeStream()
@@ -722,6 +731,12 @@ class JarvisLive:
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
+        # Keep a recognized but not yet completed user turn across socket
+        # failures. Re-send it only when reconnect starts a fresh session and
+        # no tool was already invoked, avoiding duplicate side effects.
+        self._inflight_user_text = ""
+        self._inflight_user_tool_started = False
+        self._retry_interrupted_request = ""
         # Persist the last clearly detected Sinhala/English user utterance so
         # startup and clap briefings use the language the user actually used.
         self._last_spoken_language = self._load_last_spoken_language()
@@ -815,15 +830,26 @@ class JarvisLive:
         if speaking or self._assistant_turn_pending or self._briefing_active:
             print("[Wake] 'Hey Jarvis' detected during a JARVIS response; interrupt requested.")
             self.ui.write_log("SYS: 'Hey Jarvis' detected — interrupting speech.")
+            # Count a local barge-in as user activity immediately. The Live
+            # transcript may arrive only after its response has been cancelled,
+            # and a reconnect during that gap must not immediately auto-sleep.
+            self._last_user_speech = time.monotonic()
             # The user normally starts their actual request immediately after
             # the wake phrase. Bypass the output echo guard briefly so its tail
             # cannot clip the beginning of that request after barge-in.
             self._barge_in_until = time.monotonic() + 3.0
             loop = self._loop
             if loop and loop.is_running():
-                loop.call_soon_threadsafe(self._interrupt_on_loop)
+                with self._wake_interrupt_lock:
+                    replay = list(self._wake_interrupt_audio)
+                    self._wake_interrupt_audio.clear()
+                loop.call_soon_threadsafe(self._interrupt_on_loop, replay)
             return
-        self.wake(reason="wake word", announce=True)
+        # While awake, the phrase is ordinary user audio and is already being
+        # streamed to Live. The detector still needs its quiet frames so it can
+        # re-arm after a previous barge-in, but must not start a second briefing.
+        if self._wake_enabled and not self._awake:
+            self.wake(reason="wake word", announce=True)
 
     def _on_double_clap_detected(self) -> None:
         """The clap worker calls from its own thread; marshal state changes."""
@@ -872,7 +898,13 @@ class JarvisLive:
                 continue
             with self._speaking_lock:
                 speaking = self._is_speaking
-            if speaking:
+            # A long news fetch or tool turn can be silent for longer than the
+            # idle timeout. Do not treat that silence as user inactivity: the
+            # active turn/briefing still owns the conversation, and sleeping
+            # here can discard a wake interruption when the Live socket later
+            # reconnects.
+            if (speaking or self._assistant_turn_pending
+                    or self._briefing_active or self._interrupted):
                 continue
             if (time.monotonic() - self._last_user_speech) > self._wake_sleep_timeout:
                 self.sleep(reason="no speech for 2 minutes")
@@ -1094,6 +1126,31 @@ class JarvisLive:
         update_memory({"preferences": {"last_spoken_language": {"value": language}}})
         print(f"[Memory] Last spoken language saved: {language}")
 
+    def _route_holo_news_voice(self, text: str) -> bool:
+        """Route explicit publisher/Holo open requests to the native Holo stage."""
+        spoken = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+        if not re.search(r"\b(open|show|pull up)\b", spoken):
+            return False
+        source = ""
+        if re.search(r"\b(news\s*first|newsfirst)\b", spoken):
+            source = "newsfirst"
+        elif re.search(r"\b(ada\s*derana|adaderana)\b", spoken):
+            source = "adaderana"
+        else:
+            holo_open = bool(re.search(
+                r"\b(open|show|pull up)\s+(it|that|this|the (?:article|story|headline))\b",
+                spoken,
+            ))
+            if not holo_open or not getattr(self.ui, "holo_is_fullscreen", False):
+                return False
+        try:
+            self.ui.open_latest_holo_news(source)
+            self.ui.write_log("SYS: Opening the requested news page in the Holo display.")
+            return True
+        except Exception as exc:
+            print(f"[Holo] Could not route the spoken news request: {exc}")
+            return False
+
     def _tail_active(self) -> bool:
         """True while the speakers may still be finishing our last sentence."""
         return time.monotonic() < self._tail_until
@@ -1168,13 +1225,13 @@ class JarvisLive:
         else:
             self._interrupt_on_loop()
 
-    def _interrupt_on_loop(self) -> None:
+    def _interrupt_on_loop(self, wake_audio=None) -> None:
         """Stop current playback on the asyncio owner thread."""
         with self._speaking_lock:
             speaking = self._is_speaking
         turn_pending = bool(self._assistant_turn_pending)
         briefing_active = bool(self._briefing_active)
-        self._interrupted = speaking or turn_pending
+        self._interrupted = speaking or turn_pending or briefing_active
         self._assistant_turn_pending = False
         if briefing_active:
             self._briefing_cancelled = True
@@ -1187,6 +1244,21 @@ class JarvisLive:
             # Wake the phase coordinator if it is waiting for the greeting turn.
             if self._turn_done_event:
                 self._turn_done_event.set()
+        # A user may finish the wake phrase and begin a command before the
+        # detector thread can notify the asyncio loop. Replace queued stale mic
+        # blocks with the local pre-roll, then let the live stream continue.
+        pending_mic = self.out_queue
+        if wake_audio and pending_mic is not None:
+            while True:
+                try:
+                    pending_mic.get_nowait()
+                except Exception:
+                    break
+            for data in wake_audio:
+                try:
+                    pending_mic.put_nowait({"data": data, "mime_type": "audio/pcm"})
+                except Exception:
+                    break
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -1660,6 +1732,26 @@ class JarvisLive:
                 )
             )
 
+    async def _resend_interrupted_request(self, text: str) -> None:
+        """Continue a recognized user request after a fresh Live session opens."""
+        if not text or not self.session or not self._awake:
+            return
+        try:
+            await self.session.send_client_content(
+                turns={"role": "user", "parts": [{"text": text}]},
+                turn_complete=True,
+            )
+            self._inflight_user_text = text
+            self._inflight_user_tool_started = False
+            self._last_user_speech = time.monotonic()
+            if self._retry_interrupted_request == text:
+                self._retry_interrupted_request = ""
+            self.ui.write_log(
+                "SYS: Continuing the request that was interrupted by the connection reset."
+            )
+        except Exception as exc:
+            print(f"[JARVIS] Could not resume interrupted request: {exc}")
+
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
         loop = asyncio.get_event_loop()
@@ -1690,24 +1782,46 @@ class JarvisLive:
             response_active = bool(
                 jarvis_speaking or self._assistant_turn_pending or self._briefing_active
             )
+            # Keep the local model receiving frames while idle as well. Its
+            # one-shot trigger disarms after a match and needs quiet frames to
+            # re-arm; without these, a single detected barge-in disables later
+            # voice interruptions until JARVIS is restarted.
+            det = self._wake_detector
+            detector_can_interrupt = bool(
+                self._wake_enabled and det is not None and det.ready and not self.ui.muted
+                and not self._phone_active
+                and (not self._ptt_enabled or self._ptt_held)
+            )
+            if detector_can_interrupt:
+                det.feed(indata)
+
             if response_active:
                 # Keep the local wake detector available for the whole assistant
                 # turn, including the quiet gap while news is being fetched. Only
                 # the detector can interrupt; ambient audio is never sent to Live.
-                det = self._wake_detector
-                detector_can_interrupt = bool(
-                    det is not None and det.ready and not self.ui.muted
-                    and not self._phone_active
-                    and (not self._ptt_enabled or self._ptt_held)
-                )
-                if detector_can_interrupt:
-                    det.feed(indata)
                 # If speech is actually playing, keep the mic local even when
                 # wake detection is unavailable so JARVIS cannot hear its own
                 # output. In a silent briefing-fetch gap, allow normal mic input
                 # as a fallback when no local detector can run.
-                if jarvis_speaking or self._assistant_turn_pending or detector_can_interrupt:
+                if detector_can_interrupt:
+                    # Keep only a short in-memory mic pre-roll while local
+                    # wake recognition catches up. No audio is sent upstream
+                    # unless the local detector actually recognizes its wake
+                    # phrase.
+                    try:
+                        with self._wake_interrupt_lock:
+                            self._wake_interrupt_audio.append(indata.tobytes())
+                    except Exception:
+                        pass
+                # During a silent model/tool gap, an unavailable or disabled
+                # wake detector must not keep the mic closed indefinitely. The
+                # detector still gates all audio while speech is audible, and
+                # gates the quiet gap whenever it is ready.
+                if jarvis_speaking or detector_can_interrupt:
                     return
+            else:
+                with self._wake_interrupt_lock:
+                    self._wake_interrupt_audio.clear()
 
             # ── Echo tail ────────────────────────────────────────────────────
             # The speaking flag has dropped but the speakers have not finished.
@@ -1840,6 +1954,7 @@ class JarvisLive:
         print("[JARVIS] 👂 Recv started")
         out_buf, in_buf = [], []
         voice_confirmation_consumed = False
+        holo_open_request_pending = False
 
         try:
             while True:
@@ -1866,8 +1981,9 @@ class JarvisLive:
                             self._assistant_turn_pending = True
                             if self._turn_done_event and self._turn_done_event.is_set():
                                 self._turn_done_event.clear()
-                            # Split into ~50 ms chunks so interrupt() stops audio within 50 ms
-                            # (24000 Hz × 2 bytes/sample × 0.05 s = 2400 bytes per slice)
+                            # Split into ~50 ms chunks so the playback queue can
+                            # be cleared precisely; the output loop writes at
+                            # most 100 ms at a time.
                             _SLICE = 2400
                             for _audio_data in _audio_chunks:
                                 for _i in range(0, len(_audio_data), _SLICE):
@@ -1930,6 +2046,10 @@ class JarvisLive:
                                 if self._interrupted:
                                     self._interrupted = False
                                     out_buf = []
+                                # A confirmed user transcript means the cancelled
+                                # output can no longer own the shared turn state.
+                                # Preserve this transcript through a late
+                                # turn_complete from the interrupted response.
                                 self._remember_spoken_language(txt)
                                 self._last_user_speech = time.monotonic()
                                 security.mark_user_turn_started()
@@ -1949,6 +2069,8 @@ class JarvisLive:
                                             )
                                     else:
                                         in_buf.append(txt)
+                                        self._inflight_user_text = " ".join(in_buf).strip()
+                                        self._inflight_user_tool_started = False
 
                         if sc.turn_complete:
                             self._assistant_turn_pending = False
@@ -1957,15 +2079,19 @@ class JarvisLive:
 
                             # If this turn_complete ends an interrupted response, clear the
                             # flag and skip all further processing for that turn.
-                            if self._interrupted:
+                            if self._interrupted and not in_buf:
                                 self._interrupted = False
-                                in_buf  = []
                                 out_buf = []
                                 self._visemes.reset()
                                 continue
+                            if self._interrupted:
+                                self._interrupted = False
 
                             full_in = " ".join(in_buf).strip()
                             if full_in:
+                                # A fresh user turn supersedes any previous
+                                # locally handled Holo-open request.
+                                holo_open_request_pending = self._route_holo_news_voice(full_in)
                                 self._last_out_logged = ""   # new exchange
                                 self.ui.write_log(f"You: {full_in}")
                                 self._session_log.append(f"User: {full_in}")
@@ -1975,6 +2101,8 @@ class JarvisLive:
                                         "text": full_in,
                                         "ts": datetime.now().isoformat(),
                                     }))
+                                self._inflight_user_text = ""
+                                self._inflight_user_tool_started = False
                             in_buf = []
 
                             full_out = " ".join(out_buf).strip()
@@ -2006,6 +2134,8 @@ class JarvisLive:
                                 asyncio.create_task(_cam_close())
 
                     if response.tool_call:
+                        if self._inflight_user_text:
+                            self._inflight_user_tool_started = True
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
                             print(f"[JARVIS] 📞 {fc.name}")
@@ -2017,12 +2147,21 @@ class JarvisLive:
                                         "Do not repeat or initiate an action for that phrase."
                                     )},
                                 )
+                            elif holo_open_request_pending:
+                                fr = types.FunctionResponse(
+                                    id=fc.id, name=fc.name,
+                                    response={"result": (
+                                        "The news page was opened locally in the native Holo display. "
+                                        "Do not open an external browser or repeat the action."
+                                    )},
+                                )
                             else:
                                 fr = await self._execute_tool(fc)
                             fn_responses.append(fr)
                         await self.session.send_tool_response(
                             function_responses=fn_responses
                         )
+                        holo_open_request_pending = False
                         await self._flush_pending_vision()
 
                     # Keep the local-only suppression through any tool call
@@ -2106,16 +2245,18 @@ class JarvisLive:
 
                 # Batch all immediately-available chunks into one write to reduce
                 # thread-pool round-trips (was one asyncio.to_thread per 50ms slice).
-                # Cap at ~200 ms so interrupt() still stops audio within ~200 ms.
+                # Cap at ~100 ms: small enough to keep interrupt latency low,
+                # while batching writes enough to avoid starving playback on
+                # systems where each sounddevice write crosses a worker thread.
                 batch = bytearray(chunk)
-                while len(batch) < 9600:   # 9600 bytes ≈ 200 ms at 24 kHz / 16-bit mono
+                while len(batch) < 4800:   # 4800 bytes ≈ 100 ms at 24 kHz / 16-bit mono
                     try:
                         batch.extend(self.audio_in_queue.get_nowait())
                     except asyncio.QueueEmpty:
                         break
 
                 # Drive the HUD waveform and the avatar's mouth from JARVIS's
-                # own voice. The batch is up to 200 ms long, so we hand over a
+                # own voice. The batch is up to 100 ms long, so we hand over a
                 # *schedule* of 20 ms viseme frames instead of a single averaged
                 # level and let the HUD play it out in step with the audio.
                 try:
@@ -2644,6 +2785,40 @@ class JarvisLive:
                 print(f"[Dashboard] Command error: {e}")
                 await asyncio.sleep(0.5)
 
+    async def _wait_for_reconnect(self, delay: float) -> bool:
+        """Wait before reconnecting; return False when shutdown was requested.
+
+        A shutdown can arrive while the Live socket is already unwound and
+        run() is in its backoff. In that state the session TaskGroup's watcher
+        has exited, so waiting on a bare sleep lets cancellation escape without
+        the normal dashboard cleanup path.
+        """
+        if self._shutdown_requested:
+            return False
+        event = self._shutdown_event
+        try:
+            if event is None:
+                await asyncio.sleep(max(0.0, float(delay)))
+                return not self._shutdown_requested
+            if event.is_set():
+                return False
+            try:
+                await asyncio.wait_for(event.wait(), timeout=max(0.0, float(delay)))
+                return False
+            except asyncio.TimeoutError:
+                return not self._shutdown_requested
+        except asyncio.CancelledError:
+            if self._shutdown_requested:
+                return False
+            raise
+
+    async def _finish_shutdown(self) -> None:
+        """Persist the final conversation and stop local services gracefully."""
+        print("[JARVIS] Shutdown requested; stopping session tasks.")
+        if len(self._session_log) >= 3:
+            await self._save_session_summary()
+        await self._stop_dashboard()
+
     async def _stop_dashboard(self) -> None:
         """Stop dashboard listeners and relay tasks before the asyncio loop closes."""
         dashboard = self._dashboard
@@ -2789,21 +2964,31 @@ class JarvisLive:
 
                     print("[JARVIS] Connected.")
                     if _resumed_with:
+                        # The server restored its own in-flight turn; do not
+                        # also replay the local fallback copy.
+                        self._retry_interrupted_request = ""
                         # Say it plainly: the difference between "it reconnected"
                         # and "it reconnected and still knows what we were doing"
                         # is the whole point, and it is invisible otherwise.
                         self.ui.write_log("SYS: Reconnected — conversation restored.")
 
-                    # Wake word: if enabled, come up ASLEEP (mic gated, silent)
-                    # until the user says "Hey Jarvis" or taps wake in the UI.
+                    # Keep the current awake/sleeping state across a session
+                    # rebuild. Only __init__ chooses the initial state; forcing
+                    # sleep here loses a live request when Gemini reconnects
+                    # during a wake-word interruption or briefing.
                     if self._wake_enabled:
                         _wake_interrupt_ready = self._ensure_wake_detector()
-                        self._awake = False
-                        self.ui.set_state("SLEEPING")
-                        self.ui.write_log(
-                            "SYS: JARVIS online — sleeping. Say 'Hey Jarvis', "
-                            "clap twice, or tap WAKE NOW to wake me."
-                        )
+                        if self._awake:
+                            self.ui.set_state("LISTENING")
+                            self.ui.write_log(
+                                "SYS: JARVIS reconnected — awake and listening."
+                            )
+                        else:
+                            self.ui.set_state("SLEEPING")
+                            self.ui.write_log(
+                                "SYS: JARVIS online — sleeping. Say 'Hey Jarvis', "
+                                "clap twice, or tap WAKE NOW to wake me."
+                            )
                         if self._clap_detector and self._clap_detector.ready:
                             self.ui.write_log("SYS: Two-clap wake is listening locally.")
                         if _wake_interrupt_ready:
@@ -2855,6 +3040,18 @@ class JarvisLive:
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 
+                    # If a resumable token was rejected (or the socket failed
+                    # before one was issued), preserve the already recognized
+                    # request. Never replay after a successful session resume,
+                    # and never repeat a request whose tool already ran.
+                    if (not _resumed_with and self._retry_interrupted_request
+                            and not self._inflight_user_tool_started and self._awake):
+                        tg.create_task(
+                            self._resend_interrupted_request(
+                                self._retry_interrupted_request
+                            )
+                        )
+
                     # Morning briefing — fires once per process launch (if enabled).
                     # Skipped in wake-word mode: it comes up asleep, and a briefing
                     # would mean talking while "asleep".
@@ -2869,23 +3066,20 @@ class JarvisLive:
             except asyncio.CancelledError:
                 if not self._shutdown_requested:
                     raise
-                print("[JARVIS] Shutdown requested; stopping session tasks.")
-                if len(self._session_log) >= 3:
-                    await self._save_session_summary()
-                await self._stop_dashboard()
+                await self._finish_shutdown()
                 return
             except BaseException as e:
                 # TaskGroup can wrap child failures in ExceptionGroup. Treat
                 # requested shutdown as terminal; propagate unrelated
                 # cancellation so asyncio.run() can close the loop normally.
                 if self._shutdown_requested:
-                    print("[JARVIS] Shutdown requested; stopping session tasks.")
-                    if len(self._session_log) >= 3:
-                        await self._save_session_summary()
-                    await self._stop_dashboard()
+                    await self._finish_shutdown()
                     return
                 if _contains_cancelled_error(e):
                     raise
+                if (self._inflight_user_text
+                        and not self._inflight_user_tool_started):
+                    self._retry_interrupted_request = self._inflight_user_text
                 if _is_reconnect_signal(e):
                     print("[JARVIS] Voluntary reconnect requested.")
                     if not _keep_context_of(e):
@@ -2908,7 +3102,14 @@ class JarvisLive:
                     or "NOT_FOUND" in str(e)
                 ):
                     print("[JARVIS] 🔗 Resumption handle rejected — starting a fresh session")
-                    self.ui.write_log("SYS: Could not restore the conversation — starting fresh.")
+                    # A handle can be invalidated when Gemini closes during an
+                    # interrupted turn. Rebuild the recent local transcript in
+                    # the next session's system context so recovery does not
+                    # silently make JARVIS forget the conversation.
+                    self._live_switch_context = "\n".join(self._session_log[-12:])[-9000:]
+                    self.ui.write_log(
+                        "SYS: Session resume token was rejected; restoring recent conversation context."
+                    )
                     self._resume_handle = None
                     self._conn_backoff = 0
                     continue
@@ -2925,7 +3126,9 @@ class JarvisLive:
                     )
                     print(f"[JARVIS] ⚠️ {message}")
                     self.ui.write_log(message)
-                    await asyncio.sleep(self._conn_backoff)
+                    if not await self._wait_for_reconnect(self._conn_backoff):
+                        await self._finish_shutdown()
+                        return
                     continue
 
                 print(f"[JARVIS] Error ({type(e).__name__}): {e}")
@@ -2956,7 +3159,9 @@ class JarvisLive:
                             "ERR: All configured Live models are rate-limited. "
                             "JARVIS will retry after a cooldown."
                         )
-                        await asyncio.sleep(self._conn_backoff)
+                        if not await self._wait_for_reconnect(self._conn_backoff):
+                            await self._finish_shutdown()
+                            return
                     continue
 
                 if "NOT_FOUND" in err_str.upper() or any(
@@ -2987,7 +3192,9 @@ class JarvisLive:
                         "ERR: No available Live model is enabled for this API key; "
                         "retrying after a cooldown."
                     )
-                    await asyncio.sleep(self._conn_backoff)
+                    if not await self._wait_for_reconnect(self._conn_backoff):
+                        await self._finish_shutdown()
+                        return
                     continue
 
                 # Turn-taking / media / thinking knobs rejected by the server
@@ -3025,8 +3232,12 @@ class JarvisLive:
                     self.ui.write_log("ERR: API key invalid — please re-enter your key.")
                     self.ui.set_state("SLEEPING")
                     self.ui.prompt_reconfig()
-                    while not self.ui._win._ready:
-                        await asyncio.sleep(1)
+                    while not self.ui._win._ready and not self._shutdown_requested:
+                        if not await self._wait_for_reconnect(1):
+                            break
+                    if self._shutdown_requested:
+                        await self._finish_shutdown()
+                        return
                     print("[JARVIS] New API key saved — reconnecting...")
                     _conn_backoff = 3
                     continue
@@ -3059,7 +3270,9 @@ class JarvisLive:
 
             delay = getattr(self, "_conn_backoff", 3)
             print(f"[JARVIS] Reconnecting in {delay}s...")
-            await asyncio.sleep(delay)
+            if not await self._wait_for_reconnect(delay):
+                await self._finish_shutdown()
+                return
 
 def main():
     from PyQt6.QtCore import QTimer

@@ -3442,6 +3442,7 @@ class MainWindow(QMainWindow):
     _hud_pulse_sig  = pyqtSignal(str)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
     _workspace_sig  = pyqtSignal(str, object) # (view type, payload) — thread-safe HUD viewer
+    _holo_news_sig  = pyqtSignal(str)          # voice-requested publisher/article in Holo
     _holo_stop_sig  = pyqtSignal()
     _earth_sig      = pyqtSignal(str, str, str)  # destination, origin, mode
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
@@ -3567,7 +3568,9 @@ class MainWindow(QMainWindow):
         self._hud_cam_stack.addWidget(self._earth_panel)
         self._workspace = HudWorkspace()
         self._workspace.close_requested.connect(self._close_workspace)
+        self._workspace.interrupt_requested.connect(self._do_interrupt)
         self._workspace.feature_requested.connect(self._open_holo_feature)
+        self._holo_news_sig.connect(self._open_holo_news_voice)
         self._workspace.route_requested.connect(lambda destination, origin: self._show_earth(destination, origin, "flight_route"))
         self._holo_stop_sig.connect(self._workspace.stop_holo_camera)
         self._hud_cam_stack.addWidget(self._workspace)
@@ -3772,6 +3775,11 @@ class MainWindow(QMainWindow):
 
     def _open_holo_feature(self, feature: str) -> None:
         """Route a Holo gesture to an existing HUD panel without invoking tools."""
+        if feature in {"news", "newsfirst", "adaderana"}:
+            self._workspace.show_holo_gestures()
+            source = {"news": "newsfirst", "newsfirst": "newsfirst", "adaderana": "adaderana"}[feature]
+            self._workspace.open_latest_holo_article(source)
+            return
         self._close_workspace()
         if feature == "earth":
             self._show_earth("", "", "show")
@@ -3779,6 +3787,7 @@ class MainWindow(QMainWindow):
         titles = {
             "video": "MEDIA PLAYER", "web": "WEB / ARTICLE", "images": "IMAGE GALLERY",
             "document": "DOCUMENTS", "news": "LIVE HEADLINES", "email": "EMAIL",
+            "newsfirst": "NEWSFIRST WEBSITE", "adaderana": "ADA DERANA WEBSITE",
             "calendar": "CALENDAR", "system": "SYSTEM STATUS", "weather": "WEATHER",
             "flights": "FLIGHT FINDER", "timers": "TIMERS / REMINDERS", "market": "MARKET WATCH",
         }
@@ -3786,6 +3795,13 @@ class MainWindow(QMainWindow):
             self._workspace.show_view(feature, titles.get(feature, feature.upper()))
             self._workspace_open = True
             self._hud_cam_stack.setCurrentWidget(self._workspace)
+
+    def _open_holo_news_voice(self, source: str) -> None:
+        """Keep the native Holo stage active while opening a publisher story/site."""
+        if self._cam_active:
+            self.stop_camera_stream()
+        self._workspace.show_holo_gestures()
+        QTimer.singleShot(650, lambda: self._workspace.open_latest_holo_article(source))
 
     def _on_cam_frame(self, data: bytes) -> None:
         px = QPixmap()
@@ -6248,6 +6264,17 @@ class JarvisUI:
     def show_holo_gestures(self):
         """Show the bundled gesture deck in the native HUD and request camera access."""
         self._show_workspace_view("holo", {})
+
+    @property
+    def holo_is_fullscreen(self) -> bool:
+        try:
+            return bool(self._win._workspace._is_fullscreen)
+        except RuntimeError:
+            return False
+
+    def open_latest_holo_news(self, source: str = "") -> None:
+        """Open the active or newest Newsfirst/Ada Derana story in Holo."""
+        self._win._holo_news_sig.emit(str(source or ""))
 
     def close_holo_gestures(self):
         """Return to the avatar and release Holo's camera capture."""

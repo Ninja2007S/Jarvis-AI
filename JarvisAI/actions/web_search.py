@@ -285,22 +285,26 @@ _SRI_LANKA_NEWS_SOURCES = (
     {
         "label": "Newsfirst — English",
         "query": "site:english.newsfirst.lk/latest latest Sri Lanka news",
+        "fallback_query": "Newsfirst Sri Lanka latest news English",
         "hosts": {"english.newsfirst.lk"},
     },
     {
         "label": "Newsfirst — Sinhala",
         "query": "site:newsfirst.lk/sinhala/latest ශ්‍රී ලංකාවේ අද පුවත්",
+        "fallback_query": "Newsfirst Sinhala Sri Lanka latest news",
         "hosts": {"newsfirst.lk"},
         "path_prefix": "/sinhala/",
     },
     {
         "label": "Ada Derana — English",
         "query": "site:adaderana.lk Sri Lanka latest news",
+        "fallback_query": "Ada Derana Sri Lanka latest news English",
         "hosts": {"adaderana.lk", "www.adaderana.lk"},
     },
     {
         "label": "Ada Derana — Sinhala",
         "query": "site:sinhala.adaderana.lk ශ්‍රී ලංකාවේ අද පුවත්",
+        "fallback_query": "Ada Derana Sinhala latest Sri Lanka news",
         "hosts": {"sinhala.adaderana.lk"},
     },
 )
@@ -317,10 +321,16 @@ def _sri_lanka_news(_query: str = "") -> str:
 
     def _fetch_source(index: int, source: dict) -> None:
         try:
-            source_results[index] = _ddg_search(
+            results = _ddg_search(
                 source["query"],
                 max_results=5,
             )
+            # Search providers sometimes return no results for site-restricted
+            # Sinhala queries. Retry once with a plain publisher/language query;
+            # accepted links are still restricted to that publisher below.
+            if not results and source.get("fallback_query"):
+                results = _ddg_search(source["fallback_query"], max_results=5)
+            source_results[index] = results
         except Exception as e:
             print(f"[WebSearch] Sri Lankan source search failed: {e}")
             source_results[index] = []
@@ -339,7 +349,9 @@ def _sri_lanka_news(_query: str = "") -> str:
     # Search providers can be slow to establish a connection on a cold start.
     # Keep the four editions parallel, but give each one enough time to return
     # instead of discarding all results after a short shared deadline.
-    deadline = time.monotonic() + 14.0
+    # Leave a little room for each worker's single fallback query before the
+    # outer news-fetch timeout closes the attempt.
+    deadline = time.monotonic() + 17.0
     for worker in workers:
         worker.join(max(0.0, deadline - time.monotonic()))
 

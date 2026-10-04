@@ -1366,8 +1366,9 @@ an action by itself.
   full-screen. Windows/macOS/Linux camera privacy settings still apply.
 * The hand model, tracking code, scene, notes, and 3D props are bundled under
   `JarvisAI/assets/holo/`. Video frames are processed in the local Qt WebEngine
-  view. The Holo panel blocks requests to external hosts; its loopback-only
-  helper serves the bundled assets and demo notes. Use **CHOOSE NOTES FOLDER…**
+  view. The Holo gesture deck blocks requests to external hosts; its loopback-only
+  helper serves the bundled assets and demo notes. The separate publisher article
+  panel is limited to Newsfirst and Ada Derana. Use **CHOOSE NOTES FOLDER…**
   to load your own Markdown or text files; that folder is remembered only for
   the current app session, is never copied into the repository, and is served
   only over loopback. JARVIS credentials are not read by this feature.
@@ -1388,6 +1389,18 @@ an action by itself.
   from the official HTTPS story pages, keeps the small image data in memory,
   and serves it to Holo over loopback; the Holo page itself still blocks
   external hosts. Headlines without a publisher image remain text-only.
+* Pinch a Newsfirst or Ada Derana headline to open that publisher's real article
+  in a floating panel inside the full-screen Holo window. Hold an open palm and
+  move it up or down to scroll the story; pinch again to close the panel. The
+  **BACK**, **RELOAD**, and **CLOSE** controls remain available. Say **“open it”**
+  while Holo is open to open the headline under your hand, or say **“open
+  Newsfirst”** / **“open Ada Derana”** to show that publisher's latest available
+  headline (or its home page when no briefing headlines are loaded). The
+  publisher view uses an isolated, temporary WebEngine profile, exposes no
+  JARVIS tools, and only permits top-level navigation to the Newsfirst and Ada
+  Derana HTTPS domains. If the publisher page cannot load, JARVIS falls back to
+  extracted article text in the Holo reader. Use **NEWSFIRST WEBSITE** or **ADA
+  DERANA WEBSITE** feature cards for the same views.
 * Press **F** for the optional ambient effects and **J** for Holo's optional
   local voice narration. These operate only on the Holo deck: they do not
   control the operating system or bypass JARVIS's confirmation and Voice ID

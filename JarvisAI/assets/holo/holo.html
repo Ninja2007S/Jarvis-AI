@@ -155,11 +155,11 @@
   <span class="chip" id="retry">START LOCAL CAMERA</span>
   <span id="status">booting…</span>
 </div>
-<div id="reader"><div class="pane"><h2></h2><pre></pre><div class="hint">PINCH ANYWHERE · TAP · OR CLICK TO CLOSE</div></div></div>
+<div id="reader"><div class="pane"><h2></h2><pre></pre><div class="hint">OPEN PALM TO SCROLL · PINCH ANYWHERE TO CLOSE</div></div></div>
 <div id="caption"></div>
 <div id="legend"><b>PINCH</b> grab / tap = open &nbsp;·&nbsp; <b>FLICK</b> throw (off-screen = gone) &nbsp;·&nbsp; <b>2-HAND STRETCH</b> big = read · crush = TL;DR<br>
 <b>TWO PINCHES</b> (apart/together) zoom · twist = rotate &nbsp;·&nbsp; <b>2-HAND STRETCH</b> on a held card: big = read · crush = TL;DR · 3D comes APART<br>
-  <b>PINCH JARVIS TOOLS</b> → open a HUD feature &nbsp;·&nbsp; <b>NEWS IMAGES</b> pinch/drag · two-hand resize · ✕ close or flick away<br>
+  <b>PINCH JARVIS TOOLS</b> → open a HUD feature &nbsp;·&nbsp; <b>NEWS</b> pinch a headline to read · open palm swipes to scroll · pinch to close<br>
   <b>PEACE ✌</b> = RESET everything &nbsp;·&nbsp; dock right = shelf &nbsp;·&nbsp; <b>J</b> jarvis mode &nbsp;·&nbsp; <b>F</b> = EFFECTS (pull · palm-hold push · ink · clap · tidy)<br>
 <b>3D PROPS</b> stretch = comes APART · shrink = back together &nbsp;·&nbsp; drop any .glb into props/</div>
 <div id="dbg"></div>
@@ -309,7 +309,7 @@ function refreshNewsCards(){
         const note = { title:item.title, body:item.detail || item.source || '', full:item.detail || item.title };
         card = { el:cardEl(note), kind:'note', parent:null, title:item.title, full:note.full,
           x:W*(.28 + .48*t), y:H*(.54 + .20*Math.sin(n*1.8)), vx:0, vy:0, s:.6, sT:1,
-          docked:false, born:performance.now(), newsIndex:null, newsImage:false, newsKey:key, url:item.url || '' };
+          docked:false, born:performance.now(), newsIndex:index, newsImage:false, newsKey:key, url:item.url || '', source:item.source || '' };
         CARDS.push(card);
       }
       if (card && item.image && !card.newsImage) {
@@ -411,22 +411,57 @@ function targetAt(p){
 
 /* ---------- reader ---------- */
 const reader = { open: false, card: null };
+let externalArticleOpen = false;
 const readerEl = document.getElementById('reader');
 const paneEl = readerEl.querySelector('.pane');
-function openReader(c){
+let articleLoadId = 0;
+function openReader(c, forceText = false){
   if (c.feature) {
     postState('feature', c.feature);
     jSay('open', `Opening ${c.title}.`, { cool: 2000 });
     return;
   }
+  let publisherHost = '';
+  try { publisherHost = new URL(c.url).hostname.toLowerCase(); } catch (_) {}
+  if (!forceText && c.newsKey && c.url && Number.isInteger(c.newsIndex) &&
+      ['newsfirst.lk','www.newsfirst.lk','english.newsfirst.lk','adaderana.lk',
+       'www.adaderana.lk','sinhala.adaderana.lk'].includes(publisherHost)) {
+    externalArticleOpen = true;
+    postState('open_article', String(c.newsIndex));
+    jSay('open', `Opening ${c.title}.`, { cool: 2000 });
+    return;
+  }
   reader.open = true; reader.card = c;
   readerEl.querySelector('h2').textContent = c.title;
-  readerEl.querySelector('pre').textContent = c.full || '';
+  const body = readerEl.querySelector('pre');
+  const hint = readerEl.querySelector('.hint');
+  body.textContent = c.full || c.body || '';
+  hint.textContent = c.url
+    ? 'LOADING PUBLISHER STORY · OPEN PALM TO SCROLL · PINCH TO CLOSE'
+    : 'OPEN PALM TO SCROLL · PINCH ANYWHERE TO CLOSE';
   readerEl.style.display = 'flex';
   postState('open', c.title);
   jSay('open', `${c.title}. On screen, sir.`, { cool: 2000 });
+  const requestId = ++articleLoadId;
+  if (c.url) {
+    fetch(`/api/article?url=${encodeURIComponent(c.url)}`).then(async response => {
+      const story = await response.json();
+      if (!response.ok) throw new Error(story.error || 'Publisher article unavailable.');
+      return story;
+    }).then(story => {
+      if (!reader.open || requestId !== articleLoadId || reader.card !== c) return;
+      readerEl.querySelector('h2').textContent = story.title || c.title;
+      body.textContent = story.text || c.full || c.body || '';
+      hint.textContent = `${story.source || c.source || 'NEWS'} · OPEN PALM TO SCROLL · PINCH ANYWHERE TO CLOSE`;
+      paneEl.scrollTop = 0;
+    }).catch(error => {
+      if (!reader.open || requestId !== articleLoadId || reader.card !== c) return;
+      body.textContent = `${c.full || c.body || ''}\n\n${error.message}`;
+      hint.textContent = `${c.source || 'NEWS'} · SHOWING HEADLINE SUMMARY · PINCH TO CLOSE`;
+    });
+  }
 }
-function closeReader(){ reader.open = false; readerEl.style.display = 'none'; }
+function closeReader(){ reader.open = false; reader.card = null; articleLoadId++; readerEl.style.display = 'none'; }
 readerEl.addEventListener('pointerdown', closeReader);
 
 /* ---------- gesture engine ---------- */
@@ -580,7 +615,11 @@ function ingestHands(rawHands){
     } else st.pushN = 0;
     // READER SCROLL: while the reader is open, an open palm wipes the page —
     // content follows the hand, touch-style (long notes were unreachable by hand)
-    if (reader.open && m.open && st.trail.length >= 2){
+    if (externalArticleOpen && m.open && st.trail.length >= 2){
+      const prev = st.trail[st.trail.length - 2];
+      const delta = (cur.y - prev.y) * 2.4;
+      if (Math.abs(delta) > 1) postWebScroll(delta);
+    } else if (reader.open && m.open && st.trail.length >= 2){
       const prev = st.trail[st.trail.length - 2];
       paneEl.scrollTop -= (cur.y - prev.y) * 2.4;
     }
@@ -602,6 +641,11 @@ function ingestHands(rawHands){
   if (ADV){ clapCheck(now); tidyCheck(now); }
 }
 function beginPinch(i, cur){
+  if (externalArticleOpen){
+    externalArticleOpen = false;
+    postState('close_article', '');
+    return;
+  }
   if (reader.open){ closeReader(); return; }
   const c = HANDS[i].hover || targetAt(cur);
   if (c && !drag.card){ drag.card = c; drag.hand = i; drag.dx = c.x - cur.x; drag.dy = c.y - cur.y;
@@ -780,6 +824,17 @@ function postState(event, card){
   stateTimer = setTimeout(() => { fetch('/api/state', { method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ event, card }) }).catch(()=>{}); }, 120);
+}
+let scrollTimer = 0, pendingScroll = 0;
+function postWebScroll(delta){
+  pendingScroll += Number(delta) || 0;
+  if (scrollTimer) return;
+  scrollTimer = setTimeout(() => {
+    const card = String(Math.max(-600, Math.min(600, pendingScroll)));
+    pendingScroll = 0; scrollTimer = 0;
+    fetch('/api/state', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ event:'web_scroll', card }) }).catch(()=>{});
+  }, 70);
 }
 
 /* ---------- JARVIS MODE (V7 preview) — he SPEAKS about what your hands do ----------
@@ -1415,6 +1470,24 @@ window.__holo = { cards: () => CARDS.map(c => ({ title: c.title, kind: c.kind, x
   hands: HANDS, ingest: ingestHands, synth: synthHand, metrics: handMetrics, drag,
   ink: () => ink.filter(p => !p.break).length, raw: RAW, gl: () => THREE_OK,
   jarvis: setJarvis, caption: () => captionEl.textContent,
+  openLatestNews: source => {
+    const news = CARDS.filter(c => c.newsKey && c.url);
+    if (!news.length) return false;
+    const desired = String(source || '').toLowerCase();
+    const hovered = HANDS.map(h => h.hover).find(c => c && c.newsKey && c.url);
+    const fromSource = desired && news.slice().reverse().find(c =>
+      `${c.source || ''} ${c.url || ''}`.toLowerCase().includes(desired));
+    const card = fromSource || hovered || news[news.length - 1];
+    if (!card) return false;
+    openReader(card); return true;
+  },
+  showNewsText: index => {
+    const card = CARDS.find(c => c.newsKey && c.newsIndex === Number(index));
+    if (!card) return false;
+    openReader(card, true); return true;
+  },
+  closeExternalArticle: () => { externalArticleOpen = false; },
+  refreshNews: refreshNewsCards,
   sum: t => { const c = CARDS.find(x => x.title === t || x.name === t); if (c) summarize(c); return !!c; } };
 statusEl.textContent = SIM ? 'SIM MODE' : 'waiting for camera…';
 

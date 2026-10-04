@@ -21,10 +21,10 @@ from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QGraphicsOpacityEffect, QScrollArea, QSizePolicy, QStackedWidget, QTabWidget,
+    QGraphicsOpacityEffect, QScrollArea, QSizePolicy, QStackedLayout, QStackedWidget, QTabWidget,
     QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -118,6 +118,29 @@ if QWebEngineUrlRequestInterceptor is not None:
                     info.block(True)
 else:
     _HoloLocalOnlyInterceptor = None
+
+
+if QWebEnginePage is not None:
+    class _HoloPublisherPage(QWebEnginePage):
+        """Display-only publisher view; no JARVIS bridge and no off-site navigation."""
+
+        def acceptNavigationRequest(self, url, navigation_type, is_main_frame):
+            if not is_main_frame:
+                return True
+            try:
+                parsed = urlparse(url.toString())
+                host = (parsed.hostname or "").lower().rstrip(".")
+                return (
+                    parsed.scheme == "https"
+                    and host in _NEWS_PUBLISHER_HOSTS
+                    and parsed.username is None
+                    and parsed.password is None
+                    and parsed.port in (None, 443)
+                )
+            except (TypeError, ValueError):
+                return False
+else:
+    _HoloPublisherPage = None
 
 
 def _valid_http_url(value: str) -> bool:
@@ -214,6 +237,7 @@ class HudWorkspace(QWidget):
     """One native display surface for media, documents and live information."""
 
     close_requested = pyqtSignal()
+    interrupt_requested = pyqtSignal()
     route_requested = pyqtSignal(str, str)
     market_loaded = pyqtSignal(object)
     thumbnail_loaded = pyqtSignal(int, bytes)
@@ -253,9 +277,21 @@ class HudWorkspace(QWidget):
         self._holo_page = None
         self._holo_container = None
         self._holo_view = None
+        self._holo_stage = None
+        self._holo_stage_stack = None
+        self._holo_article_overlay = None
+        self._holo_article_view = None
+        self._holo_article_profile = None
+        self._holo_article_page = None
+        self._holo_article_title = None
+        self._holo_article_index: int | None = None
         self._holo_requested = False
         self._is_fullscreen = False
         self._embedded_parent = None
+        self._interrupt_shortcut = QShortcut(QKeySequence("Escape"), self)
+        self._interrupt_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._interrupt_shortcut.setEnabled(False)
+        self._interrupt_shortcut.activated.connect(self.interrupt_requested.emit)
         self.holo_event.connect(self._on_holo_event)
         self._last_news_items: list[dict] = []
         self._news_image_slots = threading.BoundedSemaphore(4)
@@ -353,7 +389,62 @@ class HudWorkspace(QWidget):
                     self._holo_interceptor = _HoloLocalOnlyInterceptor(local_port, self._holo_profile)
                     self._holo_profile.setUrlRequestInterceptor(self._holo_interceptor)
                 self._holo_view.setPage(self._holo_page)
-            lay.addWidget(self._holo_view, 1)
+            self._holo_stage = QWidget(page)
+            self._holo_stage_stack = QStackedLayout(self._holo_stage)
+            self._holo_stage_stack.setContentsMargins(0, 0, 0, 0)
+            self._holo_stage_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+            self._holo_stage_stack.addWidget(self._holo_view)
+            self._holo_article_overlay = QWidget(self._holo_stage)
+            self._holo_article_overlay.setStyleSheet("background: rgba(0, 4, 8, 145);")
+            overlay_layout = QVBoxLayout(self._holo_article_overlay)
+            overlay_layout.setContentsMargins(38, 30, 38, 24)
+            article_panel = QFrame()
+            article_panel.setMinimumSize(440, 320)
+            article_panel.setMaximumSize(1540, 1050)
+            article_panel.setStyleSheet(
+                f"QFrame{{background:{_BG};border:1px solid {_TEAL};border-radius:10px;}}"
+            )
+            article_layout = QVBoxLayout(article_panel)
+            article_layout.setContentsMargins(10, 8, 10, 10)
+            article_bar = QHBoxLayout()
+            self._holo_article_title = QLabel("NEWS ARTICLE")
+            self._holo_article_title.setStyleSheet(
+                f"color:{_TEAL};font:bold 9pt 'Courier New';border:0;"
+            )
+            article_bar.addWidget(self._holo_article_title, 1)
+            for label, callback in (
+                ("BACK", lambda: self._holo_article_view.back() if self._holo_article_view else None),
+                ("RELOAD", lambda: self._holo_article_view.reload() if self._holo_article_view else None),
+                ("CLOSE  ×", self.close_holo_article),
+            ):
+                button = QPushButton(label)
+                button.setStyleSheet(self._button_style())
+                button.clicked.connect(callback)
+                article_bar.addWidget(button)
+            article_layout.addLayout(article_bar)
+            article_hint = QLabel("OPEN PALM + MOVE TO SCROLL  ·  PINCH TO CLOSE  ·  PUBLISHER VIEW IS DISPLAY-ONLY")
+            article_hint.setStyleSheet(f"color:{_DIM};font:7pt 'Courier New';border:0;padding:2px 4px;")
+            article_layout.addWidget(article_hint)
+            self._holo_article_view = QWebEngineView() if QWebEngineView else None
+            if self._holo_article_view:
+                self._configure_webview(self._holo_article_view)
+                self._holo_article_view.loadFinished.connect(self._on_holo_article_loaded)
+                if _HoloPublisherPage is not None:
+                    # Keep publisher cookies/cache separate from other JARVIS
+                    # WebEngine panels; this profile is off the record.
+                    self._holo_article_profile = QWebEngineProfile(self._holo_article_view)
+                    self._holo_article_page = _HoloPublisherPage(
+                        self._holo_article_profile, self._holo_article_view
+                    )
+                    self._holo_article_view.setPage(self._holo_article_page)
+                    self._holo_article_page.setAudioMuted(True)
+                article_layout.addWidget(self._holo_article_view, 1)
+            else:
+                article_layout.addWidget(self._placeholder("Publisher article view unavailable."), 1)
+            overlay_layout.addWidget(article_panel, 1, Qt.AlignmentFlag.AlignCenter)
+            self._holo_stage_stack.addWidget(self._holo_article_overlay)
+            self._holo_article_overlay.hide()
+            lay.addWidget(self._holo_stage, 1)
             self._holo_view.loadFinished.connect(self._on_holo_loaded)
             self._holo_view.load(QUrl(self._holo_server.url))
         else:
@@ -384,10 +475,34 @@ class HudWorkspace(QWidget):
 
     def _on_holo_event(self, event: str, card: str) -> None:
         if event == "feature":
-            valid = {"video", "web", "images", "document", "news", "email", "calendar",
+            valid = {"video", "web", "images", "document", "news", "newsfirst", "adaderana", "email", "calendar",
                      "system", "weather", "flights", "timers", "market", "earth"}
             if card in valid:
                 self.feature_requested.emit(card)
+            return
+        if event == "open_article":
+            try:
+                item = self._last_news_items[int(card)]
+            except (ValueError, IndexError, TypeError):
+                return
+            title = str(item.get("title") or "NEWS ARTICLE")
+            if self.open_holo_article(str(item.get("url") or ""), title, int(card)):
+                source = str(item.get("source") or "NEWS")
+                self._holo_status.setText(f"HOLO ARTICLE · {source[:42]} · OPEN PALM TO SCROLL")
+            return
+        if event == "close_article":
+            self.close_holo_article()
+            return
+        if event == "web_scroll" and self._holo_article_view is not None:
+            if self._holo_article_overlay is not None and self._holo_article_overlay.isVisible():
+                try:
+                    delta = max(-180.0, min(180.0, float(card)))
+                except (TypeError, ValueError):
+                    return
+                if delta:
+                    self._holo_article_view.page().runJavaScript(
+                        f"window.scrollBy(0, {-delta:.1f})"
+                    )
             return
         labels = {"open": "OPENED", "close": "CLOSED", "dock": "FILED", "sum": "SUMMARIZED",
                   "tidy": "ARRANGED", "jarvis": "JARVIS MODE", "exit": "RETURNING TO AVATAR"}
@@ -458,6 +573,7 @@ class HudWorkspace(QWidget):
                 self.setWindowFlags(Qt.WindowType.Window)
                 self.setWindowTitle("JARVIS — HOLO HAND GESTURES")
                 self._is_fullscreen = True
+                self._interrupt_shortcut.setEnabled(True)
                 self.showFullScreen()
             if self._holo_page is not None and self._holo_server is not None:
                 try:
@@ -470,9 +586,99 @@ class HudWorkspace(QWidget):
                     pass
             self.start_holo_camera()
 
+    @staticmethod
+    def _is_supported_holo_article(url: str) -> bool:
+        try:
+            parsed = urlparse(str(url or ""))
+            host = (parsed.hostname or "").lower().rstrip(".")
+            return (
+                parsed.scheme == "https"
+                and host in _NEWS_PUBLISHER_HOSTS
+                and parsed.username is None
+                and parsed.password is None
+                and parsed.port in (None, 443)
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def open_holo_article(self, url: str, title: str = "NEWS ARTICLE", news_index: int | None = None) -> bool:
+        """Open a publisher story in a floating, gesture-scrollable Holo panel."""
+        if not self._holo_article_view or not self._is_supported_holo_article(url):
+            return False
+        if self.tabs.currentWidget() is not self._holo_container:
+            self.show_holo_gestures()
+        if self._holo_article_title is not None:
+            self._holo_article_title.setText((title or "NEWS ARTICLE").upper()[:120])
+        self._holo_article_index = news_index
+        if self._holo_article_overlay is not None:
+            self._holo_article_overlay.show()
+            self._holo_stage_stack.setCurrentWidget(self._holo_article_overlay)
+        self._holo_article_view.setUrl(QUrl(url))
+        return True
+
+    def _on_holo_article_loaded(self, ok: bool) -> None:
+        if ok or self._holo_article_index is None or self._holo_view is None:
+            if not ok and self._holo_article_title is not None and self._holo_article_index is None:
+                self._holo_article_title.setText("PAGE DID NOT LOAD · TRY RELOAD")
+            return
+        index = self._holo_article_index
+        self._holo_article_title.setText("PUBLISHER VIEW UNAVAILABLE · SHOWING LOCAL ARTICLE TEXT")
+        self.close_holo_article()
+        self._holo_view.page().runJavaScript(
+            f"window.__holo && window.__holo.showNewsText && window.__holo.showNewsText({index})"
+        )
+
+    def close_holo_article(self) -> None:
+        if self._holo_article_view is not None:
+            self._holo_article_view.stop()
+        self._holo_article_index = None
+        if self._holo_article_overlay is not None:
+            self._holo_article_overlay.hide()
+        if self._holo_stage_stack is not None and self._holo_view is not None:
+            self._holo_stage_stack.setCurrentWidget(self._holo_view)
+        if self._holo_view is not None:
+            self._holo_view.page().runJavaScript(
+                "window.__holo && window.__holo.closeExternalArticle && window.__holo.closeExternalArticle()"
+            )
+
+    def open_latest_holo_article(self, source: str = "") -> bool:
+        """Open the hovered or newest available publisher headline in Holo."""
+        self.show_holo_gestures()
+        source = str(source or "").strip().casefold()
+        if source:
+            for index, item in enumerate(self._last_news_items):
+                host = (urlparse(str(item.get("url") or "")).hostname or "").casefold()
+                matches_source = (
+                    ("newsfirst" in source and "newsfirst" in host)
+                    or ("derana" in source and "adaderana" in host)
+                )
+                if matches_source:
+                    if self.open_holo_article(item.get("url", ""), item.get("title", ""), index):
+                        return True
+            homepage = (
+                "https://www.newsfirst.lk/" if "newsfirst" in source
+                else "https://www.adaderana.lk/" if "derana" in source
+                else ""
+            )
+            if homepage:
+                return self.open_holo_article(homepage, source.upper() + " LIVE NEWS")
+            return False
+        if self._holo_view is not None:
+            def open_from_deck():
+                if self._holo_view is None:
+                    return
+                self._holo_view.page().runJavaScript(
+                    "if(window.__holo){window.__holo.refreshNews(); "
+                    "setTimeout(()=>window.__holo.openLatestNews(),450)}"
+                )
+            QTimer.singleShot(450, open_from_deck)
+            return True
+        return False
+
     def restore_to_embedded(self, parent=None) -> None:
         if not self._is_fullscreen:
             return
+        self.close_holo_article()
         self.stop_holo_camera()
         self.hide()
         target = parent or self._embedded_parent
@@ -480,11 +686,15 @@ class HudWorkspace(QWidget):
         self.setWindowFlags(Qt.WindowType.Widget)
         self.tabs.tabBar().show()
         self._is_fullscreen = False
+        self._interrupt_shortcut.setEnabled(False)
         self._embedded_parent = None
 
     def keyPressEvent(self, event):
         if self._is_fullscreen and event.key() == Qt.Key.Key_Escape:
-            self.close_requested.emit()
+            # Holo is a separate top-level window and consumes its own key
+            # events. Route Escape to the desktop interrupt action so a
+            # briefing can be stopped without closing the workspace.
+            self.interrupt_requested.emit()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -499,6 +709,20 @@ class HudWorkspace(QWidget):
     def shutdown_holo(self) -> None:
         self.stop_holo_camera()
         self.restore_to_embedded()
+        if self._holo_article_page is not None and self._holo_article_profile is not None:
+            try:
+                page = self._holo_article_page
+                profile = self._holo_article_profile
+                if self._holo_article_view is not None:
+                    page.triggerAction(QWebEnginePage.WebAction.Stop)
+                    self._holo_article_view.setPage(QWebEnginePage(self._holo_article_view))
+                if sip is not None:
+                    sip.delete(page)
+                    sip.delete(profile)
+                self._holo_article_page = None
+                self._holo_article_profile = None
+            except RuntimeError:
+                pass
         if self._holo_page is not None and self._holo_profile is not None and sip is not None:
             try:
                 page = self._holo_page
