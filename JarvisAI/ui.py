@@ -3567,6 +3567,7 @@ class MainWindow(QMainWindow):
         self._hud_cam_stack.addWidget(self._earth_panel)
         self._workspace = HudWorkspace()
         self._workspace.close_requested.connect(self._close_workspace)
+        self._workspace.feature_requested.connect(self._open_holo_feature)
         self._workspace.route_requested.connect(lambda destination, origin: self._show_earth(destination, origin, "flight_route"))
         self._holo_stop_sig.connect(self._workspace.stop_holo_camera)
         self._hud_cam_stack.addWidget(self._workspace)
@@ -3696,6 +3697,16 @@ class MainWindow(QMainWindow):
         self._hud_cam_stack.setCurrentIndex(1 if self._cam_active else 0)
 
     def _show_workspace(self, kind: str, payload) -> None:
+        data = payload if isinstance(payload, dict) else {"value": payload}
+        if kind == "news" and self._workspace._is_fullscreen:
+            # Keep the Holo stage active during a briefing. The image server is
+            # updated from the same headline cards and the deck polls for them.
+            self._workspace.show_news(
+                data.get("items", data.get("text", "")),
+                data.get("title", "HEADLINES"),
+                keep_holo=True,
+            )
+            return
         if self._cam_active:
             self.stop_camera_stream()
         if kind != "holo":
@@ -3706,7 +3717,6 @@ class MainWindow(QMainWindow):
                 self._hud_cam_stack.addWidget(self._workspace)
         self._earth_open = False
         self._workspace_open = True
-        data = payload if isinstance(payload, dict) else {"value": payload}
         if kind == "holo":
             self._workspace.show_holo_gestures()
         elif kind == "video_pause":
@@ -3759,6 +3769,23 @@ class MainWindow(QMainWindow):
             self._hud_cam_stack.addWidget(self._workspace)
         self._workspace_open = False
         self._hud_cam_stack.setCurrentIndex(1 if self._cam_active else 0)
+
+    def _open_holo_feature(self, feature: str) -> None:
+        """Route a Holo gesture to an existing HUD panel without invoking tools."""
+        self._close_workspace()
+        if feature == "earth":
+            self._show_earth("", "", "show")
+            return
+        titles = {
+            "video": "MEDIA PLAYER", "web": "WEB / ARTICLE", "images": "IMAGE GALLERY",
+            "document": "DOCUMENTS", "news": "LIVE HEADLINES", "email": "EMAIL",
+            "calendar": "CALENDAR", "system": "SYSTEM STATUS", "weather": "WEATHER",
+            "flights": "FLIGHT FINDER", "timers": "TIMERS / REMINDERS", "market": "MARKET WATCH",
+        }
+        if feature in self._workspace._page_index:
+            self._workspace.show_view(feature, titles.get(feature, feature.upper()))
+            self._workspace_open = True
+            self._hud_cam_stack.setCurrentWidget(self._workspace)
 
     def _on_cam_frame(self, data: bytes) -> None:
         px = QPixmap()

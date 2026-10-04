@@ -13,6 +13,23 @@ _ASSET_ROOT = Path(__file__).resolve().parent.parent / "assets" / "holo"
 _SAMPLE_ROOT = _ASSET_ROOT / "sample-notes"
 _MAX_BODY = 16 * 1024
 
+_FEATURES = (
+    ("video", "MEDIA PLAYER", "Open videos and control playback."),
+    ("web", "WEB / ARTICLE", "Read a web page or saved article in the HUD."),
+    ("images", "IMAGE GALLERY", "Browse image search and screenshot results."),
+    ("document", "DOCUMENTS", "Read PDF and document previews with summaries."),
+    ("news", "LIVE HEADLINES", "See current Newsfirst and Ada Derana headlines."),
+    ("email", "EMAIL", "Open unread mail and email cards."),
+    ("calendar", "CALENDAR", "Open today's events and agenda timeline."),
+    ("system", "SYSTEM STATUS", "View CPU, GPU, memory, battery and charts."),
+    ("weather", "WEATHER", "Open current conditions and forecast cards."),
+    ("flights", "FLIGHT FINDER", "Review flight results and route details."),
+    ("timers", "TIMERS / REMINDERS", "Open active countdowns and reminders."),
+    ("market", "MARKET WATCH", "Open the stock and crypto chart panel."),
+    ("earth", "EARTH / MAP", "Explore the globe and locate destinations."),
+)
+_MEDIA_FEATURES = {"video", "web", "images", "document", "news"}
+
 
 def _sample_tree(root: Path) -> list[dict]:
     """Read a chosen local notes folder, limited to Markdown and text files."""
@@ -51,6 +68,23 @@ class HoloGestureServer:
     def __init__(self, event_callback=None):
         owner = self
         self._notes_root = _SAMPLE_ROOT
+        self._news_items: list[dict] = []
+        self._news_images: dict[int, tuple[bytes, str]] = {}
+        self._news_lock = threading.RLock()
+
+        def _tree_payload():
+            tree = _sample_tree(owner._notes_root)
+            for name, keys in (("MEDIA & READING", _MEDIA_FEATURES), ("LIVE & SYSTEM", None)):
+                tree.append({
+                    "kind": "folder",
+                    "name": name,
+                    "files": [
+                        {"title": title, "body": detail, "full": detail, "feature": key}
+                        for key, title, detail in _FEATURES
+                        if (key in keys if keys is not None else key not in _MEDIA_FEATURES)
+                    ],
+                })
+            return tree
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args):
@@ -60,7 +94,8 @@ class HoloGestureServer:
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("Cache-Control", "no-store" if content_type.startswith("text/html") else "public, max-age=3600")
+                dynamic = content_type.startswith(("text/html", "application/json", "image/"))
+                self.send_header("Cache-Control", "no-store" if dynamic else "public, max-age=3600")
                 if content_type.startswith("text/html"):
                     self.send_header(
                         "Content-Security-Policy",
@@ -77,7 +112,29 @@ class HoloGestureServer:
                 if path in {"/", "/holo.html"}:
                     target = _ASSET_ROOT / "holo.html"
                 elif path == "/api/tree":
-                    self._send(200, json.dumps(_sample_tree(owner._notes_root)).encode("utf-8"), "application/json; charset=utf-8")
+                    self._send(200, json.dumps(_tree_payload()).encode("utf-8"), "application/json; charset=utf-8")
+                    return
+                elif path == "/api/news":
+                    with owner._news_lock:
+                        payload = [
+                            {key: value for key, value in item.items() if key != "image_bytes"}
+                            | ({"image": f"/api/news-image/{index}"} if index in owner._news_images else {})
+                            for index, item in enumerate(owner._news_items)
+                        ]
+                    self._send(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+                    return
+                elif path.startswith("/api/news-image/"):
+                    try:
+                        index = int(path.rsplit("/", 1)[-1])
+                    except ValueError:
+                        self._send(404, b"not found", "text/plain; charset=utf-8")
+                        return
+                    with owner._news_lock:
+                        image = owner._news_images.get(index)
+                    if image is None:
+                        self._send(404, b"not found", "text/plain; charset=utf-8")
+                        return
+                    self._send(200, image[0], image[1])
                     return
                 elif path == "/api/props":
                     props = sorted(p.name for p in (_ASSET_ROOT / "props").glob("*.glb"))[:6]
@@ -146,6 +203,35 @@ class HoloGestureServer:
             return False
         self._notes_root = selected
         return True
+
+    def set_news_items(self, items) -> None:
+        """Publish display-safe headline metadata and clear stale local images."""
+        clean = []
+        for item in list(items or [])[:12]:
+            if not isinstance(item, dict):
+                continue
+            title = " ".join(str(item.get("title") or "").split())[:180]
+            if not title:
+                continue
+            clean.append({
+                "title": title,
+                "detail": " ".join(str(item.get("detail") or item.get("snippet") or "").split())[:500],
+                "url": str(item.get("url") or "")[:1000],
+                "source": str(item.get("source") or "")[:60],
+            })
+        with self._news_lock:
+            self._news_items = clean
+            self._news_images.clear()
+
+    def set_news_image(self, index: int, data: bytes, content_type: str) -> None:
+        """Cache a small, validated publisher image for the loopback viewer."""
+        if content_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+            return
+        if not data or len(data) > 2_000_000:
+            return
+        with self._news_lock:
+            if 0 <= index < len(self._news_items):
+                self._news_images[index] = (bytes(data), content_type)
 
     def close(self):
         server = getattr(self, "_server", None)

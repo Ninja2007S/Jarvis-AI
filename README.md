@@ -1376,6 +1376,18 @@ an action by itself.
   two pinches to zoom/rotate, stretch a held note for a larger view, and squeeze
   it with both hands for a local text gist. A held **peace sign** resets the
   deck. The mouse remains available as a fallback.
+* Open **MEDIA & READING** or **LIVE & SYSTEM** with a quick pinch to reach the
+  existing video, article, image, document, news, email, calendar, system,
+  weather, flight, timer, market, and Earth panels. Pinch a feature card to
+  switch to that HUD panel. This is navigation; it does not run an assistant
+  action or skip its existing confirmation.
+* When a Newsfirst or Ada Derana briefing is displayed while Holo is open, its
+  headlines appear as floating image cards when the publisher supplies an
+  OpenGraph image. Pinch and drag to move one, stretch it with two hands to
+  resize, use **×** to close it, or flick it off-screen. JARVIS fetches images
+  from the official HTTPS story pages, keeps the small image data in memory,
+  and serves it to Holo over loopback; the Holo page itself still blocks
+  external hosts. Headlines without a publisher image remain text-only.
 * Press **F** for the optional ambient effects and **J** for Holo's optional
   local voice narration. These operate only on the Holo deck: they do not
   control the operating system or bypass JARVIS's confirmation and Voice ID

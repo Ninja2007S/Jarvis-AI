@@ -18,6 +18,15 @@
   .card h3 { font-family:"SF Mono",ui-monospace,Menlo,monospace; font-size:12.5px; letter-spacing:.08em;
              color:#a9ffe6; font-weight:600; margin-bottom:7px; text-transform:uppercase; }
   .card p { font-size:11px; line-height:1.55; color:#c9d6d2; white-space:pre-wrap; }
+  .card.news-card { width:280px; min-height:0; max-height:260px; padding:9px; }
+  .card.news-card img { display:block; width:100%; height:142px; object-fit:cover; border-radius:8px;
+    margin-bottom:8px; background:rgba(0,0,0,.35); }
+  .card.news-card h3 { padding-right:24px; text-transform:none; letter-spacing:.01em; line-height:1.35; }
+  .card.news-card p { max-height:42px; overflow:hidden; }
+  .news-close { position:absolute; top:5px; right:5px; width:24px; height:24px; border-radius:50%;
+    border:1px solid rgba(125,255,217,.45); color:#eafff8; background:rgba(5,9,12,.85);
+    font:14px monospace; cursor:pointer; }
+  .news-close:hover { color:#05070a; background:#9dffe4; }
   .orb { position:absolute; width:150px; height:150px; border-radius:50%; will-change:transform;
          display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;
          background:radial-gradient(circle at 38% 32%, rgba(60,110,96,.5), rgba(10,18,22,.72) 70%);
@@ -150,7 +159,8 @@
 <div id="caption"></div>
 <div id="legend"><b>PINCH</b> grab / tap = open &nbsp;·&nbsp; <b>FLICK</b> throw (off-screen = gone) &nbsp;·&nbsp; <b>2-HAND STRETCH</b> big = read · crush = TL;DR<br>
 <b>TWO PINCHES</b> (apart/together) zoom · twist = rotate &nbsp;·&nbsp; <b>2-HAND STRETCH</b> on a held card: big = read · crush = TL;DR · 3D comes APART<br>
-<b>PEACE ✌</b> = RESET everything &nbsp;·&nbsp; dock right = shelf &nbsp;·&nbsp; <b>J</b> jarvis mode &nbsp;·&nbsp; <b>F</b> = EFFECTS (pull · palm-hold push · ink · clap · tidy)<br>
+  <b>PINCH JARVIS TOOLS</b> → open a HUD feature &nbsp;·&nbsp; <b>NEWS IMAGES</b> pinch/drag · two-hand resize · ✕ close or flick away<br>
+  <b>PEACE ✌</b> = RESET everything &nbsp;·&nbsp; dock right = shelf &nbsp;·&nbsp; <b>J</b> jarvis mode &nbsp;·&nbsp; <b>F</b> = EFFECTS (pull · palm-hold push · ink · clap · tidy)<br>
 <b>3D PROPS</b> stretch = comes APART · shrink = back together &nbsp;·&nbsp; drop any .glb into props/</div>
 <div id="dbg"></div>
 <div id="perm"><div class="box"><b>HOLO needs your camera</b><br>
@@ -219,10 +229,29 @@ function orbEl(f){
 }
 function cardEl(note){
   const el = document.createElement('div'); el.className = 'card';
-  el.innerHTML = `<h3></h3><p></p>`;
-  el.querySelector('h3').textContent = note.title;
-  el.querySelector('p').textContent = (note.body || '').slice(0, 200);
+  if (note.image) {
+    el.classList.add('news-card');
+    const img = document.createElement('img'); img.src = note.image; img.alt = note.title || 'News headline';
+    img.loading = 'lazy'; el.appendChild(img);
+  }
+  const heading = document.createElement('h3'); heading.textContent = note.title || 'JARVIS TOOL';
+  const detail = document.createElement('p'); detail.textContent = (note.body || '').slice(0, 200);
+  el.append(heading, detail);
+  if (note.image) addNewsClose(el);
   deck.appendChild(el); return el;
+}
+function addNewsClose(el){
+  if (el.querySelector('.news-close')) return;
+  const close = document.createElement('button'); close.className = 'news-close';
+  close.type = 'button'; close.title = 'Close headline image'; close.setAttribute('aria-label', 'Close headline image');
+  close.textContent = '×';
+  close.addEventListener('click', ev => {
+    ev.stopPropagation();
+    const card = CARDS.find(c => c.el === el);
+    if (card) { postState('dismiss', card.title); CARDS = CARDS.filter(c => c !== card); }
+    el.remove();
+  });
+  el.appendChild(close);
 }
 function spawnOrbs(tree){
   for (const c of CARDS) if (c.el) c.el.remove();
@@ -248,6 +277,7 @@ function openOrb(orb){
     const R = 235 + (i % 2) * 60;
     CARDS.push({ el: cardEl(note), kind: 'note', parent: orb, title: note.title,
       full: note.full || note.body,
+      feature: note.feature || '',
       x: orb.x + Math.cos(ang) * 40, y: orb.y + Math.sin(ang) * 40,
       tx: orb.x + Math.cos(ang) * R, ty: orb.y + Math.sin(ang) * R,
       vx: 0, vy: 0, s: .25, sT: 1, docked: false, born: performance.now() });
@@ -262,10 +292,36 @@ function closeOrb(orb){
 }
 function resetCards(){
   ink.length = 0;
-  fetch('/api/tree').then(r => r.json()).then(spawnOrbs)
-    .catch(() => spawnOrbs([{ kind:'folder', name:'HOLO', files:[{ title:'HOLO',
-      body:'No notes served — point holo.json at a folder of markdown.', full:'' }] }]));
+  NEWS_SEEN.clear();
+  fetch('/api/tree').then(r => r.json()).then(tree => { spawnOrbs(tree); refreshNewsCards(); })
+    .catch(() => { spawnOrbs([{ kind:'folder', name:'HOLO', files:[{ title:'HOLO',
+      body:'No notes served — point holo.json at a folder of markdown.', full:'' }] }]); refreshNewsCards(); });
 }
+const NEWS_SEEN = new Set();
+function refreshNewsCards(){
+  fetch('/api/news').then(r => r.json()).then(items => {
+    items.forEach((item, index) => {
+      const key = item.url || item.title;
+      let card = CARDS.find(c => c.newsKey === key);
+      if (!card && !NEWS_SEEN.has(key)) {
+        NEWS_SEEN.add(key);
+        const n = NEWS_SEEN.size, t = (index + .5) / Math.max(1, items.length);
+        const note = { title:item.title, body:item.detail || item.source || '', full:item.detail || item.title };
+        card = { el:cardEl(note), kind:'note', parent:null, title:item.title, full:note.full,
+          x:W*(.28 + .48*t), y:H*(.54 + .20*Math.sin(n*1.8)), vx:0, vy:0, s:.6, sT:1,
+          docked:false, born:performance.now(), newsIndex:null, newsImage:false, newsKey:key, url:item.url || '' };
+        CARDS.push(card);
+      }
+      if (card && item.image && !card.newsImage) {
+        const img = document.createElement('img'); img.src = item.image;
+        img.alt = item.title || 'News headline'; img.loading = 'lazy';
+        card.el.prepend(img); card.el.classList.add('news-card');
+        addNewsClose(card.el); card.newsIndex = index; card.newsImage = true;
+      }
+    });
+  }).catch(()=>{});
+}
+setInterval(refreshNewsCards, 3000);
 resetCards();
 addEventListener('resize', () => { sizeCanvases(); sizeGL();
   if (MAP.id) updateMap(0, 0);
@@ -318,7 +374,8 @@ function physics(){
         if (d > 1 && d < 175){ const f = (175-d)/175*.5; c.vx += dx/d*f; c.vy += dy/d*f; } }
     }
     if (c.el){
-      const half = c.kind === 'folder' ? 75 : 115, halfY = c.kind === 'folder' ? 75 : 70;
+      const half = c.kind === 'folder' ? 75 : (c.newsImage ? 140 : 115);
+      const halfY = c.kind === 'folder' ? 75 : (c.newsImage ? 130 : 70);
       c.el.style.transform = `translate3d(${c.x-half}px, ${c.y-halfY}px, 0) scale(${c.s.toFixed(3)})`;
       c.el.classList.toggle('docked', c.docked);
       c.el.classList.toggle('hover', hov.has(c) && c !== drag.card);
@@ -334,7 +391,8 @@ function dockSlot(c){ const i = CARDS.filter(k => k.docked).indexOf(c);
   return { x: DOCK_X() + 6, y: H*.14 + i*84 }; }
 function cardAt(x, y){
   for (let i = CARDS.length-1; i >= 0; i--){ const c = CARDS[i];
-    if (c.kind === 'note'){ if (Math.abs(x-c.x) < 120*c.s && Math.abs(y-c.y) < 78*c.s) return c; }
+    if (c.kind === 'note'){ const w = c.newsImage ? 148 : 120, h = c.newsImage ? 138 : 78;
+      if (Math.abs(x-c.x) < w*c.s && Math.abs(y-c.y) < h*c.s) return c; }
     else if (Math.hypot(x-c.x, y-c.y) < (c.kind === 'obj' ? 92 : 82) * c.s) return c; }
   return null; }
 function targetAt(p){
@@ -356,6 +414,11 @@ const reader = { open: false, card: null };
 const readerEl = document.getElementById('reader');
 const paneEl = readerEl.querySelector('.pane');
 function openReader(c){
+  if (c.feature) {
+    postState('feature', c.feature);
+    jSay('open', `Opening ${c.title}.`, { cool: 2000 });
+    return;
+  }
   reader.open = true; reader.card = c;
   readerEl.querySelector('h2').textContent = c.title;
   readerEl.querySelector('pre').textContent = c.full || '';

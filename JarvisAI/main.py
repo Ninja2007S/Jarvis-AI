@@ -637,6 +637,7 @@ class JarvisLive:
         self._shutdown_event: asyncio.Event | None = None
         self._shutdown_requested = False
         self._is_speaking         = False
+        self._assistant_turn_pending = False
         self._barge_in_until      = 0.0
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
@@ -716,6 +717,7 @@ class JarvisLive:
         self._briefing_sent    = False          # morning briefing fires once per process
         self._briefing_active  = False          # true until the current briefing turn ends
         self._briefing_cancelled = False         # user interrupted; don't inject delayed news
+        self._briefing_task: asyncio.Task | None = None
         self._sys_monitor      = SystemMonitor()  # persistent cooldown state
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
@@ -810,8 +812,8 @@ class JarvisLive:
         """Interrupt speech or wake only on the local 'Hey Jarvis' detection."""
         with self._speaking_lock:
             speaking = self._is_speaking
-        if speaking:
-            print("[Wake] 'Hey Jarvis' detected during playback; interrupt requested.")
+        if speaking or self._assistant_turn_pending or self._briefing_active:
+            print("[Wake] 'Hey Jarvis' detected during a JARVIS response; interrupt requested.")
             self.ui.write_log("SYS: 'Hey Jarvis' detected — interrupting speech.")
             # The user normally starts their actual request immediately after
             # the wake phrase. Bypass the output echo guard briefly so its tail
@@ -819,7 +821,7 @@ class JarvisLive:
             self._barge_in_until = time.monotonic() + 3.0
             loop = self._loop
             if loop and loop.is_running():
-                loop.call_soon_threadsafe(self.interrupt)
+                loop.call_soon_threadsafe(self._interrupt_on_loop)
             return
         self.wake(reason="wake word", announce=True)
 
@@ -1159,11 +1161,29 @@ class JarvisLive:
             pass
 
     def interrupt(self) -> None:
-        """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
-        self._interrupted = True
-        if self._briefing_active:
+        """Request a thread-safe stop of current speech and reopen the microphone."""
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._interrupt_on_loop)
+        else:
+            self._interrupt_on_loop()
+
+    def _interrupt_on_loop(self) -> None:
+        """Stop current playback on the asyncio owner thread."""
+        with self._speaking_lock:
+            speaking = self._is_speaking
+        turn_pending = bool(self._assistant_turn_pending)
+        briefing_active = bool(self._briefing_active)
+        self._interrupted = speaking or turn_pending
+        self._assistant_turn_pending = False
+        if briefing_active:
             self._briefing_cancelled = True
             self.ui.write_log("SYS: Briefing paused for your request.")
+            # Cancel the news wait too; otherwise the microphone can stay in
+            # briefing-only wake-word mode until a slow search times out.
+            briefing_task = self._briefing_task
+            if briefing_task is not None and not briefing_task.done():
+                briefing_task.cancel()
             # Wake the phase coordinator if it is waiting for the greeting turn.
             if self._turn_done_event:
                 self._turn_done_event.set()
@@ -1182,8 +1202,8 @@ class JarvisLive:
         # The words we were about to mouth are never going to be spoken now.
         self._visemes.reset()
         self._play_cursor = 0.0     # next batch starts a fresh timeline
-        if self._turn_done_event:
-            self._turn_done_event.clear()
+        if (speaking or turn_pending) and self._turn_done_event:
+            self._turn_done_event.set()
         self.ui.write_log("SYS: Interrupted — listening...")
 
     def speak(self, text: str):
@@ -1667,16 +1687,27 @@ class JarvisLive:
             # While JARVIS talks, only the local Hey Jarvis model receives mic
             # frames. Other speech and background sounds are never streamed and
             # do not stop playback unless they trigger that wake-word model.
-            if jarvis_speaking:
-                # Only the local wake-word model can interrupt playback. It
-                # never streams microphone audio while JARVIS is speaking.
-                # Respect mute/PTT for this additional local listening path.
+            response_active = bool(
+                jarvis_speaking or self._assistant_turn_pending or self._briefing_active
+            )
+            if response_active:
+                # Keep the local wake detector available for the whole assistant
+                # turn, including the quiet gap while news is being fetched. Only
+                # the detector can interrupt; ambient audio is never sent to Live.
                 det = self._wake_detector
-                if (det is not None and det.ready and not self.ui.muted
-                        and not self._phone_active
-                        and (not self._ptt_enabled or self._ptt_held)):
+                detector_can_interrupt = bool(
+                    det is not None and det.ready and not self.ui.muted
+                    and not self._phone_active
+                    and (not self._ptt_enabled or self._ptt_held)
+                )
+                if detector_can_interrupt:
                     det.feed(indata)
-                return
+                # If speech is actually playing, keep the mic local even when
+                # wake detection is unavailable so JARVIS cannot hear its own
+                # output. In a silent briefing-fetch gap, allow normal mic input
+                # as a fallback when no local detector can run.
+                if jarvis_speaking or self._assistant_turn_pending or detector_can_interrupt:
+                    return
 
             # ── Echo tail ────────────────────────────────────────────────────
             # The speaking flag has dropped but the speakers have not finished.
@@ -1832,6 +1863,7 @@ class JarvisLive:
                         if self._interrupted:
                             pass  # discard: interrupted
                         else:
+                            self._assistant_turn_pending = True
                             if self._turn_done_event and self._turn_done_event.is_set():
                                 self._turn_done_event.clear()
                             # Split into ~50 ms chunks so interrupt() stops audio within 50 ms
@@ -1879,6 +1911,7 @@ class JarvisLive:
                             # sailed straight back in, which logged the answer
                             # twice AND made the avatar mouth it twice.
                             if txt and not _is_repeat_chunk(txt, out_buf):
+                                self._assistant_turn_pending = True
                                 out_buf.append(txt)
                                 # Hand the words to the mouth as they arrive, so
                                 # the avatar can form the consonants the audio
@@ -1889,6 +1922,7 @@ class JarvisLive:
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
+                                self._assistant_turn_pending = True
                                 # Some Live responses deliver the user's
                                 # transcription before the interrupted marker.
                                 # Once speech is transcribed, it belongs to the
@@ -1917,6 +1951,7 @@ class JarvisLive:
                                         in_buf.append(txt)
 
                         if sc.turn_complete:
+                            self._assistant_turn_pending = False
                             if self._turn_done_event:
                                 self._turn_done_event.set()
 
@@ -2272,6 +2307,7 @@ class JarvisLive:
 
         self._briefing_active = True
         self._briefing_cancelled = False
+        self._assistant_turn_pending = True
         try:
             await self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": p1}]},
@@ -2373,6 +2409,7 @@ class JarvisLive:
                     return
                 if self._turn_done_event:
                     self._turn_done_event.clear()
+                self._assistant_turn_pending = True
                 await self.session.send_client_content(
                     turns={"role": "user", "parts": [{"text": p2}]},
                     turn_complete=True,
@@ -2391,8 +2428,10 @@ class JarvisLive:
                 self.ui.write_log("SYS: Could not fetch the news for the briefing.")
             finally:
                 self._briefing_active = False
+                if self._briefing_task is asyncio.current_task():
+                    self._briefing_task = None
 
-        asyncio.create_task(_deliver_news())
+        self._briefing_task = asyncio.create_task(_deliver_news())
 
     # ── Session memory ──────────────────────────────────────────────────────────
 
@@ -2743,6 +2782,10 @@ class JarvisLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    self._assistant_turn_pending = False
+                    self._briefing_active      = False
+                    self._briefing_cancelled   = False
+                    self._briefing_task        = None
 
                     print("[JARVIS] Connected.")
                     if _resumed_with:

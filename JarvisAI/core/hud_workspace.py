@@ -7,14 +7,18 @@ as display-only content; no page is given access to JARVIS tools.
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import os
 import re
+import socket
+import threading
 import time
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
@@ -40,6 +44,48 @@ try:
     from PyQt6 import sip
 except Exception:  # pragma: no cover - depends on the local PyQt build
     sip = None
+
+
+_NEWS_PUBLISHER_HOSTS = {
+    "english.newsfirst.lk", "newsfirst.lk", "www.newsfirst.lk",
+    "adaderana.lk", "www.adaderana.lk", "sinhala.adaderana.lk",
+}
+
+
+class _OpenGraphImageParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.image_url = ""
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "meta" or self.image_url:
+            return
+        values = {str(key).lower(): str(value or "") for key, value in attrs}
+        field = (values.get("property") or values.get("name") or "").lower()
+        if field in {"og:image", "og:image:url", "twitter:image", "twitter:image:src"}:
+            self.image_url = values.get("content", "").strip()
+
+
+def _is_public_https_url(url: str) -> bool:
+    """Reject credentials, non-HTTPS URLs, and hosts resolving to private IPs."""
+    try:
+        parsed = urlparse(url)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                or parsed.password or parsed.port not in (None, 443)):
+            return False
+        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+        return bool(addresses) and all(
+            ipaddress.ip_address(record[4][0]).is_global for record in addresses
+        )
+    except (OSError, ValueError):
+        return False
+
+
+class _PublicHttpsRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_public_https_url(newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 _BG = "#080e12"
@@ -172,6 +218,8 @@ class HudWorkspace(QWidget):
     market_loaded = pyqtSignal(object)
     thumbnail_loaded = pyqtSignal(int, bytes)
     holo_event = pyqtSignal(str, str)
+    news_image_loaded = pyqtSignal(int, str, bytes, str)
+    feature_requested = pyqtSignal(str)
 
     _TABS = (
         ("gestures", "HOLO HANDS"), ("video", "MEDIA"), ("web", "WEB"), ("images", "IMAGES"),
@@ -197,6 +245,7 @@ class HudWorkspace(QWidget):
         self._sample_timer.start(2000)
         self.market_loaded.connect(self._on_market_loaded)
         self.thumbnail_loaded.connect(self._on_thumbnail_loaded)
+        self.news_image_loaded.connect(self._on_news_image_loaded)
         self._gallery_buttons = []
         self._holo_server = None
         self._holo_interceptor = None
@@ -208,6 +257,8 @@ class HudWorkspace(QWidget):
         self._is_fullscreen = False
         self._embedded_parent = None
         self.holo_event.connect(self._on_holo_event)
+        self._last_news_items: list[dict] = []
+        self._news_image_slots = threading.BoundedSemaphore(4)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 7, 8, 8)
@@ -332,6 +383,12 @@ class HudWorkspace(QWidget):
             self._holo_status.setText("CAMERA PERMISSION UNAVAILABLE · CHECK DESKTOP CAMERA ACCESS")
 
     def _on_holo_event(self, event: str, card: str) -> None:
+        if event == "feature":
+            valid = {"video", "web", "images", "document", "news", "email", "calendar",
+                     "system", "weather", "flights", "timers", "market", "earth"}
+            if card in valid:
+                self.feature_requested.emit(card)
+            return
         labels = {"open": "OPENED", "close": "CLOSED", "dock": "FILED", "sum": "SUMMARIZED",
                   "tidy": "ARRANGED", "jarvis": "JARVIS MODE", "exit": "RETURNING TO AVATAR"}
         if event == "exit":
@@ -903,24 +960,118 @@ class HudWorkspace(QWidget):
             self._doc_view_stack.setCurrentWidget(self._doc_text)
         self._select("document", "DOCUMENT / SUMMARY")
 
-    def show_news(self, data, title: str = "NEWSFIRST / ADA DERANA"):
+    def show_news(self, data, title: str = "NEWSFIRST / ADA DERANA", keep_holo: bool = False):
         items = []
         if isinstance(data, list):
-            items = [dict(x) if isinstance(x, dict) else {"title": str(x)} for x in data]
+            for value in data[:12]:
+                if isinstance(value, dict):
+                    items.append({
+                        "title": str(value.get("title") or "Headline")[:180],
+                        "detail": str(value.get("detail") or value.get("snippet") or value.get("description") or "")[:600],
+                        "url": str(value.get("url") or value.get("link") or "")[:1000],
+                        "source": str(value.get("source") or "")[:60],
+                    })
+                else:
+                    items.append({"title": str(value)[:180], "detail": "", "url": "", "source": ""})
         else:
             text = str(data or "")
             url_re = re.compile(r"https?://[^\s<>]+", re.I)
-            for block in re.split(
-                r"\n\s*\n|(?=^(?:Newsfirst|Ada Derana|English|Sinhala)\b)",
-                text,
-                flags=re.MULTILINE,
-            ):
-                block = block.strip(" \n-•")
-                if not block:
+            current_source = ""
+            current = None
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
                     continue
-                urls = url_re.findall(block)
-                items.append({"title": block.splitlines()[0][:160], "detail": "\n".join(block.splitlines()[1:])[:600], "url": urls[0].rstrip(".,)") if urls else ""})
-        self._set_cards("news", items, title, link_label="OPEN STORY")
+                if re.match(r"^(?:Newsfirst|Ada Derana)\s*[—:-]", line, re.I):
+                    current_source = line[:60]
+                    continue
+                if line.casefold().startswith("sri lankan local news"):
+                    continue
+                if line.startswith(("•", "- ", "* ")):
+                    if current:
+                        items.append(current)
+                    current = {"title": line.lstrip("•-* ").strip()[:180], "detail": "", "url": "", "source": current_source}
+                    continue
+                if line.lower().startswith("source:"):
+                    urls = url_re.findall(line)
+                    if current and urls:
+                        current["url"] = urls[0].rstrip(".,)")
+                    continue
+                if line.startswith(("http://", "https://")) and current:
+                    current["url"] = line.rstrip(".,)")
+                    continue
+                if current:
+                    current["detail"] = (current["detail"] + " " + line).strip()[:600]
+            if current:
+                items.append(current)
+            if not items:
+                for block in re.split(r"\n\s*\n", text):
+                    block = block.strip()
+                    if block:
+                        urls = url_re.findall(block)
+                        items.append({"title": block.splitlines()[0][:180],
+                                      "detail": " ".join(block.splitlines()[1:])[:600],
+                                      "url": urls[0].rstrip(".,)") if urls else "", "source": ""})
+        self._last_news_items = items[:12]
+        self._set_cards("news", self._last_news_items, title, field_map=("title", "detail", "source"), link_label="OPEN STORY")
+        if keep_holo and "gestures" in self._page_index:
+            self._select("gestures", "HOLO / LIVE NEWS")
+        if self._holo_server is not None:
+            self._holo_server.set_news_items(self._last_news_items)
+        for index, item in enumerate(self._last_news_items):
+            article_url = item.get("url", "")
+            host = urlparse(article_url).hostname
+            if (urlparse(article_url).scheme == "https" and host in _NEWS_PUBLISHER_HOSTS
+                    and self._news_image_slots.acquire(blocking=False)):
+                try:
+                    threading.Thread(
+                        target=self._fetch_news_image_guarded,
+                        args=(index, article_url),
+                        daemon=True,
+                        name="JarvisHeadlineImage",
+                    ).start()
+                except Exception:
+                    self._news_image_slots.release()
+
+    def _fetch_news_image_guarded(self, index: int, article_url: str) -> None:
+        try:
+            self._fetch_news_image(index, article_url)
+        finally:
+            self._news_image_slots.release()
+
+    def _fetch_news_image(self, index: int, article_url: str) -> None:
+        """Fetch the publisher's OpenGraph image, capped and restricted to public HTTPS."""
+        try:
+            if not _is_public_https_url(article_url):
+                return
+            opener = build_opener(_PublicHttpsRedirectHandler())
+            request = Request(article_url, headers={"User-Agent": "JARVIS Desktop/1.0", "Accept": "text/html"})
+            with opener.open(request, timeout=7) as response:
+                if not response.headers.get_content_type().startswith("text/html"):
+                    return
+                page = response.read(1_000_001)
+                if len(page) > 1_000_000:
+                    return
+                charset = response.headers.get_content_charset() or "utf-8"
+                page_url = response.geturl()
+            parser = _OpenGraphImageParser()
+            parser.feed(page.decode(charset, errors="replace"))
+            image_url = urljoin(page_url, parser.image_url)
+            if not parser.image_url or not _is_public_https_url(image_url):
+                return
+            request = Request(image_url, headers={"User-Agent": "JARVIS Desktop/1.0", "Accept": "image/*"})
+            with opener.open(request, timeout=7) as response:
+                content_type = response.headers.get_content_type().lower()
+                data = response.read(2_000_001)
+            if content_type in {"image/jpeg", "image/png", "image/webp", "image/gif"} and len(data) <= 2_000_000:
+                self.news_image_loaded.emit(index, article_url, data, content_type)
+        except Exception:
+            return
+
+    def _on_news_image_loaded(self, index: int, article_url: str, data: bytes, content_type: str) -> None:
+        if (self._holo_server is not None and 0 <= index < len(self._last_news_items)
+                and self._last_news_items[index].get("url") == article_url):
+            self._holo_server.set_news_image(index, data, content_type)
 
     def show_email(self, items, title: str = "UNREAD / RECENT EMAIL"):
         self._set_cards("email", items, title, field_map=("subject", "from", "snippet", "date"))
