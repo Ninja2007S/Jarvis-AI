@@ -1053,6 +1053,7 @@ All discovered capabilities are passed through the security layer before executi
 | 💬 `send_message`        | Sends supported messages                           |
 | 🌤️ `weather_report`     | Retrieves weather information                      |
 | ✈️ `flight_finder`       | Searches flight information                        |
+| ✋ `holo_gestures`       | Opens or closes the local hand-gesture HUD         |
 | 🎬 `youtube_video`       | Searches and controls YouTube                      |
 | 🎮 `game_updater`        | Manages supported game updates                     |
 | 💻 `code_helper`         | Assists with code                                  |
@@ -1399,6 +1400,38 @@ AVATAR** at the top of the workspace to restore the face/logo/neural view. The
 tabs remain available while the workspace is open; choosing a tab does not run
 an action by itself.
 
+## Holo hand-gesture deck
+
+* Say **“Jarvis, show Holo”** or **“open the hand-gesture interface”**. JARVIS
+  opens the **HOLO HANDS** panel full-screen as a native PyQt window; it does
+  not launch a standalone browser. Opening it is a sensitive action and follows
+  the normal JARVIS confirmation flow. Selecting **HOLO HANDS** in the Visual
+  Field also enters full-screen mode.
+* Holo chooses a named built-in/local camera and filters out **Phone Link** and
+  known virtual/remote camera devices. If more than one local camera is listed,
+  choose the laptop camera in the selector, then click **START LOCAL CAMERA**.
+  **STOP CAMERA** releases it. Press **Esc** or **RETURN TO AVATAR** to exit
+  full-screen. Windows/macOS/Linux camera privacy settings still apply.
+* The hand model, tracking code, scene, notes, and 3D props are bundled under
+  `JarvisAI/assets/holo/`. Video frames are processed in the local Qt WebEngine
+  view. The Holo panel blocks requests to external hosts; its loopback-only
+  helper serves the bundled assets and demo notes. Use **CHOOSE NOTES FOLDER…**
+  to load your own Markdown or text files; that folder is remembered only for
+  the current app session, is never copied into the repository, and is served
+  only over loopback. JARVIS credentials are not read by this feature.
+* **Pinch** a card to grab and drag it; a quick pinch opens a folder or note.
+  Flick a card away to clear it, or drag it to the right edge to dock it. Use
+  two pinches to zoom/rotate, stretch a held note for a larger view, and squeeze
+  it with both hands for a local text gist. A held **peace sign** resets the
+  deck. The mouse remains available as a fallback.
+* Press **F** for the optional ambient effects and **J** for Holo's optional
+  local voice narration. These operate only on the Holo deck: they do not
+  control the operating system or bypass JARVIS's confirmation and Voice ID
+  checks for protected actions. The **STOP CAMERA** control always releases the
+  webcam.
+* Say **“Jarvis, close Holo”** to close the panel and stop capture. The source
+  project's MIT license is retained at `JarvisAI/assets/holo/LICENSE`.
+
 ## Video player
 
 * Say **“Play [song/video] on YouTube”** to search and load the first matching
@@ -1658,6 +1691,7 @@ JarvisAI/
 │   ├── code_helper.py
 │   ├── dev_agent.py
 │   ├── self_heal.py
+│   ├── holo_gestures.py
 │   └── desktop.py
 │
 ├── plugins/
@@ -1671,6 +1705,9 @@ JarvisAI/
 │   ├── deep_reasoning.py
 │   ├── _google_core.py
 │   └── _template.py
+│
+├── assets/
+│   └── holo/                 # bundled local gesture UI, hand model, and 3D props
 │
 ├── memory/
 │   ├── memory_manager.py
@@ -1694,6 +1731,7 @@ JarvisAI/
 │   ├── audio_devices.py
 │   ├── gemini.py
 │   ├── hud_workspace.py
+│   ├── holo_gestures.py
 │   ├── earth_globe.py
 │   ├── earth_globe.html
 │   ├── plugin_loader.py

@@ -711,6 +711,8 @@ class JarvisLive:
         self._live_switch_context = ""
         self._turn_done_event: asyncio.Event | None = None
         self._dashboard     = None
+        self._dashboard_task = None
+        self._dashboard_command_task = None
         self._briefing_sent    = False          # morning briefing fires once per process
         self._briefing_active  = False          # true until the current briefing turn ends
         self._briefing_cancelled = False         # user interrupted; don't inject delayed news
@@ -2572,7 +2574,7 @@ class JarvisLive:
     # ── dashboard command relay ─────────────────────────────────────────────
 
     async def _process_dashboard_commands(self) -> None:
-        while True:
+        while not self._shutdown_requested:
             try:
                 text = await asyncio.wait_for(
                     self._dashboard._command_queue.get(), timeout=0.5
@@ -2602,6 +2604,27 @@ class JarvisLive:
             except Exception as e:
                 print(f"[Dashboard] Command error: {e}")
                 await asyncio.sleep(0.5)
+
+    async def _stop_dashboard(self) -> None:
+        """Stop dashboard listeners and relay tasks before the asyncio loop closes."""
+        dashboard = self._dashboard
+        if dashboard is not None:
+            try:
+                await dashboard.shutdown()
+            except Exception as exc:
+                print(f"[Dashboard] Graceful shutdown failed: {type(exc).__name__}.")
+
+        command_task = self._dashboard_command_task
+        if command_task is not None:
+            if not command_task.done():
+                command_task.cancel()
+            await asyncio.gather(command_task, return_exceptions=True)
+            self._dashboard_command_task = None
+
+        dashboard_task = self._dashboard_task
+        if dashboard_task is not None:
+            await asyncio.gather(dashboard_task, return_exceptions=True)
+            self._dashboard_task = None
 
     # ── main loop ───────────────────────────────────────────────────────────
 
@@ -2662,9 +2685,11 @@ class JarvisLive:
             self._dashboard = DashboardServer()
             self._dashboard.set_connect_callback(self._on_phone_connected)
             self._dashboard.set_handoff_status_callback(self._phone_handoff_status)
-            asyncio.create_task(self._dashboard.serve())
+            self._dashboard_task = asyncio.create_task(self._dashboard.serve())
             # Runs for the whole lifetime, not just inside an active session
-            asyncio.create_task(self._process_dashboard_commands())
+            self._dashboard_command_task = asyncio.create_task(
+                self._process_dashboard_commands()
+            )
         except Exception as e:
             print(f"[Dashboard] Disabled: {e}")
             self._dashboard = None
@@ -2804,6 +2829,7 @@ class JarvisLive:
                 print("[JARVIS] Shutdown requested; stopping session tasks.")
                 if len(self._session_log) >= 3:
                     await self._save_session_summary()
+                await self._stop_dashboard()
                 return
             except BaseException as e:
                 # TaskGroup can wrap child failures in ExceptionGroup. Treat
@@ -2813,6 +2839,7 @@ class JarvisLive:
                     print("[JARVIS] Shutdown requested; stopping session tasks.")
                     if len(self._session_log) >= 3:
                         await self._save_session_summary()
+                    await self._stop_dashboard()
                     return
                 if _contains_cancelled_error(e):
                     raise

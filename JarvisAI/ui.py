@@ -3442,6 +3442,7 @@ class MainWindow(QMainWindow):
     _hud_pulse_sig  = pyqtSignal(str)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
     _workspace_sig  = pyqtSignal(str, object) # (view type, payload) — thread-safe HUD viewer
+    _holo_stop_sig  = pyqtSignal()
     _earth_sig      = pyqtSignal(str, str, str)  # destination, origin, mode
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
@@ -3567,6 +3568,7 @@ class MainWindow(QMainWindow):
         self._workspace = HudWorkspace()
         self._workspace.close_requested.connect(self._close_workspace)
         self._workspace.route_requested.connect(lambda destination, origin: self._show_earth(destination, origin, "flight_route"))
+        self._holo_stop_sig.connect(self._workspace.stop_holo_camera)
         self._hud_cam_stack.addWidget(self._workspace)
         self._earth_open = False
         self._cam_active = False
@@ -3677,6 +3679,11 @@ class MainWindow(QMainWindow):
                 self._hud_cam_stack.setCurrentIndex(0)
 
     def _show_earth(self, destination: str = "", origin: str = "", mode: str = "show") -> None:
+        self._holo_stop_sig.emit()
+        was_fullscreen = self._workspace._is_fullscreen
+        self._workspace.restore_to_embedded(self._hud_cam_stack)
+        if was_fullscreen:
+            self._hud_cam_stack.addWidget(self._workspace)
         if self._cam_active:
             self.stop_camera_stream()
         self._workspace_open = False
@@ -3691,10 +3698,18 @@ class MainWindow(QMainWindow):
     def _show_workspace(self, kind: str, payload) -> None:
         if self._cam_active:
             self.stop_camera_stream()
+        if kind != "holo":
+            self._workspace.stop_holo_camera()
+            was_fullscreen = self._workspace._is_fullscreen
+            self._workspace.restore_to_embedded(self._hud_cam_stack)
+            if was_fullscreen:
+                self._hud_cam_stack.addWidget(self._workspace)
         self._earth_open = False
         self._workspace_open = True
         data = payload if isinstance(payload, dict) else {"value": payload}
-        if kind == "video_pause":
+        if kind == "holo":
+            self._workspace.show_holo_gestures()
+        elif kind == "video_pause":
             self._workspace._pause_video()
         elif kind == "video_mute":
             self._workspace.set_video_muted(bool(data.get("muted", True)))
@@ -3733,9 +3748,15 @@ class MainWindow(QMainWindow):
             self._workspace.show_market_query(data.get("symbol", ""))
         else:
             self._workspace.show_view(kind)
-        self._hud_cam_stack.setCurrentWidget(self._workspace)
+        if kind != "holo":
+            self._hud_cam_stack.setCurrentWidget(self._workspace)
 
     def _close_workspace(self) -> None:
+        self._workspace.stop_holo_camera()
+        was_fullscreen = self._workspace._is_fullscreen
+        self._workspace.restore_to_embedded(self._hud_cam_stack)
+        if was_fullscreen:
+            self._hud_cam_stack.addWidget(self._workspace)
         self._workspace_open = False
         self._hud_cam_stack.setCurrentIndex(1 if self._cam_active else 0)
 
@@ -3752,6 +3773,7 @@ class MainWindow(QMainWindow):
                 )
 
     def start_camera_stream(self) -> None:
+        self._holo_stop_sig.emit()
         self._cam_stop.clear()
         self._cam_stream_sig.emit(True)
         t = threading.Thread(target=self._cam_loop, daemon=True, name="cam-stream")
@@ -5966,6 +5988,18 @@ class MainWindow(QMainWindow):
         self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. {self._assistant_name} online.")
 
 
+    def closeEvent(self, event):
+        try:
+            self._workspace.shutdown_holo()
+        except Exception:
+            pass
+        try:
+            self._earth_panel.shutdown_web_engine()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
 class _RootShim:
     def __init__(self, app: QApplication):
         self._app = app
@@ -6183,6 +6217,14 @@ class JarvisUI:
     def _show_workspace_view(self, kind: str, payload: dict):
         """Queue a typed viewer update onto the Qt GUI thread."""
         self._win._workspace_sig.emit(str(kind), dict(payload or {}))
+
+    def show_holo_gestures(self):
+        """Show the bundled gesture deck in the native HUD and request camera access."""
+        self._show_workspace_view("holo", {})
+
+    def close_holo_gestures(self):
+        """Return to the avatar and release Holo's camera capture."""
+        self._win._workspace.close_requested.emit()
 
     def show_video(self, source: str, title: str = "VIDEO"):
         self._show_workspace_view("video", {"source": str(source or ""), "title": str(title or "VIDEO")})

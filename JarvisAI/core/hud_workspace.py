@@ -25,16 +25,21 @@ from PyQt6.QtWidgets import (
 )
 
 try:
-    from PyQt6.QtWebEngineCore import QWebEngineSettings
+    from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestInterceptor
     from PyQt6.QtWebEngineWidgets import QWebEngineView
 except Exception:  # WebEngine is an optional feature on minimal installs.
-    QWebEngineSettings = QWebEngineView = None
+    QWebEnginePage = QWebEngineProfile = QWebEngineSettings = QWebEngineUrlRequestInterceptor = QWebEngineView = None
 
 try:
     from PyQt6.QtPdf import QPdfDocument
     from PyQt6.QtPdfWidgets import QPdfView
 except Exception:
     QPdfDocument = QPdfView = None
+
+try:
+    from PyQt6 import sip
+except Exception:  # pragma: no cover - depends on the local PyQt build
+    sip = None
 
 
 _BG = "#080e12"
@@ -47,6 +52,26 @@ _TEXT = "#c8d9d5"
 _DIM = "#78908d"
 _WHITE = "#edf3e8"
 _VIDEO_SUFFIXES = {".mp4", ".m4v", ".webm", ".mov", ".mkv", ".avi", ".ogv"}
+
+from core.holo_gestures import HoloGestureServer
+
+
+if QWebEngineUrlRequestInterceptor is not None:
+    class _HoloLocalOnlyInterceptor(QWebEngineUrlRequestInterceptor):
+        """Keep the Holo panel's requests on the machine; its assets are bundled."""
+
+        def __init__(self, allowed_port: int, parent=None):
+            super().__init__(parent)
+            self._allowed_port = int(allowed_port)
+
+        def interceptRequest(self, info):
+            url = info.requestUrl()
+            if url.scheme().lower() in {"http", "https", "ws", "wss"}:
+                allowed = url.host().lower() == "127.0.0.1" and url.port() == self._allowed_port
+                if not allowed:
+                    info.block(True)
+else:
+    _HoloLocalOnlyInterceptor = None
 
 
 def _valid_http_url(value: str) -> bool:
@@ -146,9 +171,10 @@ class HudWorkspace(QWidget):
     route_requested = pyqtSignal(str, str)
     market_loaded = pyqtSignal(object)
     thumbnail_loaded = pyqtSignal(int, bytes)
+    holo_event = pyqtSignal(str, str)
 
     _TABS = (
-        ("video", "MEDIA"), ("web", "WEB"), ("images", "IMAGES"),
+        ("gestures", "HOLO HANDS"), ("video", "MEDIA"), ("web", "WEB"), ("images", "IMAGES"),
         ("document", "DOCUMENT"), ("news", "HEADLINES"),
         ("email", "INBOX"), ("calendar", "AGENDA"),
         ("system", "SYSTEM"), ("weather", "WEATHER"),
@@ -172,6 +198,16 @@ class HudWorkspace(QWidget):
         self.market_loaded.connect(self._on_market_loaded)
         self.thumbnail_loaded.connect(self._on_thumbnail_loaded)
         self._gallery_buttons = []
+        self._holo_server = None
+        self._holo_interceptor = None
+        self._holo_profile = None
+        self._holo_page = None
+        self._holo_container = None
+        self._holo_view = None
+        self._holo_requested = False
+        self._is_fullscreen = False
+        self._embedded_parent = None
+        self.holo_event.connect(self._on_holo_event)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 7, 8, 8)
@@ -204,6 +240,7 @@ class HudWorkspace(QWidget):
         for key, title in self._TABS:
             page = self._make_page(key)
             self._page_index[key] = self.tabs.addTab(page, title)
+        self.tabs.currentChanged.connect(self._on_holo_tab_changed)
         root.addWidget(self.tabs, 1)
 
     @staticmethod
@@ -211,6 +248,8 @@ class HudWorkspace(QWidget):
         return f"QPushButton{{background:{_PANEL2};color:{_TEXT};border:1px solid {_BORDER};padding:5px 9px;font:8pt 'Courier New';}} QPushButton:hover{{color:{_TEAL};border-color:{_TEAL};}}"
 
     def _make_page(self, key: str) -> QWidget:
+        if key == "gestures":
+            return self._make_gesture_page()
         if key == "video":
             return self._make_video_page()
         if key == "web":
@@ -226,6 +265,203 @@ class HudWorkspace(QWidget):
         if key == "market":
             return self._make_market_page()
         return self._make_cards_page(key)
+
+    def _make_gesture_page(self) -> QWidget:
+        page = QWidget()
+        self._holo_container = page
+        lay = QVBoxLayout(page)
+        bar = QHBoxLayout()
+        self._holo_status = QLabel("CAMERA IS LOCAL · HAND TRACKING STAYS ON THIS PC")
+        self._holo_status.setTextFormat(Qt.TextFormat.PlainText)
+        self._holo_status.setStyleSheet(f"color:{_TEAL};font:bold 8pt 'Courier New';")
+        bar.addWidget(self._holo_status, 1)
+        choose_notes = QPushButton("CHOOSE NOTES FOLDER…")
+        choose_notes.setStyleSheet(self._button_style())
+        choose_notes.clicked.connect(self._select_holo_notes)
+        bar.addWidget(choose_notes)
+        stop = QPushButton("STOP CAMERA")
+        stop.setStyleSheet(self._button_style())
+        stop.clicked.connect(self.stop_holo_camera)
+        bar.addWidget(stop)
+        lay.addLayout(bar)
+
+        self._holo_view = QWebEngineView() if QWebEngineView else None
+        if self._holo_view:
+            self._configure_webview(self._holo_view)
+            self._holo_server = HoloGestureServer(
+                lambda event, card: self.holo_event.emit(event, card)
+            )
+            if QWebEnginePage is not None and QWebEngineProfile is not None:
+                self._holo_profile = QWebEngineProfile(self._holo_view)
+                # Keep the page under its profile so Qt destroys the page before
+                # releasing the profile at application shutdown.
+                self._holo_page = QWebEnginePage(self._holo_profile, self._holo_profile)
+                self._holo_page.featurePermissionRequested.connect(self._grant_holo_camera)
+                if _HoloLocalOnlyInterceptor is not None:
+                    local_port = QUrl(self._holo_server.url).port()
+                    self._holo_interceptor = _HoloLocalOnlyInterceptor(local_port, self._holo_profile)
+                    self._holo_profile.setUrlRequestInterceptor(self._holo_interceptor)
+                self._holo_view.setPage(self._holo_page)
+            lay.addWidget(self._holo_view, 1)
+            self._holo_view.loadFinished.connect(self._on_holo_loaded)
+            self._holo_view.load(QUrl(self._holo_server.url))
+        else:
+            lay.addWidget(self._placeholder(
+                "The Holo controls run inside this JARVIS HUD and need PyQt6-WebEngine. "
+                "Install the project's requirements to enable the gesture view."
+            ), 1)
+        return page
+
+    def _grant_holo_camera(self, origin, feature) -> None:
+        if self._holo_page is None:
+            return
+        try:
+            host = QUrl(origin).host().lower()
+            port = QUrl(origin).port()
+            video = QWebEnginePage.Feature.MediaVideoCapture
+            policy = QWebEnginePage.PermissionPolicy
+            expected_port = QUrl(self._holo_server.url).port() if self._holo_server else -1
+            allowed = host == "127.0.0.1" and port == expected_port and feature == video
+            self._holo_page.setFeaturePermission(
+                origin, feature,
+                policy.PermissionGrantedByUser if allowed else policy.PermissionDeniedByUser,
+            )
+            if allowed:
+                self._holo_status.setText("CAMERA ACTIVE · VIDEO PROCESSES LOCALLY")
+        except Exception:
+            self._holo_status.setText("CAMERA PERMISSION UNAVAILABLE · CHECK DESKTOP CAMERA ACCESS")
+
+    def _on_holo_event(self, event: str, card: str) -> None:
+        labels = {"open": "OPENED", "close": "CLOSED", "dock": "FILED", "sum": "SUMMARIZED",
+                  "tidy": "ARRANGED", "jarvis": "JARVIS MODE", "exit": "RETURNING TO AVATAR"}
+        if event == "exit":
+            self.close_requested.emit()
+            return
+        if event not in labels:
+            return
+        self._holo_status.setText(f"GESTURE {labels[event]} · {card[:48]}".strip(" ·"))
+
+    def _on_holo_tab_changed(self, _index: int) -> None:
+        if self._holo_view is None:
+            return
+        if self.tabs.currentWidget() is self._holo_container:
+            if not self._is_fullscreen:
+                QTimer.singleShot(0, self.show_holo_gestures)
+            else:
+                self.start_holo_camera()
+        else:
+            self.stop_holo_camera()
+
+    def _on_holo_loaded(self, ok: bool) -> None:
+        if ok and self._holo_requested:
+            self.start_holo_camera()
+
+    def _select_holo_notes(self) -> None:
+        if self._holo_server is None:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Choose Local Holo Notes", str(Path.home()))
+        if not folder:
+            return
+        if not self._holo_server.set_notes_directory(folder):
+            self._holo_status.setText("COULD NOT OPEN THAT NOTES FOLDER")
+            return
+        resume_camera = self._holo_requested
+        self.stop_holo_camera()
+        self._holo_requested = resume_camera
+        self._holo_status.setText(f"LOCAL NOTES · {Path(folder).name[:40]} · SESSION ONLY")
+        self._holo_view.load(QUrl(self._holo_server.url))
+
+    def start_holo_camera(self) -> None:
+        self._holo_requested = True
+        self._holo_status.setText("REQUESTING LOCAL CAMERA ACCESS…")
+        if self._holo_view is not None:
+            self._holo_view.page().runJavaScript(
+                "if (window.jarvisStartCamera) window.jarvisStartCamera();"
+            )
+
+    def stop_holo_camera(self) -> None:
+        self._holo_requested = False
+        self._holo_status.setText("CAMERA STOPPED · VIDEO TRACK RELEASED")
+        if self._holo_view is not None:
+            try:
+                self._holo_view.page().runJavaScript(
+                    "if (window.jarvisStopCamera) window.jarvisStopCamera();"
+                )
+            except RuntimeError:
+                pass
+
+    def show_holo_gestures(self) -> None:
+        if "gestures" in self._page_index:
+            self._view_title.setText("HOLO HAND GESTURES")
+            self.tabs.setCurrentIndex(self._page_index["gestures"])
+            if not self._is_fullscreen:
+                self._embedded_parent = self.parentWidget()
+                self.tabs.tabBar().hide()
+                self.setParent(None)
+                self.setWindowFlags(Qt.WindowType.Window)
+                self.setWindowTitle("JARVIS — HOLO HAND GESTURES")
+                self._is_fullscreen = True
+                self.showFullScreen()
+            if self._holo_page is not None and self._holo_server is not None:
+                try:
+                    self._holo_page.setFeaturePermission(
+                        QUrl(self._holo_server.url),
+                        QWebEnginePage.Feature.MediaVideoCapture,
+                        QWebEnginePage.PermissionPolicy.PermissionGrantedByUser,
+                    )
+                except Exception:
+                    pass
+            self.start_holo_camera()
+
+    def restore_to_embedded(self, parent=None) -> None:
+        if not self._is_fullscreen:
+            return
+        self.stop_holo_camera()
+        self.hide()
+        target = parent or self._embedded_parent
+        self.setParent(target)
+        self.setWindowFlags(Qt.WindowType.Widget)
+        self.tabs.tabBar().show()
+        self._is_fullscreen = False
+        self._embedded_parent = None
+
+    def keyPressEvent(self, event):
+        if self._is_fullscreen and event.key() == Qt.Key.Key_Escape:
+            self.close_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        if self._is_fullscreen:
+            event.ignore()
+            self.close_requested.emit()
+            return
+        super().closeEvent(event)
+
+    def shutdown_holo(self) -> None:
+        self.stop_holo_camera()
+        self.restore_to_embedded()
+        if self._holo_page is not None and self._holo_profile is not None and sip is not None:
+            try:
+                page = self._holo_page
+                profile = self._holo_profile
+                if self._holo_view is not None:
+                    page.triggerAction(QWebEnginePage.WebAction.Stop)
+                    # Detach the custom-profile page from the live view first,
+                    # then synchronously destroy it before its profile.
+                    self._holo_view.setPage(QWebEnginePage(self._holo_view))
+                sip.delete(page)
+                sip.delete(profile)
+                self._holo_page = None
+                self._holo_profile = None
+                self._holo_interceptor = None
+            except RuntimeError:
+                # Qt may already be partway through application teardown.
+                pass
+        if self._holo_server is not None:
+            self._holo_server.close()
+            self._holo_server = None
 
     def _placeholder(self, message: str) -> QLabel:
         label = QLabel(message)
@@ -879,4 +1115,3 @@ class HudWorkspace(QWidget):
             self._timer_running = False
             self._timer_face.setStyleSheet(f"color:{_AMBER};font:bold 42pt 'Courier New';background:{_PANEL};border:1px solid {_BORDER};padding:20px;")
             self._timer_face.setText("TIME")
-

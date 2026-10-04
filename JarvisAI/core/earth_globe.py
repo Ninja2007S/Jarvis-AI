@@ -19,6 +19,11 @@ try:
 except ImportError:  # Keep the rest of the desktop UI usable before setup is run.
     QWebEnginePage = QWebEngineProfile = QWebEngineView = None
 
+try:
+    from PyQt6 import sip
+except Exception:  # pragma: no cover - depends on the local PyQt build
+    sip = None
+
 
 _PLACE_CACHE: dict[str, dict] = {}
 _PLACE_CACHE_LOCK = threading.Lock()
@@ -123,7 +128,9 @@ class EarthGlobePanel(QWidget):
             self._profile.setHttpUserAgent(
                 "JARVIS-AI-Desktop/1.0 (+https://github.com/Ninja2007S/Jarvis-AI)"
             )
-            self._page = _JarvisEarthPage(self._profile, self._view)
+            # A profile must outlive every page that uses it. Parenting the
+            # page to the profile gives Qt an explicit safe destruction order.
+            self._page = _JarvisEarthPage(self._profile, self._profile)
             self._view.setPage(self._page)
             self._page.titleChanged.connect(self._on_page_title)
             self._page.loadFinished.connect(self._on_page_loaded)
@@ -132,6 +139,24 @@ class EarthGlobePanel(QWidget):
         self._status = QLabel("EARTH / satellite globe  ·  Search a destination or drag to explore")
         self._status.setStyleSheet("color:#9aacaa;font:8pt 'Consolas';padding-left:4px;")
         root.addWidget(self._status)
+
+    def shutdown_web_engine(self) -> None:
+        """Release the map page before its dedicated WebEngine profile."""
+        if self._page is None or self._profile is None or sip is None:
+            return
+        page, profile = self._page, self._profile
+        try:
+            page.triggerAction(QWebEnginePage.WebAction.Stop)
+            if self._view is not None:
+                self._view.setPage(QWebEnginePage(self._view))
+            sip.delete(page)
+            sip.delete(profile)
+        except RuntimeError:
+            # The Qt parent may already have begun destruction.
+            pass
+        finally:
+            self._page = None
+            self._profile = None
 
     @staticmethod
     def _line_edit(placeholder: str) -> QLineEdit:

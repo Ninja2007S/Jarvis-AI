@@ -124,6 +124,8 @@ _TIERS: dict[str, str] = {
     "deep_reasoning":   TIER_SAFE,
     "weather_report":   TIER_SAFE,
     "earth_globe":      TIER_SAFE,
+    # Opening Holo requests webcam access through the native desktop UI.
+    "holo_gestures":    TIER_DANGEROUS,
     "battery_status":   TIER_SAFE,
     "system_status":    TIER_SAFE,
     "system_monitor":   TIER_SAFE,
@@ -175,6 +177,7 @@ _TIERS: dict[str, str] = {
 }
 
 _CONFIRMATION_LABELS = {
+    "holo_gestures": "Gesture camera access",
     "screen_process": "Screen access",
     "send_message": "Send a message",
     "email_gmail": "Email access",
@@ -346,6 +349,9 @@ _DANGEROUS_ACTIONS: dict[str, set[str]] = {
 
 def tier_for(name: str, params: dict | None = None) -> str:
     """Return the effective risk tier, using the requested operation when known."""
+    if name == "holo_gestures":
+        action = str((params or {}).get("action", "show")).strip().lower()
+        return TIER_SAFE if action in {"close", "stop", "hide"} else TIER_DANGEROUS
     base = _TIERS.get(name, TIER_SENSITIVE)
     if base == TIER_DANGEROUS:
         return base

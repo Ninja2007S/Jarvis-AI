@@ -502,6 +502,9 @@ class DashboardServer:
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
         self._phone_audio_ws: WebSocket | None    = None
         self._handoff_status_callback = None
+        self._uvicorn_servers = []
+        self._uvicorn_tasks: list[asyncio.Task] = []
+        self._shutdown_requested = False
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
@@ -1076,7 +1079,24 @@ class DashboardServer:
         twilio_cfg = uvicorn.Config(
             self.twilio_app, host="127.0.0.1", port=8001, log_level="warning"
         )
-        await asyncio.gather(
-            uvicorn.Server(cfg).serve(),
-            uvicorn.Server(twilio_cfg).serve(),
-        )
+        self._uvicorn_servers = [uvicorn.Server(cfg), uvicorn.Server(twilio_cfg)]
+        if self._shutdown_requested:
+            for server in self._uvicorn_servers:
+                server.should_exit = True
+        self._uvicorn_tasks = [
+            asyncio.create_task(server.serve()) for server in self._uvicorn_servers
+        ]
+        try:
+            await asyncio.gather(*self._uvicorn_tasks)
+        finally:
+            self._uvicorn_tasks.clear()
+            self._uvicorn_servers.clear()
+
+    async def shutdown(self) -> None:
+        """Ask both local Uvicorn listeners to finish their lifespan cleanly."""
+        self._shutdown_requested = True
+        for server in self._uvicorn_servers:
+            server.should_exit = True
+        tasks = tuple(self._uvicorn_tasks)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
