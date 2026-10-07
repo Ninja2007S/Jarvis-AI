@@ -217,6 +217,7 @@ _CONFIRMATION_PARAM_LABELS = {
     "caption": "Post caption",
     "scheduled_for": "Publish time",
     "schedule_id": "Scheduled post",
+    "limit": "Message count",
 }
 
 
@@ -243,7 +244,10 @@ def _confirmation_detail(params: dict) -> str:
             if key not in params or params[key] in (None, ""):
                 continue
             value = str(params[key]).strip()
-            parts.append(f"{_CONFIRMATION_PARAM_LABELS[key]}: {value}")
+            label = _CONFIRMATION_PARAM_LABELS.get(
+                key, key.replace("_", " ").capitalize()
+            )
+            parts.append(f"{label}: {value}")
         return "  ·  ".join(parts)[:4500]
     items = []
     for key, value in params.items():
