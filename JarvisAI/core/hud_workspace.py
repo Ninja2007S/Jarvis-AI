@@ -504,7 +504,7 @@ class HudWorkspace(QWidget):
                         f"window.scrollBy(0, {-delta:.1f})"
                     )
             return
-        labels = {"open": "OPENED", "close": "CLOSED", "dock": "FILED", "sum": "SUMMARIZED",
+        labels = {"open": "OPENED", "close": "CLOSED", "dock": "FILED", "dismiss": "DISMISSED", "sum": "SUMMARIZED",
                   "tidy": "ARRANGED", "jarvis": "JARVIS MODE", "exit": "RETURNING TO AVATAR"}
         if event == "exit":
             self.close_requested.emit()

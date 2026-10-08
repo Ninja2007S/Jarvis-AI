@@ -51,7 +51,7 @@ import sounddevice as sd
 import numpy as np
 from google import genai
 from google.genai import types
-from ui import JarvisUI
+from ui import JarvisUI, configure_qt_graphics_backend
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
@@ -3278,6 +3278,10 @@ def main():
     from PyQt6.QtCore import QTimer
     from PyQt6.QtWidgets import QApplication
 
+    # Windows defaults Qt Quick to D3D11. The HUD neural canvas is an
+    # OpenGL widget, so select a matching backend before the startup video or
+    # any Qt Quick window is created.
+    configure_qt_graphics_backend()
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
     startup = {

@@ -136,22 +136,44 @@ def save_push_to_talk_enabled(enabled: bool) -> None:
     _save_flag("push_to_talk_enabled", enabled)
 
 
-HUD_STYLES = ("face", "core", "neural")
+HUD_STYLES = ("neural", "neural_orb", "face", "core")
 
 
 def get_hud_style() -> str:
-    """Which centrepiece the HUD draws: face mesh, JARVIS logo, or neural net.
+    """Which centrepiece the HUD draws: two neural views, face, or logo.
 
     Presentation choice only; all three modes render in the same software
-    painter. Defaults to the face mesh, and the selection survives a restart.
+    painter. Defaults to the neural field, and the selection survives a restart.
     """
-    v = str(load_api_keys().get("hud_style", "face")).strip().lower()
-    return v if v in HUD_STYLES else "face"
+    v = str(load_api_keys().get("hud_style", "neural")).strip().lower()
+    return v if v in HUD_STYLES else "neural"
 
 
 def save_hud_style(style: str) -> None:
     s = str(style or "").strip().lower()
-    _save_flag("hud_style", s if s in HUD_STYLES else "face")
+    _save_flag("hud_style", s if s in HUD_STYLES else "neural")
+
+
+NEURAL_RENDER_SCALES = (1.0, 0.75, 0.6)
+
+
+def get_neural_render_scale() -> float:
+    """Return the saved neural scene resolution scale."""
+    try:
+        value = float(load_api_keys().get("neural_render_scale", 0.75))
+    except (TypeError, ValueError):
+        return 0.75
+    return min(NEURAL_RENDER_SCALES, key=lambda option: abs(option - value))
+
+
+def save_neural_render_scale(scale: float) -> None:
+    """Persist one of the supported neural scene render scales."""
+    try:
+        value = float(scale)
+    except (TypeError, ValueError):
+        value = 0.75
+    value = min(NEURAL_RENDER_SCALES, key=lambda option: abs(option - value))
+    _save_flag("neural_render_scale", value)
 
 
 # ── Live-session tuning ──────────────────────────────────────────────────────

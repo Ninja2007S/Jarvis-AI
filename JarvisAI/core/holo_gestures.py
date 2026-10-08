@@ -19,6 +19,7 @@ _ASSET_ROOT = Path(__file__).resolve().parent.parent / "assets" / "holo"
 _SAMPLE_ROOT = _ASSET_ROOT / "sample-notes"
 _MAX_BODY = 16 * 1024
 _MAX_ARTICLE_BYTES = 1_500_000
+_HOLO_PREFS_PATH = Path(__file__).resolve().parent.parent / "config" / "holo_ui.json"
 _NEWS_HOSTS = {
     "newsfirst.lk", "www.newsfirst.lk", "english.newsfirst.lk",
     "adaderana.lk", "www.adaderana.lk", "sinhala.adaderana.lk",
@@ -194,6 +195,27 @@ class HoloGestureServer:
         self._news_items: list[dict] = []
         self._news_images: dict[int, tuple[bytes, str]] = {}
         self._news_lock = threading.RLock()
+        self._prefs_lock = threading.Lock()
+
+        def _load_holo_accent():
+            try:
+                payload = json.loads(_HOLO_PREFS_PATH.read_text(encoding="utf-8"))
+                accent = str(payload.get("accent", ""))
+                return accent.lower() if re.fullmatch(r"#[0-9a-fA-F]{6}", accent) else "#7dffd9"
+            except (OSError, ValueError, TypeError):
+                return "#7dffd9"
+
+        def _save_holo_accent(accent: str) -> bool:
+            if not re.fullmatch(r"#[0-9a-fA-F]{6}", accent):
+                return False
+            try:
+                _HOLO_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+                temporary = _HOLO_PREFS_PATH.with_suffix(".json.tmp")
+                temporary.write_text(json.dumps({"accent": accent.lower()}, indent=2) + "\n", encoding="utf-8")
+                temporary.replace(_HOLO_PREFS_PATH)
+                return True
+            except OSError:
+                return False
 
         def _tree_payload():
             tree = _sample_tree(owner._notes_root)
@@ -214,27 +236,37 @@ class HoloGestureServer:
                 pass
 
             def _send(self, status: int, body: bytes, content_type: str):
-                self.send_response(status)
-                self.send_header("Content-Type", content_type)
-                self.send_header("X-Content-Type-Options", "nosniff")
-                dynamic = content_type.startswith(("text/html", "application/json", "image/"))
-                self.send_header("Cache-Control", "no-store" if dynamic else "public, max-age=3600")
-                if content_type.startswith("text/html"):
-                    self.send_header(
-                        "Content-Security-Policy",
-                        "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; "
-                        "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
-                        "media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self'; frame-src 'self' blob:",
-                    )
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    dynamic = content_type.startswith(("text/html", "application/json", "image/"))
+                    self.send_header("Cache-Control", "no-store" if dynamic else "public, max-age=3600")
+                    if content_type.startswith("text/html"):
+                        self.send_header(
+                            "Content-Security-Policy",
+                            "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; "
+                            "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+                            "media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' blob:; frame-src 'self' blob:",
+                        )
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except ConnectionError:
+                    # Gesture clients poll frequently and may cancel a request
+                    # while the HUD is closing; a dropped socket is expected.
+                    return
 
             def do_GET(self):
                 request_url = urlsplit(self.path)
                 path = unquote(request_url.path)
                 if path in {"/", "/holo.html"}:
                     target = _ASSET_ROOT / "holo.html"
+                elif path == "/api/preferences":
+                    with owner._prefs_lock:
+                        payload = {"accent": _load_holo_accent()}
+                    self._send(200, json.dumps(payload).encode("utf-8"), "application/json; charset=utf-8")
+                    return
                 elif path == "/api/tree":
                     self._send(200, json.dumps(_tree_payload()).encode("utf-8"), "application/json; charset=utf-8")
                     return
@@ -305,7 +337,7 @@ class HoloGestureServer:
 
             def do_POST(self):
                 path = urlsplit(self.path).path
-                if path not in {"/api/state", "/api/diag"}:
+                if path not in {"/api/state", "/api/diag", "/api/preferences"}:
                     self._send(404, b"not found", "text/plain; charset=utf-8")
                     return
                 try:
@@ -314,6 +346,15 @@ class HoloGestureServer:
                         self._send(413, b"request too large", "text/plain; charset=utf-8")
                         return
                     data = json.loads(self.rfile.read(length) or b"{}")
+                    if path == "/api/preferences":
+                        accent = str(data.get("accent", ""))[:16]
+                        with owner._prefs_lock:
+                            saved = _save_holo_accent(accent)
+                        if not saved:
+                            self._send(400, b'{"ok":false,"error":"invalid accent"}', "application/json; charset=utf-8")
+                            return
+                        self._send(200, b'{"ok":true}', "application/json; charset=utf-8")
+                        return
                     event = str(data.get("event", ""))[:32]
                     card = str(data.get("card", ""))[:96]
                     if path == "/api/state" and event and owner._event_callback:

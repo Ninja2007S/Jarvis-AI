@@ -24,7 +24,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
-    QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
+    QFontDatabase, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
@@ -32,7 +32,14 @@ from PyQt6.QtWidgets import (
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
+try:
+    from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+    _OPENGL_CANVAS_AVAILABLE = True
+except Exception:
+    QOpenGLWidget = QWidget
+    _OPENGL_CANVAS_AVAILABLE = False
 from core.earth_globe import EarthGlobePanel
+from core.neural_viz import NeuralVizMixin
 from core.hud_workspace import HudWorkspace
 
 try:
@@ -49,6 +56,7 @@ def _base_dir() -> Path:
 BASE_DIR   = _base_dir()
 CONFIG_DIR = BASE_DIR / "config"
 API_FILE   = CONFIG_DIR / "api_keys.json"
+_QUICK_GRAPHICS_API_REQUESTED = False
 
 
 def _read_full_config() -> dict:
@@ -70,6 +78,28 @@ _LEFT_W  = 176
 _RIGHT_W = 350
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+
+
+def configure_qt_graphics_backend() -> bool:
+    """Align Qt Quick with the OpenGL HUD before any Qt Quick window exists.
+
+    Windows defaults Qt Quick to Direct3D 11, which cannot be composed with
+    the HUD's QOpenGLWidget. Call this from main() before QApplication and the
+    startup video are created. On other platforms Qt's native default remains.
+    """
+    global _QUICK_GRAPHICS_API_REQUESTED
+    if _OS != "Windows":
+        return True
+    try:
+        from PyQt6.QtQuick import QQuickWindow, QSGRendererInterface
+
+        QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.OpenGL)
+        _QUICK_GRAPHICS_API_REQUESTED = True
+        print("[HUD] Qt Quick graphics API set to OpenGL for QOpenGLWidget composition.")
+        return True
+    except Exception as exc:
+        print(f"[HUD] Could not select the OpenGL graphics API: {exc}")
+        return False
 
 
 class C:
@@ -384,8 +414,9 @@ class _SysMetrics:
 
 _metrics = _SysMetrics()
 
-class HudCanvas(QWidget):
-    def __init__(self, face_path: str, assistant_name: str = "J.A.R.V.I.S", parent=None):
+class HudCanvas(NeuralVizMixin, QOpenGLWidget):
+    def __init__(self, face_path: str, assistant_name: str = "J.A.R.V.I.S",
+                 parent=None, enable_avatar: bool = True):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMinimumSize(300, 300)
@@ -399,7 +430,7 @@ class HudCanvas(QWidget):
         # The holographic head that fills the HUD. If it could not be imported
         # we fall back to the old glowing core so the panel is never empty.
         self._avatar = None
-        if HoloAvatar is not None:
+        if enable_avatar and HoloAvatar is not None:
             try:
                 self._avatar = HoloAvatar()
             except Exception:
@@ -412,12 +443,37 @@ class HudCanvas(QWidget):
             from memory.config_manager import get_hud_style
             self.hud_style = get_hud_style()
         except Exception:
-            self.hud_style = "face"
+            self.hud_style = "neural"
         self._core_phase = 0.0
         self._neural_phase = 0.0
         self._neural_energy = 0.12
         self._neural_flash = 0.0
         self._neural_call_count = 0
+        try:
+            from memory.config_manager import get_neural_render_scale
+            self._neural_render_scale = get_neural_render_scale()
+        except Exception:
+            self._neural_render_scale = 0.75
+        self._neural_render_image = None
+        self._neural_gl_hardware = False
+        self._neural_palette = [
+            # Screenshot-matched spectral groups: electric violet, hot pink,
+            # amber, icy cyan, signal red, lime, deep purple, and white core.
+            QColor("#A84DFF"), QColor("#FF35A8"), QColor("#FFC13D"),
+            QColor("#45E8FF"), QColor("#FF3B50"), QColor("#66FF42"),
+            QColor("#792DFF"), QColor("#F8FBFF"),
+        ]
+        self._build_neural_assets()
+        self._neural_quick_view = None
+        self._neural_quick_container = None
+        self._neural_quick_root = None
+        # The original NeuralVizMixin is drawn directly into QOpenGLWidget's
+        # GPU framebuffer. Do not let the separate QML recreation replace it.
+        self._neural_quick_enabled = False
+        self._neural_quick_attempted = True
+        self._neural_quick_ready = False
+        self._neural_quick_last_sync = 0.0
+        self._neural_quick_last_mode = None
 
         self._tick       = 0
         self._scale      = 1.0
@@ -549,6 +605,167 @@ class HudCanvas(QWidget):
         gp.end()
         return pm
 
+    def _paint_neural_network_scaled(self, p: QPainter, W: float, H: float,
+                                     cx: float, cy: float, fw: float,
+                                     orb_mode: bool = False):
+        """Low-resolution fallback used only without a hardware GL context."""
+        scale = float(getattr(self, "_neural_render_scale", 0.75))
+        if scale >= 0.999:
+            self._paint_neural_network(p, W, H, cx, cy, fw, orb_mode)
+            return
+        iw, ih = max(1, round(W * scale)), max(1, round(H * scale))
+        image = self._neural_render_image
+        if image is None or image.width() != iw or image.height() != ih:
+            image = QImage(iw, ih, QImage.Format.Format_ARGB32_Premultiplied)
+            self._neural_render_image = image
+        image.fill(Qt.GlobalColor.transparent)
+        low = QPainter(image)
+        if not low.isActive():
+            self._paint_neural_network(p, W, H, cx, cy, fw, orb_mode)
+            return
+        low.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        low.scale(scale, scale)
+        self._paint_neural_network(low, W, H, cx, cy, fw, orb_mode)
+        low.end()
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        p.drawImage(QRectF(0, 0, W, H), image)
+        p.restore()
+
+    def initializeGL(self) -> None:
+        """Log the OpenGL device backing this exact QPainter HUD canvas."""
+        self._neural_gl_hardware = False
+        try:
+            context = self.context()
+            if context is None or not context.isValid():
+                print("[HUD] OpenGL context unavailable; using scaled QPainter fallback.")
+                return
+            raw = context.functions().glGetString(0x1F00)  # GL_VENDOR
+            vendor = bytes(raw).decode("utf-8", errors="replace") if raw else "unknown"
+            software_markers = ("llvmpipe", "softpipe", "software rasterizer", "basic render driver")
+            self._neural_gl_hardware = not any(mark in vendor.lower() for mark in software_markers)
+            if self._neural_gl_hardware:
+                print(f"[HUD] Neural renderer: original QPainter scene on OpenGL GPU ({vendor}).")
+            else:
+                print(f"[HUD] OpenGL software device detected ({vendor}); using scaled QPainter fallback.")
+        except Exception as exc:
+            print(f"[HUD] OpenGL device query failed; using scaled QPainter fallback: {exc}")
+
+    def paintGL(self) -> None:
+        """Paint the same HUD scene into QOpenGLWidget's current framebuffer."""
+        self._paint_canvas()
+
+    def _start_neural_quick(self) -> None:
+        """Start the D3D11-compatible Qt Quick neural renderer, if available."""
+        global _QUICK_GRAPHICS_API_REQUESTED
+        if self._neural_quick_attempted:
+            return
+        self._neural_quick_attempted = True
+        try:
+            from PyQt6.QtQuick import QQuickView, QQuickWindow, QSGRendererInterface
+
+            # If explicitly enabled, Qt Quick must share the OpenGL backend
+            # with this QOpenGLWidget; mixing D3D11 and OpenGL breaks composition.
+            if platform.system() == "Windows" and not _QUICK_GRAPHICS_API_REQUESTED:
+                QQuickWindow.setGraphicsApi(
+                    QSGRendererInterface.GraphicsApi.OpenGL
+                )
+                _QUICK_GRAPHICS_API_REQUESTED = True
+
+            view = QQuickView()
+            view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
+            view.setColor(QColor("#050711"))
+            view.statusChanged.connect(lambda status, v=view: self._neural_quick_status(v, status))
+            container = QWidget.createWindowContainer(view, self)
+            container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            container.setGeometry(self.rect())
+            container.hide()
+            self._neural_quick_view = view
+            self._neural_quick_container = container
+            qml_path = BASE_DIR / "assets" / "neural" / "neural_gpu.qml"
+            view.setSource(QUrl.fromLocalFile(str(qml_path)))
+        except Exception as exc:
+            self._neural_quick_ready = False
+            print(f"[HUD] Qt Quick neural renderer unavailable; using QPainter fallback: {exc}")
+
+    def _neural_quick_status(self, view, status) -> None:
+        try:
+            from PyQt6.QtQuick import QQuickView
+            if status == QQuickView.Status.Ready:
+                root = view.rootObject()
+                if root is None:
+                    raise RuntimeError("Qt Quick scene loaded without a root item")
+                self._neural_quick_root = root
+                self._neural_quick_ready = True
+                try:
+                    api = view.rendererInterface().graphicsApi()
+                    api_name = getattr(api, "name", str(api).split(".")[-1])
+                except Exception:
+                    api_name = "initializing"
+                if "software" in str(api_name).lower():
+                    self._neural_quick_ready = False
+                    if self._neural_quick_container is not None:
+                        self._neural_quick_container.hide()
+                    print("[HUD] Qt Quick is using software rendering; switching to the scaled QPainter fallback.")
+                    self.update()
+                    return
+                print(f"[HUD] Neural renderer: Qt Quick scene graph ({api_name}).")
+                self._sync_neural_quick(force=True)
+                self.update()
+            elif status == QQuickView.Status.Error:
+                errors = "; ".join(str(error) for error in view.errors())
+                self._neural_quick_ready = False
+                if self._neural_quick_container is not None:
+                    self._neural_quick_container.hide()
+                print(f"[HUD] Qt Quick neural scene failed; using QPainter fallback: {errors}")
+                self.update()
+        except Exception as exc:
+            self._neural_quick_ready = False
+            if self._neural_quick_container is not None:
+                self._neural_quick_container.hide()
+            print(f"[HUD] Qt Quick neural scene setup failed; using QPainter fallback: {exc}")
+            self.update()
+
+    def _sync_neural_quick(self, force: bool = False) -> None:
+        """Keep the GPU scene's visibility and live JARVIS state in sync."""
+        neural_mode = self.hud_style in ("neural", "neural_orb")
+        container = self._neural_quick_container
+        if container is None:
+            if neural_mode and self._on_screen() and not self._neural_quick_attempted:
+                self._start_neural_quick()
+            return
+        if not neural_mode or not self._on_screen():
+            if self._neural_quick_root is not None:
+                self._neural_quick_root.setProperty("active", False)
+            if container.isVisible():
+                container.hide()
+            return
+        if not self._neural_quick_ready or self._neural_quick_root is None:
+            return
+        if container.geometry() != self.rect():
+            container.setGeometry(self.rect())
+        if not container.isVisible():
+            container.show()
+            container.raise_()
+        now = time.monotonic()
+        mode = 1 if self.hud_style == "neural_orb" else 0
+        if not force and now - self._neural_quick_last_sync < 0.033 \
+                and mode == self._neural_quick_last_mode:
+            return
+        self._neural_quick_last_sync = now
+        self._neural_quick_last_mode = mode
+        state = "SPEAKING" if self.speaking else (
+            "THINKING" if self.state in ("THINKING", "PROCESSING") else
+            ("LISTENING" if self.state == "LISTENING" else "STANDBY")
+        )
+        root = self._neural_quick_root
+        root.setProperty("active", True)
+        root.setProperty("mode", mode)
+        root.setProperty("activityState", state)
+        root.setProperty("energy", float(max(0.0, min(1.0, self._neural_energy))))
+        root.setProperty("amplitude", float(max(0.0, min(1.0, self._amp_disp))))
+        root.setProperty("callCount", int(self._neural_call_count))
+
     def _step(self):
         self._tick += 1
         now = time.time()
@@ -608,6 +825,7 @@ class HudCanvas(QWidget):
         self._neural_energy += (network_target - self._neural_energy) * 0.16
         self._neural_flash *= 0.91
         self._neural_phase += min(0.12, max(0.0, dt)) * (1.7 + self._neural_energy * 5.5)
+        self._sync_neural_quick()
 
         if self._avatar is not None and self.hud_style == "face":
             self._avatar.step(dt, amp, speaking=self.speaking,
@@ -659,14 +877,22 @@ class HudCanvas(QWidget):
         self._paint_tick = (self._paint_tick + 1) % 6
         active = (self.speaking or amp > 0.02
                   or self.state in ("THINKING", "PROCESSING")
-                  or (self.hud_style == "neural" and self._neural_flash > 0.025))
-        if _blinked or (self._paint_tick % 2 == 0 if active
-                        else self._paint_tick % 3 == 0):
+                  or (self.hud_style in ("neural", "neural_orb")
+                      and self._neural_flash > 0.025))
+        neural_fullrate = (self.hud_style in ("neural", "neural_orb")
+                           and (self._neural_gl_hardware
+                                or self._neural_render_scale <= 0.75))
+        if _blinked or neural_fullrate \
+                or (self._paint_tick % 2 == 0 if active
+                    else self._paint_tick % 3 == 0):
             # Nothing is on screen when the window is hidden or minimised, so
             # rendering the avatar into it is pure waste — and this app is meant
             # to sit running all day. The animation state above keeps stepping,
             # so it picks up mid-motion instead of snapping when you come back.
-            if self._on_screen():
+            if self._on_screen() and not (
+                self._neural_quick_ready
+                and self.hud_style in ("neural", "neural_orb")
+            ):
                 self.update()
 
     def _on_screen(self) -> bool:
@@ -681,7 +907,7 @@ class HudCanvas(QWidget):
 
     # ── reactor core ─────────────────────────────────────────────────────────
     # The centrepiece for anyone who did not want a face looking back at them.
-    # Built from the same budget as the head — software QPainter, no GPU — and
+    # Built from the same budget as the head — QPainter on the HUD render surface — and
     # from the same principle: everything on it means something. The rings turn
     # at a rate the state sets, the spectrum ring is the real audio level, and
     # the core brightens with the voice. Nothing here is decoration that moves
@@ -843,112 +1069,19 @@ class HudCanvas(QWidget):
             p.drawText(QRectF(cx - r, cy - fsz, r * 2, fsz * 2),
                        Qt.AlignmentFlag.AlignCenter, name)
 
-    def _paint_neural_network(self, p: QPainter, W: float, H: float,
-                              cx: float, cy: float, fw: float):
-        """Layered node-and-synapse display driven by JARVIS state and audio."""
-        counts = (5, 8, 10, 12, 10, 8, 5)
-        labels = ("SENSE", "ENCODE", "ATTEND", "REASON", "TOOLS", "FORM", "VOICE")
-        left, right = cx - fw * 0.36, cx + fw * 0.36
-        top, bottom = cy - fw * 0.235, cy + fw * 0.235
-        xs = [left + (right - left) * i / (len(counts) - 1)
-              for i in range(len(counts))]
-        max_count = max(counts)
-        ys = []
-        for count in counts:
-            step = (bottom - top) / (max_count - 1)
-            ys.append([cy + (i - (count - 1) / 2) * step for i in range(count)])
+    def paintEvent(self, event):
+        # QOpenGLWidget prepares and binds its framebuffer in its own paintEvent
+        # before calling our paintGL(). Keep a QWidget-only fallback for hosts
+        # where the optional Qt OpenGL module is unavailable.
+        if _OPENGL_CANVAS_AVAILABLE:
+            super().paintEvent(event)
+        else:
+            self._paint_canvas()
 
-        energy = max(0.0, min(1.0, self._neural_energy))
-        flash = max(0.0, min(1.0, self._neural_flash))
-        phase = self._neural_phase
-        active = self.state in ("THINKING", "PROCESSING", "SPEAKING") or energy > 0.30
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # Connection fabric: adjacent layers carry the main signal; a sparse
-        # set of long skips suggests recurrent memory and attention links.
-        for layer in range(len(counts) - 1):
-            for source_i, sy in enumerate(ys[layer]):
-                for target_i, ty in enumerate(ys[layer + 1]):
-                    if (source_i * 17 + target_i * 11 + layer * 7) % 3 == 0:
-                        continue
-                    wave = 0.5 + 0.5 * math.sin(
-                        phase * 1.8 - layer * 1.35 - source_i * 0.73 + target_i * 0.47
-                    )
-                    glow = max(0.0, wave - 0.72) / 0.28
-                    alpha = int(18 + 34 * energy + 58 * flash * glow + 24 * energy * glow)
-                    base = qcol(C.ACC if layer >= 4 else C.PRI)
-                    base.setAlpha(max(8, min(175, alpha)))
-                    p.setPen(QPen(base, 0.7 + glow * (0.7 + flash)))
-                    p.drawLine(QLineF(xs[layer], sy, xs[layer + 1], ty))
-
-                    # Moving synapse spark: a small number of edges light up
-                    # in sequence so each operation reads as data travelling.
-                    travel = (phase * 0.31 + layer * 0.23 + source_i * 0.17
-                              + target_i * 0.11) % 1.0
-                    if active and 0.44 < travel < 0.57:
-                        t = (travel - 0.44) / 0.13
-                        spark = QPointF(xs[layer] + (xs[layer + 1] - xs[layer]) * t,
-                                        sy + (ty - sy) * t)
-                        p.setPen(Qt.PenStyle.NoPen)
-                        p.setBrush(qcol(C.WHITE))
-                        p.drawEllipse(spark, 1.2 + energy * 1.4, 1.2 + energy * 1.4)
-
-        # A few long skip connections arc through the network as a distinct
-        # secondary channel rather than turning the whole display into noise.
-        for layer, source_i, target_i in ((0, 1, 5), (1, 6, 3), (2, 2, 7),
-                                           (3, 9, 2), (4, 6, 1)):
-            end_layer = layer + 2
-            if end_layer >= len(counts):
-                continue
-            col = qcol(C.ACC2)
-            col.setAlpha(int(18 + 42 * energy + 55 * flash))
-            p.setPen(QPen(col, 0.8))
-            p.drawLine(QLineF(xs[layer], ys[layer][source_i],
-                              xs[end_layer], ys[end_layer][target_i]))
-
-        # Layer rails and captions give the graph structure and a real sense
-        # of what is being shown, instead of a generic animated background.
-        for layer, x in enumerate(xs):
-            rail = qcol(C.PRI_GHO)
-            rail.setAlpha(40)
-            p.setPen(QPen(rail, 0.7, Qt.PenStyle.DotLine))
-            p.drawLine(QLineF(x, top - 8, x, bottom + 8))
-            p.setPen(QPen(qcol(C.TEXT_DIM), 1))
-            p.setFont(QFont("Courier New", 6, QFont.Weight.Bold))
-            p.drawText(QRectF(x - fw * 0.05, bottom + 12, fw * 0.10, 12),
-                       Qt.AlignmentFlag.AlignCenter, labels[layer])
-
-        # Neurons: rings, active cores, and numbered input/output terminals.
-        for layer, count in enumerate(counts):
-            for index, y in enumerate(ys[layer]):
-                pulse = 0.5 + 0.5 * math.sin(
-                    phase * (1.4 + layer * 0.07) - layer * 0.92 - index * 0.61
-                )
-                radius = 3.0 + 1.5 * pulse * (0.35 + energy + flash * 0.65)
-                color = qcol(C.ACC if layer in (3, 4, 5) else C.PRI)
-                glow_alpha = int(50 + 100 * energy * pulse + 90 * flash * pulse)
-                color.setAlpha(max(30, min(235, glow_alpha)))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.setPen(QPen(color, 1.0 + 0.7 * pulse))
-                p.drawEllipse(QPointF(xs[layer], y), radius + 3, radius + 3)
-                p.setPen(Qt.PenStyle.NoPen)
-                core_color = qcol(C.WHITE if pulse > 0.88 and active else C.PRI)
-                core_color.setAlpha(int(95 + 150 * pulse * max(energy, 0.35)))
-                p.setBrush(core_color)
-                p.drawEllipse(QPointF(xs[layer], y), radius, radius)
-
-        # Telemetry tags identify the currently rendered call and signal load.
-        p.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-        p.setPen(QPen(qcol(C.ACC if active else C.TEXT_DIM), 1))
-        p.drawText(QRectF(left, top - 27, fw * 0.34, 14),
-                   Qt.AlignmentFlag.AlignLeft,
-                   f"SYNAPTIC ARRAY  //  {'FLOW' if active else 'IDLE'}")
-        p.setPen(QPen(qcol(C.TEXT_DIM), 1))
-        p.drawText(QRectF(right - fw * 0.36, top - 27, fw * 0.36, 14),
-                   Qt.AlignmentFlag.AlignRight,
-                   f"CALL {self._neural_call_count:04d}  ·  LOAD {int(energy * 100):02d}%")
-
-    def paintEvent(self, _):
+    def _paint_canvas(self):
+        if self._neural_quick_ready and self.hud_style in ("neural", "neural_orb"):
+            self._sync_neural_quick()
+            return
         p = QPainter(self)
         if not p.isActive():      # device not ready (e.g. 0-size during layout) — skip cleanly
             return
@@ -961,11 +1094,12 @@ class HudCanvas(QWidget):
 
         # grid dots — blitted from a cached layer; rebuilt only when the size
         # or the theme's ghost colour changes (so live re-theming still works).
-        _gkey = (W, H, C.PRI_GHO)
-        if self._grid_cache is None or self._grid_key != _gkey:
-            self._grid_cache = self._make_grid(W, H)
-            self._grid_key   = _gkey
-        p.drawPixmap(0, 0, self._grid_cache)
+        if self.hud_style not in ("neural", "neural_orb"):
+            _gkey = (W, H, C.PRI_GHO)
+            if self._grid_cache is None or self._grid_key != _gkey:
+                self._grid_cache = self._make_grid(W, H)
+                self._grid_key   = _gkey
+            p.drawPixmap(0, 0, self._grid_cache)
 
         # ── holographic head ────────────────────────────────────────────────
         # Sized to the band between the top of the canvas and the status line,
@@ -992,8 +1126,15 @@ class HudCanvas(QWidget):
                     _acc = qcol(C.PRI)
             self._avatar.paint(p, cx, _head_cy, _r_head, _main, _acc, qcol(C.BG))
 
-        elif self.hud_style == "neural":
-            self._paint_neural_network(p, W, H, cx, cy, fw)
+        elif self.hud_style in ("neural", "neural_orb"):
+            if _OPENGL_CANVAS_AVAILABLE and self._neural_gl_hardware:
+                self._paint_neural_network(
+                    p, W, H, cx, cy, fw, orb_mode=self.hud_style == "neural_orb"
+                )
+            else:
+                self._paint_neural_network_scaled(
+                    p, W, H, cx, cy, fw, orb_mode=self.hud_style == "neural_orb"
+                )
 
         # JARVIS logo / reactor core — kept as the original selectable mode
         # and as a fallback if the face mesh is unavailable.
@@ -1078,6 +1219,143 @@ class HudCanvas(QWidget):
             p.fillRect(QRectF(wx0 + i * bw, wy + 20 - hgt, bw - 1, hgt), cl)
 
         p.end()   # end deterministically so the backing store never flushes an active painter
+
+
+class NeuralImmersiveOverlay(QWidget):
+    """Full-window neural view with a small, persistent desktop control strip."""
+
+    def __init__(self, face_path: str, assistant_name: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("NeuralImmersiveOverlay")
+        # This is a real opaque window layer over the desktop console. The
+        # explicit paint below prevents console text/widgets bleeding through
+        # during resize, repaint, or transparent child-widget updates.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet("QWidget#NeuralImmersiveOverlay { background-color: #03050C; }")
+        self.hud = HudCanvas(face_path, assistant_name, self, enable_avatar=False)
+        self.hud.hud_style = "neural"
+        self.on_command = None
+        self.on_mute = None
+        self.on_interrupt = None
+        self.on_wake = None
+        self.on_console = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 10, 20, 12)
+        root.setSpacing(4)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        brand = QLabel("J.A.R.V.I.S  /  NEURAL FIELD")
+        brand.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        brand.setStyleSheet("color: #AFC1F4; background: transparent;")
+        bar.addWidget(brand)
+        self.state_label = QLabel("INITIALISING")
+        self.state_label.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        self.state_label.setStyleSheet("color: #56E5FF; background: transparent;")
+        bar.addWidget(self.state_label)
+        bar.addStretch(1)
+
+        self.mute_button = self._button("MIC  /  ON", "#62F0B2")
+        self.mute_button.clicked.connect(lambda: self.on_mute and self.on_mute())
+        bar.addWidget(self.mute_button)
+        interrupt_button = self._button("INTERRUPT  [ESC]", "#FF6682")
+        interrupt_button.clicked.connect(
+            lambda: self.on_interrupt and self.on_interrupt()
+        )
+        bar.addWidget(interrupt_button)
+        self.wake_button = self._button("SLEEP / WAKE", "#FFBF55")
+        self.wake_button.clicked.connect(lambda: self.on_wake and self.on_wake())
+        bar.addWidget(self.wake_button)
+        console_button = self._button("OPEN CONSOLE", "#BFA4FF")
+        console_button.clicked.connect(lambda: self.on_console and self.on_console())
+        bar.addWidget(console_button)
+        root.addLayout(bar)
+
+        root.addWidget(self.hud, stretch=1)
+
+        command_bar = QHBoxLayout()
+        command_bar.setSpacing(7)
+        prompt = QLabel("COMMAND  ›")
+        prompt.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        prompt.setStyleSheet("color: #AFC1F4; background: transparent;")
+        command_bar.addWidget(prompt)
+        self.command_input = QLineEdit()
+        self.command_input.setPlaceholderText("Type to JARVIS…")
+        self.command_input.setFixedHeight(34)
+        self.command_input.setFont(QFont("Consolas", 10))
+        self.command_input.setStyleSheet("""
+            QLineEdit { background: rgba(7, 12, 26, 220); color: #F1F4FF;
+                border: 1px solid #36446A; border-radius: 4px; padding: 4px 9px; }
+            QLineEdit:focus { border-color: #A66CFF; }
+        """)
+        self.command_input.returnPressed.connect(self._send_command)
+        command_bar.addWidget(self.command_input, stretch=1)
+        send = self._button("SEND", "#57DFFF")
+        send.setFixedWidth(74)
+        send.clicked.connect(self._send_command)
+        command_bar.addWidget(send)
+        root.addLayout(command_bar)
+
+    @staticmethod
+    def _button(text: str, color: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFixedHeight(30)
+        button.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        button.setStyleSheet(f"""
+            QPushButton {{ color: {color}; background: rgba(8, 13, 28, 225);
+                border: 1px solid {color}; border-radius: 3px; padding: 0 10px; }}
+            QPushButton:hover {{ background: rgba(28, 34, 61, 245); }}
+        """)
+        return button
+
+    def _send_command(self) -> None:
+        text = self.command_input.text().strip()
+        if not text:
+            return
+        self.command_input.clear()
+        if self.on_command:
+            self.on_command(text)
+
+    def set_state(self, state: str) -> None:
+        self.hud.state = state
+        self.hud.speaking = state == "SPEAKING"
+        display = str(state or "").replace("_", " ").upper()
+        self.state_label.setText(display)
+        color = {
+            "SPEAKING": "#FF70A4",
+            "THINKING": "#FFB33F",
+            "PROCESSING": "#D65BFF",
+            "LISTENING": "#55F2A5",
+            "SLEEPING": "#8C9BB8",
+            "MUTED": "#FF5268",
+            "ERROR": "#FF5268",
+            "DISCONNECTED": "#FF5268",
+        }.get(display, "#57DFFF")
+        self.state_label.setStyleSheet(f"color: {color}; background: transparent;")
+        self.wake_button.setText("WAKE JARVIS" if display == "SLEEPING" else "SLEEP / WAKE")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        if painter.isActive():
+            painter.fillRect(self.rect(), QColor("#03050C"))
+            painter.end()
+
+    def set_muted(self, muted: bool) -> None:
+        self.hud.muted = bool(muted)
+        self.mute_button.setText("MIC  /  MUTED" if muted else "MIC  /  ON")
+        self.mute_button.setStyleSheet(self._button_style("#FF5268" if muted else "#62F0B2"))
+
+    @staticmethod
+    def _button_style(color: str) -> str:
+        return f"""
+            QPushButton {{ color: {color}; background: rgba(8, 13, 28, 225);
+                border: 1px solid {color}; border-radius: 3px; padding: 0 10px; }}
+            QPushButton:hover {{ background: rgba(28, 34, 61, 245); }}
+        """
+
 
 class MetricBar(QWidget):
 
@@ -3647,6 +3925,24 @@ class MainWindow(QMainWindow):
         self._clipboard_panel.action_requested.connect(self._on_clipboard_action)
         QApplication.clipboard().dataChanged.connect(self._on_clipboard_changed)
 
+        # The immersive neural display is a top-level child overlay. Its own
+        # canvas mirrors live state while the normal console remains intact
+        # underneath and is one button away.
+        self._immersive_overlay = NeuralImmersiveOverlay(
+            face_path, _display, self.centralWidget()
+        )
+        self._immersive_overlay.on_command = self._submit_immersive_command
+        self._immersive_overlay.on_mute = self._toggle_mute
+        self._immersive_overlay.on_interrupt = self._do_interrupt
+        self._immersive_overlay.on_wake = self._tap_wake_manual
+        self._immersive_overlay.on_console = self._leave_immersive_view
+        self._immersive_overlay.set_muted(self._muted)
+        self._immersive_overlay.set_state(self.hud.state)
+        self._immersive_overlay.hide()
+        # The second canvas is dormant until its full-screen view is requested.
+        self._immersive_overlay.hud._tmr.stop()
+        self._immersive_open = False
+
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
         if not self._ready:
@@ -4204,8 +4500,76 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log.append_log(f"ERR: Shortcut failed — {e}")
 
+    def _present_default_view(self):
+        """Start in the saved immersive neural view after setup is complete."""
+        if self._ready and self.hud.hud_style in ("neural", "neural_orb"):
+            self._enter_immersive_view()
+
+    def _enter_immersive_view(self, style: str | None = None):
+        if not getattr(self, "_ready", False):
+            return
+        from memory.config_manager import save_hud_style
+        active_style = style or (
+            self.hud.hud_style
+            if self.hud.hud_style in ("neural", "neural_orb") else "neural"
+        )
+        if active_style not in ("neural", "neural_orb"):
+            active_style = "neural"
+        self.hud.hud_style = active_style
+        self._immersive_overlay.hud.hud_style = active_style
+        save_hud_style(active_style)
+        if hasattr(self, "_hud_btn"):
+            index = self._hud_btn.findData(active_style)
+            if index >= 0:
+                self._hud_btn.blockSignals(True)
+                self._hud_btn.setCurrentIndex(index)
+                self._hud_btn.blockSignals(False)
+        if not self._immersive_open:
+            self._immersive_previous_fullscreen = self.isFullScreen()
+        # Only the visible canvas should run its animation loop. A 20 ms tick
+        # keeps the throttled paint near 25 fps while lowering CPU use.
+        self.hud._tmr.stop()
+        self._immersive_overlay.hud._tmr.setInterval(20)
+        self._immersive_overlay.hud._tmr.start()
+        self.showFullScreen()
+        # Do not burn a second animation loop behind the full-window canvas.
+        if self._hud_cam_stack.currentWidget() is self.hud:
+            self.hud.hide()
+        cw = self.centralWidget()
+        self._immersive_overlay.setGeometry(cw.rect())
+        self._immersive_overlay.show()
+        self._immersive_overlay.raise_()
+        self._immersive_open = True
+        self._immersive_overlay.hud.update()
+
+    def _leave_immersive_view(self):
+        if not getattr(self, "_immersive_open", False):
+            return
+        self._immersive_overlay.hide()
+        self._immersive_overlay.hud._tmr.stop()
+        self.hud._tmr.setInterval(16)
+        self.hud._tmr.start()
+        self._immersive_open = False
+        if self._hud_cam_stack.currentWidget() is self.hud:
+            self.hud.show()
+        if getattr(self, "_immersive_previous_fullscreen", False):
+            self.showFullScreen()
+        else:
+            self.showNormal()
+            self.resize(_DEFAULT_W, _DEFAULT_H)
+            screen = QApplication.primaryScreen().availableGeometry()
+            self.move((screen.width() - _DEFAULT_W) // 2,
+                      (screen.height() - _DEFAULT_H) // 2)
+
+    def _submit_immersive_command(self, text: str):
+        self._log.append_log(f"You: {text}")
+        if self.on_text_command:
+            threading.Thread(target=self.on_text_command, args=(text,), daemon=True).start()
+
     def _toggle_fullscreen(self):
-        if self.isFullScreen():
+        if self._immersive_open:
+            self._leave_immersive_view()
+        elif self.isFullScreen():
             self.showNormal()
         else:
             self.showFullScreen()
@@ -4213,6 +4577,8 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         cw = self.centralWidget()
+        if getattr(self, "_immersive_open", False):
+            self._immersive_overlay.setGeometry(cw.rect())
         if self._overlay and self._overlay.isVisible():
             ow, oh = 460, 390
             self._overlay.setGeometry(
@@ -4337,6 +4703,21 @@ class MainWindow(QMainWindow):
         self._drawer_btn.setCheckable(True)
         self._drawer_btn.clicked.connect(self._toggle_drawer)
         lay.addWidget(self._drawer_btn)
+        self._neural_view_btn = QPushButton("◉ FIELD")
+        self._neural_view_btn.setFixedHeight(26)
+        self._neural_view_btn.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
+        self._neural_view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._neural_view_btn.setToolTip("Open full-screen Visualization 1: the synapse field")
+        self._neural_view_btn.setStyleSheet(f"""
+            QPushButton {{ color: {C.PRI}; background: transparent;
+                border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 0 7px; }}
+            QPushButton:hover {{ color: {C.WHITE}; border-color: {C.PRI};
+                background: {C.PRI_GHO}; }}
+        """)
+        self._neural_view_btn.clicked.connect(
+            lambda _checked=False: self._enter_immersive_view("neural")
+        )
+        lay.addWidget(self._neural_view_btn)
         lay.addStretch()
 
         mid = QVBoxLayout(); mid.setSpacing(1)
@@ -4669,12 +5050,26 @@ class MainWindow(QMainWindow):
         self._hud_btn.setFixedHeight(26)
         self._hud_btn.setFont(QFont("Courier New", 7))
         self._hud_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hud_btn.addItem("HUD: VISUALIZATION 1", "neural")
+        self._hud_btn.addItem("HUD: VISUALIZATION 2", "neural_orb")
         self._hud_btn.addItem("HUD: FACE MESH", "face")
         self._hud_btn.addItem("HUD: JARVIS LOGO", "core")
-        self._hud_btn.addItem("HUD: NEURAL NETWORK", "neural")
         self._hud_btn.currentIndexChanged.connect(self._on_hud_style_selected)
         lay.addWidget(self._hud_btn)
         self._refresh_hud_btn()
+
+        self._neural_scale_btn = QComboBox()
+        self._neural_scale_btn.setFixedHeight(26)
+        self._neural_scale_btn.setFont(QFont("Courier New", 7))
+        self._neural_scale_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._neural_scale_btn.addItem("CPU FALLBACK: 1.0×", 1.0)
+        self._neural_scale_btn.addItem("CPU FALLBACK: 0.75×", 0.75)
+        self._neural_scale_btn.addItem("CPU FALLBACK: 0.6×", 0.6)
+        self._neural_scale_btn.currentIndexChanged.connect(
+            self._on_neural_render_scale_selected
+        )
+        lay.addWidget(self._neural_scale_btn)
+        self._refresh_neural_render_scale_btn()
 
         audio_btn = QPushButton("🎧  AUDIO DEVICES")
         audio_btn.setFixedHeight(26)
@@ -5497,36 +5892,85 @@ class MainWindow(QMainWindow):
         descriptions = {
             "face": "Animated face mesh: keeps its gaze and mouth movement synced to JARVIS speech.",
             "core": "JARVIS logo/reactor: the existing identity mark, animated by assistant state and voice.",
-            "neural": "Live neural network: layered neurons and signal paths react to listening, thinking, tool calls, and speech.",
+            "neural": "Visualization 1: a full-screen multicolour synapse field with long firing fibers and live activity pulses.",
+            "neural_orb": "Visualization 2: a luminous rotating neural orb with clustered firing nodes and live state response.",
         }
         self._hud_btn.setToolTip(descriptions.get(current, descriptions["face"]))
+
+    def _refresh_neural_render_scale_btn(self):
+        from memory.config_manager import get_neural_render_scale
+        style = f"""
+            QComboBox {{ background: {C.PANEL2}; color: {C.PRI};
+                border: 1px solid {C.BORDER_A}; border-radius: 3px;
+                text-align: left; padding: 0 8px; }}
+            QComboBox:hover {{ color: {C.WHITE}; border: 1px solid {C.BORDER_B}; }}
+            QComboBox::drop-down {{ border: none; width: 18px; }}
+            QComboBox QAbstractItemView {{ background: {C.PANEL2}; color: {C.TEXT};
+                selection-background-color: {C.BORDER_A}; }}"""
+        self._neural_scale_btn.setStyleSheet(style)
+        current = get_neural_render_scale()
+        index = self._neural_scale_btn.findData(current)
+        self._neural_scale_btn.blockSignals(True)
+        self._neural_scale_btn.setCurrentIndex(max(0, index))
+        self._neural_scale_btn.blockSignals(False)
+        self._neural_scale_btn.setToolTip(
+            "Used only if the GPU scene graph cannot start. The GPU renderer "
+            "always draws at native resolution; this is the sharpness/performance fallback."
+        )
+
+    def _on_neural_render_scale_selected(self, index: int):
+        from memory.config_manager import save_neural_render_scale
+        scale = self._neural_scale_btn.itemData(index)
+        if scale is None:
+            return
+        scale = float(scale)
+        save_neural_render_scale(scale)
+        for canvas in (self.hud, self._immersive_overlay.hud):
+            canvas._neural_render_scale = scale
+            canvas._neural_render_image = None
+            canvas.update()
+        self._neural_scale_btn.setToolTip(
+            f"QPainter fallback set to {scale:g}×. When the GPU scene graph is active, "
+            "the neural field remains at native resolution."
+        )
 
     def _on_hud_activity(self, _state: str):
         """Queue an activity pulse on the GUI thread for each assistant call."""
         self.hud.trigger_activity()
         self.hud.update()
+        if hasattr(self, "_immersive_overlay"):
+            self._immersive_overlay.hud.trigger_activity()
+            self._immersive_overlay.hud.update()
 
     def _on_hud_style_selected(self, index: int):
         """Persist and immediately display the selected HUD centrepiece."""
         from memory.config_manager import save_hud_style
         want = self._hud_btn.itemData(index)
-        if want not in {"face", "core", "neural"}:
+        if want not in {"face", "core", "neural", "neural_orb"}:
             return
         save_hud_style(want)
         try:
             self.hud.hud_style = want
             self.hud.update()
+            self._immersive_overlay.hud.hud_style = want
+            self._immersive_overlay.hud.update()
         except Exception:
             pass
+        if want in {"neural", "neural_orb"}:
+            self._enter_immersive_view(want)
+        else:
+            self._leave_immersive_view()
         labels = {
             "face": "the animated face mesh",
             "core": "the JARVIS logo",
-            "neural": "the live neural network",
+            "neural": "Visualization 1 — the synapse field",
+            "neural_orb": "Visualization 2 — the neural orb",
         }
         self._hud_btn.setToolTip({
             "face": "Animated face mesh: keeps its gaze and mouth movement synced to JARVIS speech.",
             "core": "JARVIS logo/reactor: the existing identity mark, animated by assistant state and voice.",
-            "neural": "Live neural network: layered neurons and signal paths react to listening, thinking, tool calls, and speech.",
+            "neural": "Visualization 1: a full-screen multicolour synapse field with long firing fibers and live activity pulses.",
+            "neural_orb": "Visualization 2: a luminous rotating neural orb with clustered firing nodes and live state response.",
         }[want])
         self._log.append_log(f"SYS: HUD switched to {labels[want]}.")
 
@@ -5935,6 +6379,7 @@ class MainWindow(QMainWindow):
     def _toggle_mute(self):
         self._muted = not self._muted
         self.hud.muted = self._muted
+        self._immersive_overlay.set_muted(self._muted)
         self._style_mute_btn()
         if self._muted:
             self._apply_state("MUTED")
@@ -5973,6 +6418,8 @@ class MainWindow(QMainWindow):
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
+        if hasattr(self, "_immersive_overlay"):
+            self._immersive_overlay.set_state(state)
         if hasattr(self, "_core_status_lbl"):
             display = state.replace("_", " ").upper()
             self._core_status_lbl.setText(f"JARVIS CORE\n{display}")
@@ -5993,6 +6440,8 @@ class MainWindow(QMainWindow):
             return False
 
     def _show_setup(self):
+        if getattr(self, "_immersive_open", False):
+            self._leave_immersive_view()
         ov = SetupOverlay(self.centralWidget())
         cw = self.centralWidget()
         ow, oh = 520, 535
@@ -6029,6 +6478,8 @@ class MainWindow(QMainWindow):
         self._apply_state("LISTENING")
         self._assistant_name = _read_full_config().get("assistant_name", "JARVIS") or "JARVIS"
         self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. {self._assistant_name} online.")
+        if self.hud.hud_style in ("neural", "neural_orb"):
+            QTimer.singleShot(0, self._enter_immersive_view)
 
 
     def closeEvent(self, event):
@@ -6059,6 +6510,7 @@ class JarvisUI:
         self._win = MainWindow(face_path)
         self.root = _RootShim(self._app)
         self._win.show()
+        QTimer.singleShot(0, self._win._present_default_view)
 
     @property
     def muted(self) -> bool:
@@ -6185,6 +6637,7 @@ class JarvisUI:
         GIL, so no signal/lock is needed for this cosmetic value."""
         try:
             self._win.hud.set_audio_level(level)
+            self._win._immersive_overlay.hud.set_audio_level(level)
         except Exception:
             pass
 

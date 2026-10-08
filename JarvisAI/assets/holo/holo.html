@@ -1,47 +1,48 @@
 <!doctype html><html><head><meta charset="utf-8"><title>HOLO — hand-gesture control deck</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
+  :root { --holo-accent:#7dffd9; --holo-glow:rgba(125,255,217,.35); }
   * { margin:0; padding:0; box-sizing:border-box; }
   html,body { height:100%; overflow:hidden; background:#05070a; font-family:-apple-system,"Segoe UI",sans-serif; }
   /* v3 layers: the CAMERA IS THE STAGE (bright), everything floats on it */
   #cam { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; z-index:1;
-         transform:scaleX(-1); opacity:.55; filter:saturate(.85) brightness(.95); transition:opacity .4s; }
+         transform:scaleX(-1); opacity:.72; filter:saturate(.9) brightness(1.05); transition:opacity .4s; }
   #vignette { position:fixed; inset:0; z-index:2; pointer-events:none;
          background:radial-gradient(ellipse at center, transparent 40%, rgba(4,6,9,.55) 100%); }
   #stars { position:fixed; inset:0; z-index:2; pointer-events:none; opacity:.5; }
   #deck { position:fixed; inset:0; z-index:3; perspective:1200px; }
   .card { position:absolute; width:230px; min-height:110px; max-height:200px; overflow:hidden;
-          padding:14px 16px; border-radius:14px; will-change:transform;
-          background:rgba(12,18,24,.78); border:1px solid rgba(120,255,214,.25);
+          padding:14px 16px; border-radius:8px; will-change:transform;
+          background:rgba(12,18,24,.86); border:1px solid var(--holo-glow);
           backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
           box-shadow:0 14px 44px rgba(0,0,0,.5); transition:border-color .12s, box-shadow .12s; }
   .card h3 { font-family:"SF Mono",ui-monospace,Menlo,monospace; font-size:12.5px; letter-spacing:.08em;
-             color:#a9ffe6; font-weight:600; margin-bottom:7px; text-transform:uppercase; }
+             color:var(--holo-accent); font-weight:600; margin-bottom:7px; text-transform:uppercase; }
   .card p { font-size:11px; line-height:1.55; color:#c9d6d2; white-space:pre-wrap; }
   .card.news-card { width:280px; min-height:0; max-height:260px; padding:9px; }
   .card.news-card img { display:block; width:100%; height:142px; object-fit:cover; border-radius:8px;
     margin-bottom:8px; background:rgba(0,0,0,.35); }
   .card.news-card h3 { padding-right:24px; text-transform:none; letter-spacing:.01em; line-height:1.35; }
   .card.news-card p { max-height:42px; overflow:hidden; }
-  .news-close { position:absolute; top:5px; right:5px; width:24px; height:24px; border-radius:50%;
-    border:1px solid rgba(125,255,217,.45); color:#eafff8; background:rgba(5,9,12,.85);
+  .news-close { position:absolute; top:5px; right:5px; width:24px; height:24px; border-radius:4px;
+    border:1px solid var(--holo-glow); color:#eafff8; background:rgba(5,9,12,.85);
     font:14px monospace; cursor:pointer; }
   .news-close:hover { color:#05070a; background:#9dffe4; }
-  .orb { position:absolute; width:150px; height:150px; border-radius:50%; will-change:transform;
+  .orb { position:absolute; width:230px; height:118px; border-radius:8px; will-change:transform;
          display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;
-         background:radial-gradient(circle at 38% 32%, rgba(60,110,96,.5), rgba(10,18,22,.72) 70%);
-         border:1.5px solid rgba(125,255,217,.5); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
-         box-shadow:0 10px 40px rgba(0,0,0,.5), inset 0 0 30px rgba(90,255,215,.12);
+         background:linear-gradient(135deg,rgba(12,22,30,.94),rgba(8,13,19,.84));
+         border:1.5px solid var(--holo-glow); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+         box-shadow:0 10px 40px rgba(0,0,0,.5), inset 0 0 30px var(--holo-glow);
          transition:border-color .12s, box-shadow .12s; }
   .orb h3 { font-family:"SF Mono",ui-monospace,monospace; font-size:12px; letter-spacing:.18em;
-            color:#d9fff2; font-weight:700; }
-  .orb span { font-family:"SF Mono",ui-monospace,monospace; font-size:9px; letter-spacing:.1em; color:#8fd8c2; }
+            color:var(--holo-accent); font-weight:700; }
+  .orb span { font-family:"SF Mono",ui-monospace,monospace; font-size:9px; letter-spacing:.1em; color:var(--holo-accent); }
   .orb.openf { opacity:.55; border-style:dashed; }
-  .hover { border-color:#9dffe4 !important;
+  .hover { border-color:var(--holo-accent) !important;
            box-shadow:0 18px 60px rgba(0,0,0,.55), 0 0 54px rgba(110,255,222,.75),
                       inset 0 0 22px rgba(110,255,222,.18) !important; }
-  .grab  { border-color:#7dffd9 !important;
-           box-shadow:0 22px 70px rgba(0,0,0,.6), 0 0 50px rgba(110,255,220,.5) !important; }
+  .grab  { border-color:var(--holo-accent) !important;
+           box-shadow:0 22px 70px rgba(0,0,0,.6), 0 0 50px var(--holo-glow) !important; }
   .docked { border-color:rgba(240,200,100,.55) !important; }
   /* width/height 100% is LOAD-BEARING: a canvas is a REPLACED element — inset:0 does
      NOT stretch it, it falls back to its intrinsic (2×-retina) buffer size. Without
@@ -49,6 +50,10 @@
      off the visible quarter (invisible on retina, perfect in dpr=1 headless). */
   #gl { position:fixed; inset:0; width:100%; height:100%; z-index:3; pointer-events:none; }
   #hud { position:fixed; inset:0; z-index:4; pointer-events:none; }
+  #faceMesh { position:fixed; inset:0; width:100%; height:100%; z-index:4; pointer-events:none; }
+  body.holo-locked #deck, body.holo-locked #gl, body.holo-locked #hud,
+  body.holo-locked #ring, body.holo-locked #dock, body.holo-locked #legend,
+  body.holo-locked #caption, body.holo-locked #dbg { visibility:hidden; opacity:0; }
   /* the ACTIVE ring, top-left — the status jewel */
   #ring { position:fixed; left:34px; top:70px; z-index:4; width:150px; height:150px; pointer-events:none; }
   #ring .r1 { position:absolute; inset:0; border-radius:50%; border:2px solid rgba(125,255,217,.65);
@@ -103,6 +108,17 @@
         letter-spacing:.14em; padding:8px 16px; border-radius:99px; cursor:pointer; user-select:none;
         color:#7dffd9; background:rgba(10,16,20,.7); border:1px solid rgba(125,255,217,.35); }
   #ui .chip.off { color:#8a97a0; border-color:rgba(255,255,255,.14); }
+  #holoColorLabel { display:flex; align-items:center; gap:7px; pointer-events:auto; cursor:pointer;
+        font:10px "SF Mono",ui-monospace,monospace; letter-spacing:.12em; color:#aebbb7;
+        padding:5px 8px; border:1px solid rgba(255,255,255,.16); border-radius:6px;
+        background:rgba(10,16,20,.82); }
+  #holoColor { width:26px; height:23px; padding:0; border:0; background:transparent; cursor:pointer; }
+  #wakeHint { position:fixed; inset:0; z-index:3; display:none; align-items:center; justify-content:center;
+        pointer-events:none; text-align:center; color:var(--holo-accent); font:12px "SF Mono",ui-monospace,monospace;
+        letter-spacing:.24em; text-shadow:0 0 22px var(--holo-glow); }
+  #wakeHint span { padding:18px 24px; border-top:1px solid var(--holo-glow); border-bottom:1px solid var(--holo-glow);
+        background:rgba(3,7,11,.42); }
+  body.holo-locked #wakeHint { display:flex; }
   #title { font-family:"SF Mono",ui-monospace,monospace; color:#e8fff7; font-size:13px; letter-spacing:.3em; }
   #cameraSelect { max-width:260px; font-family:"SF Mono",ui-monospace,monospace; font-size:10px;
         letter-spacing:.06em; padding:8px 10px; color:#d7f5ed; background:rgba(10,16,20,.9);
@@ -133,7 +149,19 @@
   #perm .box { max-width:420px; text-align:center; color:#c9d6d2; font-size:13.5px; line-height:1.7;
           background:rgba(14,20,26,.9); border:1px solid rgba(125,255,217,.3); border-radius:16px; padding:28px 30px; }
   #perm .box b { color:#7dffd9; }
-</style></head><body>
+  #ring .r1 { border-color:var(--holo-glow); border-top-color:transparent;
+        box-shadow:0 0 24px var(--holo-glow),inset 0 0 24px var(--holo-glow); }
+  #ring .r2 { border-color:var(--holo-glow); }
+  #ring .mid i, #legend, #legend b, #status { color:var(--holo-accent); }
+  #ui .chip { color:var(--holo-accent); border-color:var(--holo-glow); border-radius:6px; }
+  #cameraSelect { border-color:var(--holo-glow); border-radius:6px; }
+  #reader .pane { border-color:var(--holo-glow); border-radius:8px; }
+  #reader h2 { color:var(--holo-accent); }
+  #perm .box { border-color:var(--holo-glow); border-radius:8px; }
+  #perm .box b { color:var(--holo-accent); }
+  .hover { box-shadow:0 18px 60px rgba(0,0,0,.55),0 0 54px var(--holo-glow),
+        inset 0 0 22px var(--holo-glow) !important; }
+</style></head><body class="holo-locked">
 <video id="cam" autoplay playsinline muted></video>
 <canvas id="stars"></canvas>
 <div id="vignette"></div>
@@ -141,13 +169,15 @@
 <div id="deck"></div>
 <canvas id="gl"></canvas>
 <canvas id="hud"></canvas>
+<canvas id="faceMesh"></canvas>
 <div id="ring"><div class="r1"></div><div class="r2"></div>
-  <div class="mid"><b>H.O.L.O.</b><i id="ringstate">ACTIVE</i></div></div>
+  <div class="mid"><b>H.O.L.O.</b><i id="ringstate">READY</i></div></div>
 <div id="ui">
   <span id="title">H O L O</span>
   <select id="cameraSelect" aria-label="Choose a local laptop camera"><option value="">CHOOSE LAPTOP CAMERA</option></select>
+  <label id="holoColorLabel" title="Choose the hologram accent colour">HOLO COLOR<input id="holoColor" type="color" value="#7dffd9" aria-label="Hologram color"></label>
   <span class="chip" id="hands">HANDS ON</span>
-  <span class="chip off" id="camvis">CAM 55%</span>
+  <span class="chip off" id="camvis">CAM 72%</span>
   <span class="chip off" id="reset">RESET</span>
   <span class="chip off" id="fx">EFFECTS</span>
   <span class="chip off" id="debug">DEBUG</span>
@@ -155,12 +185,14 @@
   <span class="chip" id="retry">START LOCAL CAMERA</span>
   <span id="status">booting…</span>
 </div>
+<div id="wakeHint"><span>HOLD A PEACE SIGN OR BRING HANDS TOGETHER<br><small style="display:block;margin-top:9px;opacity:.7;letter-spacing:.12em">SILENT GESTURE · NO MICROPHONE INPUT</small><small style="display:block;margin-top:8px;opacity:.58;letter-spacing:.08em">FINGER SWEEP DOWN: FACE MESH · SWEEP UP: CLEAR</small></span></div>
 <div id="reader"><div class="pane"><h2></h2><pre></pre><div class="hint">OPEN PALM TO SCROLL · PINCH ANYWHERE TO CLOSE</div></div></div>
 <div id="caption"></div>
-<div id="legend"><b>PINCH</b> grab / tap = open &nbsp;·&nbsp; <b>FLICK</b> throw (off-screen = gone) &nbsp;·&nbsp; <b>2-HAND STRETCH</b> big = read · crush = TL;DR<br>
+<div id="legend"><b>PINCH A BOX</b> to open &nbsp;·&nbsp; <b>FLICK</b> throw (off-screen = gone) &nbsp;·&nbsp; <b>2-HAND STRETCH</b> big = read · crush = TL;DR<br>
+  <b>FINGER SWEEP DOWN</b> on face = mesh · <b>SWEEP UP</b> = clear<br>
 <b>TWO PINCHES</b> (apart/together) zoom · twist = rotate &nbsp;·&nbsp; <b>2-HAND STRETCH</b> on a held card: big = read · crush = TL;DR · 3D comes APART<br>
   <b>PINCH JARVIS TOOLS</b> → open a HUD feature &nbsp;·&nbsp; <b>NEWS</b> pinch a headline to read · open palm swipes to scroll · pinch to close<br>
-  <b>PEACE ✌</b> = RESET everything &nbsp;·&nbsp; dock right = shelf &nbsp;·&nbsp; <b>J</b> jarvis mode &nbsp;·&nbsp; <b>F</b> = EFFECTS (pull · palm-hold push · ink · clap · tidy)<br>
+  <b>PEACE ✌ / CLAP</b> = RESET after reveal &nbsp;·&nbsp; dock right = shelf &nbsp;·&nbsp; <b>J</b> jarvis mode &nbsp;·&nbsp; <b>F</b> = EFFECTS (pull · palm-hold push · ink · tidy)<br>
 <b>3D PROPS</b> stretch = comes APART · shrink = back together &nbsp;·&nbsp; drop any .glb into props/</div>
 <div id="dbg"></div>
 <div id="perm"><div class="box"><b>HOLO needs your camera</b><br>
@@ -184,12 +216,26 @@ const SIM = Q.has('sim');
 const FAST = Q.has('fast');
 
 const stars = document.getElementById('stars'), hud = document.getElementById('hud');
+const faceMeshCanvas = document.getElementById('faceMesh');
 const deck = document.getElementById('deck'), cam = document.getElementById('cam');
 const statusEl = document.getElementById('status');
 const cameraSelect = document.getElementById('cameraSelect');
+function applyHoloColor(value, persist = false){
+  const hex = /^#[0-9a-f]{6}$/i.test(String(value)) ? String(value).toLowerCase() : '#7dffd9';
+  const rgb = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+  document.documentElement.style.setProperty('--holo-accent', hex);
+  document.documentElement.style.setProperty('--holo-glow', `rgba(${rgb.join(',')},.42)`);
+  const picker = document.getElementById('holoColor');
+  if (picker && picker.value !== hex) picker.value = hex;
+  if (persist){ try { localStorage.setItem('jarvis.holoAccent.v1', hex); } catch (_) {} }
+}
+try { applyHoloColor(localStorage.getItem('jarvis.holoAccent.v1') || '#7dffd9'); }
+catch (_) { applyHoloColor('#7dffd9'); }
+fetch('/api/preferences').then(r => r.ok ? r.json() : Promise.reject()).then(p => applyHoloColor(p.accent))
+  .catch(() => {});
 let W = innerWidth, H = innerHeight;
 function sizeCanvases(){ W = innerWidth; H = innerHeight;
-  for (const c of [stars, hud]) { c.width = W * devicePixelRatio; c.height = H * devicePixelRatio;
+  for (const c of [stars, hud, faceMeshCanvas]) { c.width = W * devicePixelRatio; c.height = H * devicePixelRatio;
     c.getContext('2d').setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0); } }
 sizeCanvases();
 
@@ -219,7 +265,32 @@ function drawStars(t){ S.clearRect(0,0,W,H);
 
 /* ---------- entities: folder ORBS · file CARDS · 3D OBJECTS ---------- */
 let CARDS = [], TREE = [], SPAWN_OK = false;
+let deckRevealed = false;
 let ink = [];                        // INK MODE strokes: {x,y,t} points, {break:true} gaps
+function arrangeGrid(items, top = 160){
+  const n = items.length;
+  if (!n || W < 100 || H < 100) return;
+  const cellW = 254, cols = Math.max(1, Math.min(n, Math.floor((W - 80) / cellW)));
+  const rows = Math.ceil(n / cols), usableH = Math.max(150, H - top - 90);
+  const rowGap = Math.min(205, usableH / rows), gridW = cols * cellW - 24;
+  const x0 = (W - gridW) / 2 + (cellW - 24) / 2;
+  const y0 = top + Math.min(70, Math.max(58, (rowGap - 118) / 2));
+  items.forEach((c, i) => {
+    c.vx = c.vy = 0; c.sT = 1; c.docked = false;
+    c.tx = x0 + (i % cols) * cellW;
+    c.ty = y0 + Math.floor(i / cols) * rowGap;
+  });
+}
+function revealControlDeck(){
+  if (deckRevealed) return;
+  deckRevealed = true;
+  document.body.classList.remove('holo-locked');
+  arrangeGrid(CARDS.filter(c => c.kind === 'folder'), 170);
+  const ringstate = document.getElementById('ringstate');
+  if (ringstate) ringstate.textContent = 'CONTROLS';
+  statusEl.textContent = 'CONTROL DECK READY · PINCH A BOX TO OPEN';
+  shocks.push({ x: W / 2, y: H / 2, t: performance.now() });
+}
 function orbEl(f){
   const el = document.createElement('div'); el.className = 'orb';
   el.innerHTML = `<h3></h3><span></span>`;
@@ -240,6 +311,30 @@ function cardEl(note){
   if (note.image) addNewsClose(el);
   deck.appendChild(el); return el;
 }
+function dismissWorkspaceCard(card){
+  if (!card || !CARDS.includes(card)) return;
+  const removed = new Set([card]);
+  if (card.kind === 'folder')
+    for (const child of CARDS) if (child.parent === card) removed.add(child);
+  for (const item of removed){
+    if (item.el) item.el.remove();
+    if (item.mesh && glScene){
+      glScene.remove(item.mesh);
+      item.mesh.traverse(node => {
+        if (!node.isMesh) return;
+        if (node.geometry) node.geometry.dispose();
+        for (const material of (Array.isArray(node.material) ? node.material : [node.material]))
+          if (material) material.dispose();
+      });
+    }
+  }
+  CARDS = CARDS.filter(item => !removed.has(item));
+  shocks.push({ x: Math.max(24, Math.min(W - 24, card.x)),
+    y: Math.max(24, Math.min(H - 24, card.y)), t: performance.now() });
+  postState('dismiss', card.title);
+  jSay('dismiss', `Removed ${String(card.title || 'item').slice(0, 48)} from the workspace, sir.`,
+    { always:true, force:true, cool:1200 });
+}
 function addNewsClose(el){
   if (el.querySelector('.news-close')) return;
   const close = document.createElement('button'); close.className = 'news-close';
@@ -248,8 +343,8 @@ function addNewsClose(el){
   close.addEventListener('click', ev => {
     ev.stopPropagation();
     const card = CARDS.find(c => c.el === el);
-    if (card) { postState('dismiss', card.title); CARDS = CARDS.filter(c => c !== card); }
-    el.remove();
+    if (card) dismissWorkspaceCard(card);
+    else el.remove();
   });
   el.appendChild(close);
 }
@@ -282,6 +377,7 @@ function openOrb(orb){
       tx: orb.x + Math.cos(ang) * R, ty: orb.y + Math.sin(ang) * R,
       vx: 0, vy: 0, s: .25, sT: 1, docked: false, born: performance.now() });
   });
+  arrangeGrid(CARDS.filter(c => c.parent === orb), 150);
   postState('open_folder', orb.title);
 }
 function closeOrb(orb){
@@ -354,14 +450,13 @@ function physics(){
     else if (c !== drag.card){
       c.x += c.vx; c.y += c.vy; c.vx *= FRICTION; c.vy *= FRICTION;
       if (c.docked){ const slot = dockSlot(c); c.vx += (slot.x - c.x)*.14; c.vy += (slot.y - c.y)*.14; }
-      // FLICK-TO-DISMISS: a note thrown hard enough sails off-screen and evaporates
-      // (reopen its orb to bring it back). Gentle drifts still bounce; orbs/objects bounce.
-      const escaping = c.kind === 'note' && !c.docked && Math.hypot(c.vx, c.vy) > 8;
+      // A deliberate fast throw lets any Holo item leave the stage; a slow drift still bounces.
+      const escaping = !c.docked && Math.hypot(c.vx, c.vy) > 8;
       if (escaping){
-        if (c.x < -80 || c.x > W+80 || c.y < -80 || c.y > H+80){
-          shocks.push({ x: Math.max(24, Math.min(W-24, c.x)),
-                        y: Math.max(24, Math.min(H-24, c.y)), t: performance.now() });
-          gone.push(c); postState('dismiss', c.title); jSay('dismiss'); continue;
+        const hw = (c.kind === 'folder' ? 118 : c.kind === 'obj' ? (c.rPx || 110) : c.newsImage ? 148 : 120) * c.s;
+        const hh = (c.kind === 'folder' ? 62 : c.kind === 'obj' ? (c.rPx || 110) : c.newsImage ? 138 : 78) * c.s;
+        if (c.x + hw < 0 || c.x - hw > W || c.y + hh < 0 || c.y - hh > H){
+          gone.push(c); continue;
         }
       } else {
         if (c.x < 40){ c.x = 40; c.vx = Math.abs(c.vx)*WALL; }
@@ -374,16 +469,15 @@ function physics(){
         if (d > 1 && d < 175){ const f = (175-d)/175*.5; c.vx += dx/d*f; c.vy += dy/d*f; } }
     }
     if (c.el){
-      const half = c.kind === 'folder' ? 75 : (c.newsImage ? 140 : 115);
-      const halfY = c.kind === 'folder' ? 75 : (c.newsImage ? 130 : 70);
+      const half = c.kind === 'folder' ? 115 : (c.newsImage ? 140 : 115);
+      const halfY = c.kind === 'folder' ? 59 : (c.newsImage ? 130 : 70);
       c.el.style.transform = `translate3d(${c.x-half}px, ${c.y-halfY}px, 0) scale(${c.s.toFixed(3)})`;
       c.el.classList.toggle('docked', c.docked);
       c.el.classList.toggle('hover', hov.has(c) && c !== drag.card);
     }
   }
   if (gone.length){
-    for (const c of gone){ if (c.el) c.el.remove(); }
-    CARDS = CARDS.filter(c => !gone.includes(c));
+    for (const c of gone) dismissWorkspaceCard(c);
   }
   syncMeshes();
 }
@@ -393,6 +487,9 @@ function cardAt(x, y){
   for (let i = CARDS.length-1; i >= 0; i--){ const c = CARDS[i];
     if (c.kind === 'note'){ const w = c.newsImage ? 148 : 120, h = c.newsImage ? 138 : 78;
       if (Math.abs(x-c.x) < w*c.s && Math.abs(y-c.y) < h*c.s) return c; }
+    else if (c.kind === 'folder'){
+      if (Math.abs(x-c.x) < 118*c.s && Math.abs(y-c.y) < 62*c.s) return c;
+    }
     else if (Math.hypot(x-c.x, y-c.y) < (c.kind === 'obj' ? 92 : 82) * c.s) return c; }
   return null; }
 function targetAt(p){
@@ -532,8 +629,45 @@ function oneEuro(st, raw, now){
 }
 function mkHandState(){ return { present:false, seen:0, pinch:false, pinchT:0, startPalm:null,
   smooth:null, trail:[], open:false, openT:0, fist:false, lm:null, m:null, hover:null, twist:null,
-  point:0, spans:[], upT:0 }; }
+  point:0, spans:[], upT:0, faceSwipes:{} }; }
 const HANDS = [mkHandState(), mkHandState()];
+let faceMeshVisible = false, faceLandmarker = null, FaceLandmarkerClass = null, visionFiles = null;
+let faceDelegate = 'none';
+let faceEdges = [], facePoints = null, faceBounds = null, lastFaceInference = 0, lastFaceDraw = 0;
+let lastFaceGesture = -9e9;
+function checkFaceSwipe(st, now){
+  if (!faceBounds || !st.m || !st.lm){ st.faceSwipes = {}; return; }
+  const b = faceBounds, h = b.bottom - b.top, w = b.right - b.left;
+  if (!(h > 40 && w > 30)) return;
+  const center = (b.top + b.bottom) / 2, next = {};
+  for (const [i, landmark] of [8, 12, 16, 20].entries()){
+    if (st.m.tips[i] < 1.28) continue;
+    const raw = px(st.lm[landmark]), previous = st.faceSwipes[landmark];
+    const p = previous ? { x:previous.current.x*.45 + raw.x*.55, y:previous.current.y*.45 + raw.y*.55 } : raw;
+    const inLane = p.x >= b.left - w*.34 && p.x <= b.right + w*.34;
+    const nearFaceY = p.y >= b.top - h*.30 && p.y <= b.bottom + h*.30;
+    if (!previous){
+      if (inLane && nearFaceY) next[landmark] = { x:p.x, y:p.y, current:p, started:now };
+      continue;
+    }
+    const elapsed = now - previous.started;
+    if (elapsed > 1400 || Math.abs(p.x - previous.x) > w*.48) continue;
+    next[landmark] = { ...previous, current:p };
+    if (elapsed < 100 || now - lastFaceGesture < 1100) continue;
+    const travel = p.y - previous.y;
+    const down = previous.y < center - h*.12 && p.y > center + h*.12 && travel > h*.42;
+    const up = previous.y > center + h*.12 && p.y < center - h*.12 && travel < -h*.42;
+    if ((down && !faceMeshVisible) || (up && faceMeshVisible)){
+      faceMeshVisible = down;
+      document.body.classList.toggle('face-mesh-visible', down);
+      lastFaceGesture = now;
+      st.faceSwipes = {};
+      statusEl.textContent = down ? `FACE MESH ONLINE · ${faceDelegate.toUpperCase()} TRACKING` : 'FACE MESH CLEARED';
+      return;
+    }
+  }
+  st.faceSwipes = next;
+}
 const drag = { card:null, hand:-1, dx:0, dy:0 };
 let world = null;
 let lastClap = -9e9, shocks = [], beams = [];
@@ -582,6 +716,7 @@ function ingestHands(rawHands){
     st.smooth = oneEuro(st, raw, now);   // speed-adaptive One Euro: steady at rest, wired when fast
     const cur = st.smooth;
     st.trail.push({ ...cur, t: now }); if (st.trail.length > 10) st.trail.shift();
+    checkFaceSwipe(st, now);
     st.spans.push({ s: m.span, t: now }); if (st.spans.length > 8) st.spans.shift();
     if (st.seen >= 3 && !st.pinch && !drag.card) st.hover = targetAt(cur);
     if (m.open){ st.open = true; st.openT = now; }
@@ -634,11 +769,16 @@ function ingestHands(rawHands){
     // static peace pose is the reliable "refresh" — tidy keeps the two-palm sweep)
     if (m.peace && !st.pinch && !reader.open){
       st.peaceN = (st.peaceN || 0) + 1;
-      if (st.peaceN === 8 && now - lastRestore > 2500) restoreAll(cur, now);
+      if (st.peaceN === 8 && now - lastRestore > 2500){
+        if (!deckRevealed) revealControlDeck();
+        else restoreAll(cur, now);
+      }
     } else st.peaceN = 0;
   }
   twoHand(now);
-  if (ADV){ clapCheck(now); tidyCheck(now); }
+  // Hands-together is the silent startup reveal gesture; only tidy remains optional.
+  clapCheck(now);
+  if (ADV) tidyCheck(now);
 }
 function beginPinch(i, cur){
   if (externalArticleOpen){
@@ -774,7 +914,8 @@ function clapCheck(now){
   lastPalmD = d;
   if (d < Math.max(160, Math.min(W,H)*.18) && va > 14 && closing){
     lastClap = now;
-    restoreAll({ x:(pa.x+pb.x)/2, y:(pa.y+pb.y)/2 }, now);
+    if (!deckRevealed) revealControlDeck();
+    else restoreAll({ x:(pa.x+pb.x)/2, y:(pa.y+pb.y)/2 }, now);
   }
 }
 /* FULL RESTORE — everything back to original size and place, fans closed, reader
@@ -865,7 +1006,7 @@ const jLines = {
   ink:     ['Taking dictation, sir.'],
 };
 function jSay(key, text, opts = {}){
-  if (!JARVIS_ON) return;
+  if (!JARVIS_ON && !opts.always) return;
   const now = performance.now();
   if (now - (jCool[key] || -9e9) < (opts.cool ?? 3000)) return;
   if (!text){ const L = jLines[key]; text = L[jSeq++ % L.length]; }
@@ -939,7 +1080,9 @@ async function startGL(){
     try { T = await import('/vendor/three.module.js'); }
     catch (e){ throw new Error('Bundled 3D library failed to load: ' + (e?.message || e)); }
     glRenderer = new T.WebGLRenderer({ canvas: document.getElementById('gl'), alpha: true, antialias: true });
-    glRenderer.setPixelRatio(Math.min(2, devicePixelRatio));
+    // Keep WebGL rendering on the GPU while avoiding a 4x pixel load on high-DPI
+    // screens; the 1.5x cap remains sharp and leaves headroom for camera inference.
+    glRenderer.setPixelRatio(Math.min(1.5, devicePixelRatio || 1));
     glScene = new T.Scene();
     glCam = new T.PerspectiveCamera(45, W/H, 1, 8000);
     const key = new T.DirectionalLight(0xaaffe0, 1.6); key.position.set(200, 300, 500);
@@ -1110,6 +1253,7 @@ function drawDebug(){
 }
 function drawHud(t){
   HG.clearRect(0,0,W,H);
+  drawFaceMesh(t);
   drawDebug();
   // INK strokes: glowing lines that breathe out over 10s (consecutive break
   // markers collapse so dead stroke boundaries never pile up)
@@ -1154,6 +1298,32 @@ function drawHud(t){
   for (const s of shocks){ const k = (t - s.t)/700;
     HG.strokeStyle = `rgba(125,255,217,${(1-k).toFixed(2)})`; HG.lineWidth = 3*(1-k)+.5;
     HG.beginPath(); HG.arc(s.x, s.y, Math.max(0, k) * Math.min(W, H) * .5, 0, 7); HG.stroke(); }
+}
+
+const FM = faceMeshCanvas.getContext('2d');
+function drawFaceMesh(t){
+  if (t - lastFaceDraw < 32) return;
+  lastFaceDraw = t;
+  FM.clearRect(0, 0, W, H);
+  if (!faceMeshVisible || !facePoints || !faceEdges.length) return;
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--holo-accent').trim() || '#7dffd9';
+  const pulse = .68 + .18 * Math.sin(t / 260);
+  FM.save(); FM.globalCompositeOperation = 'lighter';
+  FM.beginPath();
+  for (const edge of faceEdges){
+    const a = facePoints[edge.start], b = facePoints[edge.end];
+    if (!a || !b) continue;
+    FM.moveTo(a.x, a.y); FM.lineTo(b.x, b.y);
+  }
+  FM.strokeStyle = accent; FM.globalAlpha = pulse * .76; FM.lineWidth = 1.05;
+  FM.shadowColor = accent; FM.shadowBlur = 8; FM.stroke();
+  FM.shadowBlur = 0; FM.globalAlpha = .76; FM.lineWidth = .48; FM.stroke();
+  for (let i = 0; i < facePoints.length; i += 8){
+    const p = facePoints[i]; if (!p) continue;
+    FM.globalAlpha = .52 + .3 * Math.sin(t / 190 + i);
+    FM.fillStyle = accent; FM.beginPath(); FM.arc(p.x, p.y, 1.1, 0, Math.PI * 2); FM.fill();
+  }
+  FM.restore();
 }
 
 /* ---------- main loop ---------- */
@@ -1235,6 +1405,7 @@ async function startCamera(deviceId){
       stage = 'wasm';
       statusEl.textContent = 'tracking core loaded · initializing…';
       const files = await mp.FilesetResolver.forVisionTasks(wasmDir);
+      visionFiles = files; FaceLandmarkerClass = mp.FaceLandmarker;
       stage = 'model';
       // confidence floors raised off the loose .5 defaults: a face or a shirt fold
       // that scores .5-.6 as a "hand" is exactly the parked-green-dot phantom
@@ -1260,6 +1431,34 @@ async function startCamera(deviceId){
     }
     postDiag({ fail: null, stage: 'tracking-ready', delegate: DELEGATE,
                localImportError: localErr, ua: navigator.userAgent });
+  }
+  if (!faceLandmarker && FaceLandmarkerClass && visionFiles){
+    try {
+      statusEl.textContent = 'loading local face mesh…';
+      const faceOpts = (delegate) => ({
+        baseOptions: { modelAssetPath: '/vendor/face_landmarker.task', delegate },
+        runningMode: 'VIDEO', numFaces: 1,
+        minFaceDetectionConfidence: .55, minFacePresenceConfidence: .55,
+        minTrackingConfidence: .55,
+      });
+      // Move the expensive landmark inference to the GPU when WebView supports it.
+      // Keep a CPU fallback so Holo still works on systems with disabled/unsupported GPU delegates.
+      try {
+        faceLandmarker = await FaceLandmarkerClass.createFromOptions(visionFiles, faceOpts('GPU'));
+        faceDelegate = 'GPU';
+      } catch (gpuError) {
+        console.warn('[holo] face GPU delegate failed, trying CPU:', gpuError);
+        faceLandmarker = await FaceLandmarkerClass.createFromOptions(visionFiles, faceOpts('CPU'));
+        faceDelegate = 'CPU';
+      }
+      faceEdges = FaceLandmarkerClass.FACE_LANDMARKS_TESSELATION || [];
+      postDiag({ face: 'ready', faceDelegate, handDelegate: DELEGATE });
+    } catch (faceError){
+      faceLandmarker = null;
+      faceDelegate = 'none';
+      console.warn('[holo] local face mesh unavailable:', faceError);
+      postDiag({ face: 'unavailable', faceError: String(faceError && faceError.message || faceError).slice(0, 180) });
+    }
   }
   if (generation !== cameraGeneration){ camStarting = false; return; }
   let stream = null;
@@ -1294,6 +1493,26 @@ async function startCamera(deviceId){
     if (tracking && cam.currentTime !== lastVideoT && cam.videoWidth){
       lastVideoT = cam.currentTime;
       updateMap(cam.videoWidth, cam.videoHeight);
+      const frameTime = performance.now();
+      if (faceLandmarker && frameTime - lastFaceInference >= 80){
+        lastFaceInference = frameTime;
+        try {
+          const faces = faceLandmarker.detectForVideo(cam, frameTime).faceLandmarks || [];
+          const points = faces[0];
+          if (points && points.length){
+            facePoints = points.map(point => px(point));
+            faceBounds = facePoints.reduce((b, p) => ({
+              left:Math.min(b.left,p.x), right:Math.max(b.right,p.x),
+              top:Math.min(b.top,p.y), bottom:Math.max(b.bottom,p.y),
+            }), { left:Infinity, right:-Infinity, top:Infinity, bottom:-Infinity });
+          } else { facePoints = null; faceBounds = null; }
+        } catch (faceError){
+          facePoints = null; faceBounds = null;
+          console.warn('[holo] face frame failed:', faceError);
+          try { faceLandmarker.close(); } catch (_) {}
+          faceLandmarker = null;
+        }
+      }
       const res = landmarker.detectForVideo(cam, performance.now());
       const hd = res.handednesses || res.handedness || [];
       RAW.n = (res.landmarks || []).length;                       // pre-filter truth for DEBUG
@@ -1349,6 +1568,9 @@ window.jarvisStopCamera = function(){
   try { const stream = cam.srcObject; if (stream) stream.getTracks().forEach(t => t.stop()); } catch (_) {}
   cam.srcObject = null; camOn = false; camStarting = false;
   camDeviceId = '';
+  faceMeshVisible = false; facePoints = null; faceBounds = null;
+  document.body.classList.remove('face-mesh-visible');
+  FM.clearRect(0, 0, W, H);
   statusEl.textContent = 'camera stopped';
 };
 window.jarvisStartCamera = startSelectedLaptopCamera;
@@ -1435,12 +1657,23 @@ addEventListener('pointerup', e => { if (mDrag){
   drag.card = null; mDrag = null; } });
 
 /* ---------- ui ---------- */
-const CAM_LEVELS = [.55, .8, .15];
+const CAM_LEVELS = [.72, .92, .18];
 let camLevel = 0;
+document.getElementById('holoColor').addEventListener('input', e => {
+  const accent = e.target.value;
+  applyHoloColor(accent, true);
+  fetch('/api/preferences', { method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ accent }) }).catch(() => {});
+});
 document.getElementById('hands').onclick = function(){ tracking = !tracking;
   this.textContent = tracking ? 'HANDS ON' : 'HANDS OFF'; this.classList.toggle('off', !tracking);
   document.getElementById('ringstate').textContent = tracking ? 'ACTIVE' : 'PAUSED';
-  if (!tracking){ dropHand(0); dropHand(1); }   // HANDS OFF used to leave the last cursor painted forever
+  if (!tracking){
+    dropHand(0); dropHand(1);
+    faceMeshVisible = false; facePoints = null; faceBounds = null;
+    document.body.classList.remove('face-mesh-visible');
+    FM.clearRect(0, 0, W, H);
+  }   // HANDS OFF used to leave the last cursor painted forever
 };
 document.getElementById('camvis').onclick = function(){ camLevel = (camLevel + 1) % 3;
   cam.style.opacity = CAM_LEVELS[camLevel];
