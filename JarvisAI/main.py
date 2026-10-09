@@ -48,6 +48,17 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+# Qt WebEngine's Chromium renderer is hardware accelerated by default, but
+# explicitly request GPU rasterization for the canvas-heavy Holo UI. Do this
+# before importing PyQt/WebEngine so its renderer process inherits the flags.
+# Keep user-supplied Chromium flags intact and never force past the GPU blocklist.
+if _platform.system() == "Windows":
+    _chromium_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
+    for _gpu_flag in ("--enable-gpu-rasterization", "--enable-zero-copy"):
+        if _gpu_flag not in _chromium_flags:
+            _chromium_flags.append(_gpu_flag)
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(_chromium_flags)
+
 import sounddevice as sd
 import numpy as np
 from google import genai

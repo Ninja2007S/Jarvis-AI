@@ -376,6 +376,15 @@ class HudWorkspace(QWidget):
         self._holo_view = QWebEngineView() if QWebEngineView else None
         if self._holo_view:
             self._configure_webview(self._holo_view)
+            # Holo's starfield, interaction layer, and face mesh use Canvas 2D;
+            # 3D props use WebGL. Explicitly enable their accelerated paths.
+            holo_settings = self._holo_view.settings()
+            holo_settings.setAttribute(
+                QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, True
+            )
+            holo_settings.setAttribute(
+                QWebEngineSettings.WebAttribute.WebGLEnabled, True
+            )
             self._holo_server = HoloGestureServer(
                 lambda event, card: self.holo_event.emit(event, card),
                 lambda pose: self.neural_hand_update.emit(pose),

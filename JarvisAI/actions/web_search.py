@@ -284,26 +284,27 @@ def _ddg_news(
 _SRI_LANKA_NEWS_SOURCES = (
     {
         "label": "Newsfirst — English",
-        "query": "site:english.newsfirst.lk/latest latest Sri Lanka news",
+        "query": "site:newsfirst.lk/latest Sri Lanka latest news",
         "fallback_query": "Newsfirst Sri Lanka latest news English",
-        "hosts": {"english.newsfirst.lk"},
+        "hosts": {"newsfirst.lk", "www.newsfirst.lk", "english.newsfirst.lk"},
     },
     {
         "label": "Newsfirst — Sinhala",
-        "query": "site:newsfirst.lk/sinhala/latest ශ්‍රී ලංකාවේ අද පුවත්",
-        "fallback_query": "Newsfirst Sinhala Sri Lanka latest news",
-        "hosts": {"newsfirst.lk"},
-        "path_prefix": "/sinhala/",
+        # Newsfirst now serves Sinhala headlines on /sinhala/latest on the
+        # main site, while the language subdomain remains a valid edition.
+        "query": "site:newsfirst.lk/sinhala/latest Sri Lanka Sinhala latest news",
+        "fallback_query": "Newsfirst Sinhala ශ්‍රී ලංකා පුවත් latest",
+        "hosts": {"newsfirst.lk", "www.newsfirst.lk", "sinhala.newsfirst.lk"},
     },
     {
         "label": "Ada Derana — English",
-        "query": "site:adaderana.lk Sri Lanka latest news",
+        "query": "site:adaderana.lk/categories/latest Sri Lanka latest news",
         "fallback_query": "Ada Derana Sri Lanka latest news English",
         "hosts": {"adaderana.lk", "www.adaderana.lk"},
     },
     {
         "label": "Ada Derana — Sinhala",
-        "query": "site:sinhala.adaderana.lk ශ්‍රී ලංකාවේ අද පුවත්",
+        "query": "site:sinhala.adaderana.lk Sri Lanka Sinhala latest news",
         "fallback_query": "Ada Derana Sinhala latest Sri Lanka news",
         "hosts": {"sinhala.adaderana.lk"},
     },
@@ -317,20 +318,45 @@ def _sri_lanka_news(_query: str = "") -> str:
 
     # Search the four editions concurrently. A shared deadline keeps the
     # morning briefing from waiting four times for the search provider.
-    source_results = [None] * len(_SRI_LANKA_NEWS_SOURCES)
+    source_results: list[list[tuple[str, str, str]] | None] = [None] * len(_SRI_LANKA_NEWS_SOURCES)
+
+    def _publisher_items(source: dict, results: list[dict]) -> list[tuple[str, str, str]]:
+        accepted = []
+        for result in results:
+            url = str(result.get("url") or "").strip()
+            try:
+                parsed = urlparse(url)
+                host = (parsed.hostname or "").lower().rstrip(".")
+                port = parsed.port
+            except ValueError:
+                # Ignore malformed provider links without discarding other
+                # valid results returned for this publisher.
+                continue
+            path_prefix = source.get("path_prefix")
+            if (parsed.scheme != "https" or host not in source["hosts"]
+                    or parsed.username or parsed.password or port not in (None, 443)
+                    or (path_prefix and not parsed.path.startswith(path_prefix))):
+                continue
+            title = " ".join(str(result.get("title") or "").split())
+            if not title:
+                continue
+            snippet = " ".join(str(result.get("snippet") or "").split())
+            accepted.append((title, snippet, url))
+            if len(accepted) >= 3:
+                break
+        return accepted
 
     def _fetch_source(index: int, source: dict) -> None:
         try:
-            results = _ddg_search(
-                source["query"],
-                max_results=5,
-            )
-            # Search providers sometimes return no results for site-restricted
-            # Sinhala queries. Retry once with a plain publisher/language query;
-            # accepted links are still restricted to that publisher below.
-            if not results and source.get("fallback_query"):
-                results = _ddg_search(source["fallback_query"], max_results=5)
-            source_results[index] = results
+            # News search tends to return fresher article links than general
+            # text search. If its results are empty or point off-publisher,
+            # retry with text search and still enforce the exact publisher host.
+            results = _ddg_news(source["query"], max_results=8)
+            accepted = _publisher_items(source, results)
+            if not accepted and source.get("fallback_query"):
+                results = _ddg_search(source["fallback_query"], max_results=8)
+                accepted = _publisher_items(source, results)
+            source_results[index] = accepted
         except Exception as e:
             print(f"[WebSearch] Sri Lankan source search failed: {e}")
             source_results[index] = []
@@ -356,34 +382,12 @@ def _sri_lanka_news(_query: str = "") -> str:
         worker.join(max(0.0, deadline - time.monotonic()))
 
     for index, source in enumerate(_SRI_LANKA_NEWS_SOURCES):
-        results = source_results[index] or []
-
         accepted = []
-        for result in results:
-            url = result.get("url", "").strip()
-            parsed = urlparse(url)
-            host = (parsed.hostname or "").lower()
-            path_prefix = source.get("path_prefix")
-
-            # Search results are untrusted. Keep links on the named publisher
-            # and on HTTPS before presenting them as that publisher's stories.
-            if (
-                parsed.scheme != "https"
-                or host not in source["hosts"]
-                or (path_prefix and not parsed.path.startswith(path_prefix))
-                or url in seen_urls
-            ):
+        for title, snippet, url in (source_results[index] or []):
+            if url in seen_urls:
                 continue
-
-            title = " ".join(result.get("title", "").split())
-            if not title:
-                continue
-
             seen_urls.add(url)
-            snippet = " ".join(result.get("snippet", "").split())
             accepted.append((title, snippet, url))
-            if len(accepted) == 3:
-                break
 
         if accepted:
             lines = [source["label"]]

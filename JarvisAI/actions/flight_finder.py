@@ -5,6 +5,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
 
 from config import is_windows, is_mac, is_linux
 
@@ -43,8 +44,8 @@ def _parse_date(raw: str) -> str:
     lower = raw.lower()
     today = datetime.now()
 
-    if re.match(r"\d{4}-\d{2}-\d{2}", raw):
-        return raw
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return datetime.strptime(raw, "%Y-%m-%d").strftime("%Y-%m-%d")
     for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%d.%m.%Y", "%d-%m-%Y"):
         try:
             return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
@@ -56,7 +57,7 @@ def _parse_date(raw: str) -> str:
         "tomorrow": today + timedelta(days=1),
     }
     for key, val in relative.items():
-        if key in lower:
+        if re.search(rf"\b{key}\b", lower):
             return val.strftime("%Y-%m-%d")
 
     try:
@@ -67,8 +68,9 @@ def _parse_date(raw: str) -> str:
             f"Return ONLY the date string, nothing else.",
             tier=gemini.FAST,
         )
-        if re.match(r"\d{4}-\d{2}-\d{2}", result):
-            return result
+        parsed = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", str(result or ""))
+        if parsed:
+            return datetime.strptime(parsed.group(1), "%Y-%m-%d").strftime("%Y-%m-%d")
     except Exception as e:
         print(f"[FlightFinder] ⚠️ Gemini date parse failed: {e}")
 
@@ -78,19 +80,15 @@ def _parse_date(raw: str) -> str:
             if day_match:
                 day  = int(day_match.group())
                 year = today.year if month_num >= today.month else today.year + 1
-                return f"{year}-{month_num:02d}-{day:02d}"
+                try:
+                    return datetime(year, month_num, day).strftime("%Y-%m-%d")
+                except ValueError:
+                    break
 
-    # Last resort: today
-    print(f"[FlightFinder] ⚠️ Could not parse date '{raw}' — using today.")
-    return today.strftime("%Y-%m-%d")
-
-_CABIN_CODE: dict[str, str] = {
-    "economy":  "1",
-    "premium":  "2",
-    "business": "3",
-    "first":    "4",
-}
-
+    raise ValueError(
+        f"I couldn't interpret '{raw}' as a valid travel date. "
+        "Please say a date like 2026-10-20."
+    )
 
 def _build_google_flights_url(
     origin:      str,
@@ -100,23 +98,24 @@ def _build_google_flights_url(
     passengers:  int        = 1,
     cabin:       str        = "economy",
 ) -> str:
-    cabin_code = _CABIN_CODE.get(cabin.lower(), "1")
-    base       = "https://www.google.com/travel/flights"
+    base = "https://www.google.com/travel/flights"
 
-    # Google Flights accepts these query params for pre-filling
+    # Google Flights accepts a natural-language q query. Keep all itinerary
+    # settings in that query: separate guessed URL parameters were ignored on
+    # some page versions, leaving passenger/cabin/date settings at defaults.
+    trip = f"Flights from {origin} to {destination} on {date}"
     if return_date:
-        trip = f"Flights+from+{origin}+to+{destination}+on+{date}+returning+{return_date}"
+        trip += f" returning {return_date}"
     else:
-        trip = f"Flights+from+{origin}+to+{destination}+on+{date}"
-
-    return (
-        f"{base}"
-        f"?q={trip}"
-        f"&tfs=CBwQAhoeEgoyMDI1LTAzLTE1agcIARIDSVNUcgcIARIDTEhS"   
-        f"&curr=USD"
-        f"&cabin={cabin_code}"
-        f"&adults={passengers}"
-    )
+        trip += " one way"
+    cabin_label = {
+        "economy": "economy",
+        "premium": "premium economy",
+        "business": "business class",
+        "first": "first class",
+    }.get(cabin.lower(), "economy")
+    trip += f", {passengers} adult{'s' if passengers != 1 else ''}, {cabin_label}"
+    return f"{base}?{urlencode({'q': trip, 'hl': 'en'})}"
 
 
 
@@ -136,11 +135,27 @@ def _search_flights_browser(
     )
 
     print(f"[FlightFinder] 🌐 Opening: {url}")
-    browser_control({"action": "go_to", "url": url})
-    time.sleep(5)
+    opened = browser_control({"action": "go_to", "url": url}) or ""
+    if not opened.startswith("Opened"):
+        raise RuntimeError(f"Google Flights page did not open: {opened[:180]}")
 
-    raw = browser_control({"action": "get_text"})
-    return (raw or ""), url
+    # Google Flights hydrates result text asynchronously. Poll instead of
+    # scraping after a fixed delay that can be too short on a slow connection.
+    deadline = time.monotonic() + 18.0
+    raw = ""
+    while time.monotonic() < deadline:
+        raw = browser_control({"action": "get_text"}) or ""
+        lower = raw.casefold()
+        has_flight_data = any(token in lower for token in (
+            "nonstop", "non-stop", "stop", "depart", "arrival", "per person",
+            "round trip", "one way", "airline", "flight duration", "duration",
+        )) and bool(re.search(r"(?:\$|€|£|₹|\b(?:USD|LKR|EUR|GBP|Rs\.?|INR)\b|\b\d{1,2}:\d{2}\b)", raw, re.I))
+        if (len(raw) >= 350 and has_flight_data
+                and "could not get page text" not in lower
+                and "access denied" not in lower):
+            break
+        time.sleep(.75)
+    return raw, url
 
 def _parse_flights_with_gemini(
     raw_text:    str,
@@ -148,7 +163,15 @@ def _parse_flights_with_gemini(
     destination: str,
     date:        str,
 ) -> list[dict]:
-    from google import genai as _genai
+    # Do not ask a model to invent options from a Google Flights page shell,
+    # consent screen, or access-denied response.
+    has_flight_data = any(token in raw_text.casefold() for token in (
+        "nonstop", "non-stop", "stop", "depart", "arrival", "airline",
+        "flight duration", "duration",
+    )) and bool(re.search(r"(?:\$|€|£|₹|\b(?:USD|LKR|EUR|GBP|Rs\.?|INR)\b|\b\d{1,2}:\d{2}\b)", raw_text, re.I))
+    if len(raw_text.strip()) < 350 or not has_flight_data:
+        return []
+
     from google.genai import types
 
     prompt  = (
@@ -174,9 +197,35 @@ def _parse_flights_with_gemini(
                 )
             ),
         )
-        text     = re.sub(r"```(?:json)?", "", response.text).strip().rstrip("`").strip()
-        flights  = json.loads(text)
-        return flights if isinstance(flights, list) else []
+        text = str(getattr(response, "text", "") or "").strip()
+        text = re.sub(r"```(?:json)?", "", text, flags=re.I).strip().rstrip("`").strip()
+        try:
+            flights = json.loads(text)
+        except json.JSONDecodeError:
+            # Models sometimes surround the JSON array with a short preamble.
+            start, end = text.find("["), text.rfind("]")
+            if start < 0 or end <= start:
+                return []
+            flights = json.loads(text[start:end + 1])
+        if not isinstance(flights, list):
+            return []
+
+        normalized = []
+        for flight in flights[:5]:
+            if not isinstance(flight, dict):
+                continue
+            stops_raw = flight.get("stops", 0)
+            match = re.search(r"\d+", str(stops_raw))
+            normalized.append({
+                "airline": str(flight.get("airline") or "Unknown airline")[:100],
+                "departure": str(flight.get("departure") or "--:--")[:32],
+                "arrival": str(flight.get("arrival") or "--:--")[:32],
+                "duration": str(flight.get("duration") or "")[:48],
+                "stops": int(match.group()) if match else (0 if str(stops_raw).casefold() in {"nonstop", "non-stop", "direct"} else None),
+                "price": str(flight.get("price") or "")[:40],
+                "currency": str(flight.get("currency") or "")[:8],
+            })
+        return normalized
     except Exception as e:
         print(f"[FlightFinder] ⚠️ Gemini parse failed: {e}")
         return []
@@ -204,7 +253,9 @@ def _format_spoken(
         price     = f.get("price",     "")
         currency  = f.get("currency",  "")
 
-        stop_str  = "non-stop" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}"
+        stop_str  = ("non-stop" if stops == 0 else
+                     f"{stops} stop{'s' if stops != 1 else ''}" if isinstance(stops, int)
+                     else "stops unavailable")
         price_str = f"{price} {currency}".strip() if price else "price unavailable"
         dur_str   = f", {duration}" if duration else ""
 
@@ -255,8 +306,10 @@ def _format_text_report(
         lines.append("No flights found.")
     else:
         for i, f in enumerate(flights, 1):
-            stops    = f.get("stops", 0)
-            stop_str = "Non-stop" if stops == 0 else f"{stops} stop(s)"
+            stops    = f.get("stops")
+            stop_str = ("Non-stop" if stops == 0 else
+                        f"{stops} stop(s)" if isinstance(stops, int)
+                        else "Unknown")
             lines += [
                 f"Flight {i}:",
                 f"  Airline   : {f.get('airline',   'N/A')}",
@@ -296,13 +349,17 @@ def _save_to_desktop(content: str, origin: str, destination: str) -> str:
 def flight_finder(parameters: dict, player=None, speak=None) -> str:
     params = parameters or {}
 
-    origin      = params.get("origin",      "").strip()
-    destination = params.get("destination", "").strip()
-    date_raw    = params.get("date",        "").strip()
-    return_raw  = (params.get("return_date") or "").strip()
-    passengers  = max(1, int(params.get("passengers", 1)))
-    cabin       = params.get("cabin", "economy").strip().lower()
-    save        = bool(params.get("save", False))
+    origin      = str(params.get("origin") or "").strip()
+    destination = str(params.get("destination") or "").strip()
+    date_raw    = str(params.get("date") or "").strip()
+    return_raw  = str(params.get("return_date") or "").strip()
+    try:
+        passengers = max(1, min(9, int(params.get("passengers", 1))))
+    except (TypeError, ValueError):
+        return "Please provide a passenger count from 1 to 9, sir."
+    cabin       = str(params.get("cabin") or "economy").strip().lower()
+    save_raw    = params.get("save", False)
+    save        = save_raw is True or str(save_raw).strip().casefold() in {"yes", "true", "1"}
 
     if not origin or not destination:
         return "Please provide both origin and destination, sir."
@@ -313,8 +370,13 @@ def flight_finder(parameters: dict, player=None, speak=None) -> str:
     if cabin not in _CABIN_CODE:
         cabin = "economy"
 
-    date        = _parse_date(date_raw)
-    return_date = _parse_date(return_raw) if return_raw else None
+    try:
+        date = _parse_date(date_raw)
+        return_date = _parse_date(return_raw) if return_raw else None
+    except ValueError as exc:
+        return str(exc)
+    if return_date and datetime.strptime(return_date, "%Y-%m-%d") <= datetime.strptime(date, "%Y-%m-%d"):
+        return "The return date must be after the departure date, sir."
 
     if player:
         player.write_log(f"[FlightFinder] {origin} → {destination} on {date}")

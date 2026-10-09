@@ -236,7 +236,8 @@ fetch('/api/preferences').then(r => r.ok ? r.json() : Promise.reject()).then(p =
 let W = innerWidth, H = innerHeight;
 function sizeCanvases(){ W = innerWidth; H = innerHeight;
   for (const c of [stars, hud, faceMeshCanvas]) { c.width = W * devicePixelRatio; c.height = H * devicePixelRatio;
-    c.getContext('2d').setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0); } }
+    c.getContext('2d', { alpha:true, desynchronized:true })
+      .setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0); } }
 sizeCanvases();
 
 /* ---------- landmark → screen: mirror + cover-crop + REACH AMPLIFICATION ---------- */
@@ -252,6 +253,11 @@ function px(p){
   let nx = p.x, ny = p.y;
   if (!MAP.id){ nx = .5 + (nx - .5) * AMP; ny = .5 + (ny - .5) * AMP; }
   return { x: W - (nx * MAP.sx + MAP.ox), y: ny * MAP.sy + MAP.oy };
+}
+// Hands use the enlarged reach zone above; a face overlay must use the raw
+// mirrored cover-crop or the 1.45x hand gain visibly pushes it off the face.
+function facePx(p){
+  return { x: W - (p.x * MAP.sx + MAP.ox), y: p.y * MAP.sy + MAP.oy };
 }
 
 /* ---------- starfield (subtle, above the vignette) ---------- */
@@ -635,6 +641,13 @@ let faceMeshVisible = false, faceLandmarker = null, FaceLandmarkerClass = null, 
 let faceDelegate = 'none';
 let faceEdges = [], facePoints = null, faceBounds = null, lastFaceInference = 0, lastFaceDraw = 0;
 let lastFaceGesture = -9e9;
+let faceMeshMotion = { phase:'hidden', started:0, duration:0 };
+function setFaceMeshVisible(visible, now=performance.now()){
+  faceMeshVisible = !!visible;
+  faceMeshMotion = { phase:visible ? 'in' : 'out', started:now,
+    duration:visible ? 460 : 300 };
+  document.body.classList.toggle('face-mesh-visible', faceMeshVisible);
+}
 function checkFaceSwipe(st, now){
   if (!faceBounds || !st.m || !st.lm){ st.faceSwipes = {}; return; }
   const b = faceBounds, h = b.bottom - b.top, w = b.right - b.left;
@@ -642,7 +655,7 @@ function checkFaceSwipe(st, now){
   const center = (b.top + b.bottom) / 2, next = {};
   for (const [i, landmark] of [8, 12, 16, 20].entries()){
     if (st.m.tips[i] < 1.28) continue;
-    const raw = px(st.lm[landmark]), previous = st.faceSwipes[landmark];
+    const raw = facePx(st.lm[landmark]), previous = st.faceSwipes[landmark];
     const p = previous ? { x:previous.current.x*.45 + raw.x*.55, y:previous.current.y*.45 + raw.y*.55 } : raw;
     const inLane = p.x >= b.left - w*.34 && p.x <= b.right + w*.34;
     const nearFaceY = p.y >= b.top - h*.30 && p.y <= b.bottom + h*.30;
@@ -658,8 +671,7 @@ function checkFaceSwipe(st, now){
     const down = previous.y < center - h*.12 && p.y > center + h*.12 && travel > h*.42;
     const up = previous.y > center + h*.12 && p.y < center - h*.12 && travel < -h*.42;
     if ((down && !faceMeshVisible) || (up && faceMeshVisible)){
-      faceMeshVisible = down;
-      document.body.classList.toggle('face-mesh-visible', down);
+      setFaceMeshVisible(down, now);
       lastFaceGesture = now;
       st.faceSwipes = {};
       statusEl.textContent = down ? `FACE MESH ONLINE · ${faceDelegate.toUpperCase()} TRACKING` : 'FACE MESH CLEARED';
@@ -1074,6 +1086,7 @@ function summarize(c){
 
 /* ---------- 3D objects ---------- */
 let THREE_OK = false, glRenderer = null, glScene = null, glCam = null;
+let GL_INFO = 'GPU CHECK PENDING';
 async function startGL(){
   try {
     let T = null;
@@ -1083,6 +1096,14 @@ async function startGL(){
     // Keep WebGL rendering on the GPU while avoiding a 4x pixel load on high-DPI
     // screens; the 1.5x cap remains sharp and leaves headroom for camera inference.
     glRenderer.setPixelRatio(Math.min(1.5, devicePixelRatio || 1));
+    const gl = glRenderer.getContext();
+    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+    const rendererName = String(debugInfo
+      ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)
+      : gl.getParameter(gl.RENDERER));
+    const isSoftware = /swiftshader|llvmpipe|softpipe|software rasterizer|basic render driver/i.test(rendererName);
+    const gpuState = isSoftware ? 'software' : (debugInfo ? 'hardware' : 'unknown');
+    GL_INFO = `${isSoftware ? 'SOFTWARE' : (debugInfo ? 'GPU' : 'GPU?')} · ${rendererName.slice(0, 54)}`;
     glScene = new T.Scene();
     glCam = new T.PerspectiveCamera(45, W/H, 1, 8000);
     const key = new T.DirectionalLight(0xaaffe0, 1.6); key.position.set(200, 300, 500);
@@ -1095,7 +1116,7 @@ async function startGL(){
         spin: o.spin || { x: .003, y: .007 } });
     });
     sizeGL(); THREE_OK = true;
-    postDiag({ gl: 'ok' });
+    postDiag({ gl: 'ok', gpu: gpuState, renderer: rendererName.slice(0, 120), canvas2d: 'accelerated-requested' });
     loadProps(T).catch(() => {});                       // PROPS: real 3D models, best-effort
   } catch (e) { THREE_OK = false;
     postDiag({ gl: 'FAIL: ' + ((e && (e.message || String(e))) || '?').slice(0, 200) }); }
@@ -1241,7 +1262,7 @@ function drawDebug(){
   if (!debugOn){ dbgEl.style.display = 'none'; return; }
   dbgEl.style.display = 'block';
   const lines = [`win ${W}x${H} · video ${cam.videoWidth||0}x${cam.videoHeight||0} · amp ${MAP.id?'off':AMP} · map sx${Math.round(MAP.sx)} sy${Math.round(MAP.sy)} ox${Math.round(MAP.ox)} oy${Math.round(MAP.oy)}`];
-  lines.push(`gl ${THREE_OK ? 'ok' : 'OFF'} · cam raw ${RAW.n}${RAW.scores.length ? ' [' + RAW.scores.map(s => s.toFixed(2)).join(' ') + ']' : ''} · ink ${ink.filter(p => !p.break).length}`);
+  lines.push(`gl ${THREE_OK ? GL_INFO : 'OFF'} · cam raw ${RAW.n}${RAW.scores.length ? ' [' + RAW.scores.map(s => s.toFixed(2)).join(' ') + ']' : ''} · ink ${ink.filter(p => !p.break).length}`);
   const now = performance.now();
   HANDS.forEach((st, i) => {
     if (!st.present){ lines.push(`hand${i} —`); return; }
@@ -1300,28 +1321,43 @@ function drawHud(t){
     HG.beginPath(); HG.arc(s.x, s.y, Math.max(0, k) * Math.min(W, H) * .5, 0, 7); HG.stroke(); }
 }
 
-const FM = faceMeshCanvas.getContext('2d');
+const FM = faceMeshCanvas.getContext('2d', { alpha:true, desynchronized:true });
 function drawFaceMesh(t){
   if (t - lastFaceDraw < 32) return;
   lastFaceDraw = t;
   FM.clearRect(0, 0, W, H);
-  if (!faceMeshVisible || !facePoints || !faceEdges.length) return;
+  if (faceMeshMotion.phase === 'hidden' || !facePoints || !faceEdges.length) return;
+  const elapsed = Math.max(0, t - faceMeshMotion.started);
+  const raw = Math.min(1, elapsed / Math.max(1, faceMeshMotion.duration));
+  if (raw >= 1){
+    faceMeshMotion.phase = faceMeshMotion.phase === 'in' ? 'idle' : 'hidden';
+    if (faceMeshMotion.phase === 'hidden') return;
+  }
+  const eased = faceMeshMotion.phase === 'in'
+    ? 1 - Math.pow(1 - raw, 3)
+    : faceMeshMotion.phase === 'out' ? 1 - raw * raw : 1;
+  const edgeCount = Math.max(1, Math.floor(faceEdges.length * eased));
+  const nodeCount = Math.max(1, Math.floor((facePoints.length / 8) * eased));
   const accent = getComputedStyle(document.documentElement).getPropertyValue('--holo-accent').trim() || '#7dffd9';
   const pulse = .68 + .18 * Math.sin(t / 260);
   FM.save(); FM.globalCompositeOperation = 'lighter';
   FM.beginPath();
-  for (const edge of faceEdges){
+  for (let index = 0; index < edgeCount; index++){
+    const edge = faceEdges[index];
     const a = facePoints[edge.start], b = facePoints[edge.end];
     if (!a || !b) continue;
     FM.moveTo(a.x, a.y); FM.lineTo(b.x, b.y);
   }
-  FM.strokeStyle = accent; FM.globalAlpha = pulse * .76; FM.lineWidth = 1.05;
-  FM.shadowColor = accent; FM.shadowBlur = 8; FM.stroke();
-  FM.shadowBlur = 0; FM.globalAlpha = .76; FM.lineWidth = .48; FM.stroke();
+  const fade = faceMeshMotion.phase === 'idle' ? 1 : eased;
+  FM.strokeStyle = accent; FM.globalAlpha = pulse * .70 * fade; FM.lineWidth = .78;
+  FM.shadowColor = accent; FM.shadowBlur = 6 + 5 * (1 - eased); FM.stroke();
+  FM.shadowBlur = 0; FM.globalAlpha = .68 * fade; FM.lineWidth = .32; FM.stroke();
+  let shownNodes = 0;
   for (let i = 0; i < facePoints.length; i += 8){
+    if (shownNodes++ >= nodeCount) break;
     const p = facePoints[i]; if (!p) continue;
-    FM.globalAlpha = .52 + .3 * Math.sin(t / 190 + i);
-    FM.fillStyle = accent; FM.beginPath(); FM.arc(p.x, p.y, 1.1, 0, Math.PI * 2); FM.fill();
+    FM.globalAlpha = (.52 + .3 * Math.sin(t / 190 + i)) * fade;
+    FM.fillStyle = accent; FM.beginPath(); FM.arc(p.x, p.y, .85 + .7 * (1 - eased), 0, Math.PI * 2); FM.fill();
   }
   FM.restore();
 }
@@ -1500,7 +1536,18 @@ async function startCamera(deviceId){
           const faces = faceLandmarker.detectForVideo(cam, frameTime).faceLandmarks || [];
           const points = faces[0];
           if (points && points.length){
-            facePoints = points.map(point => px(point));
+            const mapped = points.map(point => facePx(point));
+            // MediaPipe runs at 12.5 fps here. A light per-landmark filter
+            // removes webcam jitter without the visible lag of a heavy average.
+            if (facePoints && facePoints.length === mapped.length){
+              const follow = .72;
+              facePoints = mapped.map((point, i) => ({
+                x: facePoints[i].x + (point.x - facePoints[i].x) * follow,
+                y: facePoints[i].y + (point.y - facePoints[i].y) * follow,
+              }));
+            } else {
+              facePoints = mapped;
+            }
             faceBounds = facePoints.reduce((b, p) => ({
               left:Math.min(b.left,p.x), right:Math.max(b.right,p.x),
               top:Math.min(b.top,p.y), bottom:Math.max(b.bottom,p.y),
@@ -1569,6 +1616,7 @@ window.jarvisStopCamera = function(){
   cam.srcObject = null; camOn = false; camStarting = false;
   camDeviceId = '';
   faceMeshVisible = false; facePoints = null; faceBounds = null;
+  faceMeshMotion = { phase:'hidden', started:0, duration:0 };
   document.body.classList.remove('face-mesh-visible');
   FM.clearRect(0, 0, W, H);
   statusEl.textContent = 'camera stopped';
@@ -1671,6 +1719,7 @@ document.getElementById('hands').onclick = function(){ tracking = !tracking;
   if (!tracking){
     dropHand(0); dropHand(1);
     faceMeshVisible = false; facePoints = null; faceBounds = null;
+    faceMeshMotion = { phase:'hidden', started:0, duration:0 };
     document.body.classList.remove('face-mesh-visible');
     FM.clearRect(0, 0, W, H);
   }   // HANDS OFF used to leave the last cursor painted forever
