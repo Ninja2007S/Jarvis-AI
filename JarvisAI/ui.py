@@ -29,7 +29,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+    QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
 try:
@@ -38,6 +38,13 @@ try:
 except Exception:
     QOpenGLWidget = QWidget
     _OPENGL_CANVAS_AVAILABLE = False
+try:
+    from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    _NEURAL_HAND_WEBVIEW_AVAILABLE = True
+except Exception:
+    QWebEnginePage = QWebEngineProfile = QWebEngineView = None
+    _NEURAL_HAND_WEBVIEW_AVAILABLE = False
 from core.earth_globe import EarthGlobePanel
 from core.neural_viz import NeuralVizMixin
 from core.hud_workspace import HudWorkspace
@@ -456,6 +463,17 @@ class HudCanvas(NeuralVizMixin, QOpenGLWidget):
             self._neural_render_scale = 0.75
         self._neural_render_image = None
         self._neural_gl_hardware = False
+        self._hand_rotation = 0.0
+        self._hand_yaw = 0.0
+        self._hand_tilt = 0.0
+        self._hand_3d_active = False
+        self._hand_zoom = 1.0
+        self._hand_zoom_target = 1.0
+        self._hand_prev_point = None
+        self._hand_pinching = False
+        self._hand_prev_angle = None
+        self._hand_scale_span_start = 0.0
+        self._hand_zoom_start = 1.0
         self._neural_palette = [
             # Screenshot-matched spectral groups: electric violet, hot pink,
             # amber, icy cyan, signal red, lime, deep purple, and white core.
@@ -590,6 +608,57 @@ class HudCanvas(NeuralVizMixin, QOpenGLWidget):
         """Flash a distinct neural pulse for each active JARVIS operation."""
         self._neural_call_count += 1
         self._neural_flash = 1.0
+
+    def apply_neural_hand_pose(self, pose: dict) -> None:
+        """Apply local one-hand 3D rotation or two-hand pinch/roll controls."""
+        if self.hud_style not in ("neural", "neural_orb"):
+            self._hand_prev_point = None
+            self._hand_pinching = False
+            return
+        if not isinstance(pose, dict):
+            return
+        mode = str(pose.get("mode", "idle"))
+        if mode == "scale":
+            span = max(0.0, min(1.5, float(pose.get("span", 0.0))))
+            angle = float(pose.get("angle", 0.0))
+            if not self._hand_pinching:
+                self._hand_pinching = True
+                self._hand_scale_span_start = max(0.05, span)
+                self._hand_zoom_start = self._hand_zoom
+                self._hand_prev_angle = angle
+            ratio = span / max(0.05, self._hand_scale_span_start)
+            self._hand_zoom_target = max(0.62, min(1.75, self._hand_zoom_start * ratio))
+            previous_angle = self._hand_prev_angle
+            if previous_angle is not None:
+                delta_angle = (angle - previous_angle + 180.0) % 360.0 - 180.0
+                self._hand_rotation = (self._hand_rotation + delta_angle) % 360.0
+            self._hand_prev_angle = angle
+            self._hand_prev_point = None
+        else:
+            self._hand_pinching = False
+            point = pose.get("point")
+            if mode == "rotate" and isinstance(point, (list, tuple)) and len(point) == 2:
+                point = (max(0.0, min(1.0, float(point[0]))),
+                         max(0.0, min(1.0, float(point[1]))))
+                previous = self._hand_prev_point
+                if previous is not None:
+                    dx, dy = point[0] - previous[0], point[1] - previous[1]
+                    if abs(dx) < 0.20 and abs(dy) < 0.20:
+                        self._hand_yaw = max(-68.0, min(68.0, self._hand_yaw + dx * 205.0))
+                        self._hand_tilt = max(-55.0, min(55.0, self._hand_tilt - dy * 170.0))
+                self._hand_prev_point = point
+                if pose.get("dual"):
+                    angle = float(pose.get("angle", 0.0))
+                    if self._hand_prev_angle is not None:
+                        delta_angle = (angle - self._hand_prev_angle + 180.0) % 360.0 - 180.0
+                        self._hand_rotation = (self._hand_rotation + delta_angle) % 360.0
+                    self._hand_prev_angle = angle
+                else:
+                    self._hand_prev_angle = None
+            else:
+                self._hand_prev_point = None
+                self._hand_prev_angle = None
+        self.update()
 
     def _make_grid(self, W: int, H: int) -> QPixmap:
         """Pre-render the static grid-dot background into a transparent pixmap so
@@ -730,6 +799,12 @@ class HudCanvas(NeuralVizMixin, QOpenGLWidget):
         """Keep the GPU scene's visibility and live JARVIS state in sync."""
         neural_mode = self.hud_style in ("neural", "neural_orb")
         container = self._neural_quick_container
+        if getattr(self, "_hand_3d_active", False):
+            if self._neural_quick_root is not None:
+                self._neural_quick_root.setProperty("active", False)
+            if container is not None and container.isVisible():
+                container.hide()
+            return
         if container is None:
             if neural_mode and self._on_screen() and not self._neural_quick_attempted:
                 self._start_neural_quick()
@@ -769,6 +844,9 @@ class HudCanvas(NeuralVizMixin, QOpenGLWidget):
     def _step(self):
         self._tick += 1
         now = time.time()
+
+        if abs(self._hand_zoom_target - self._hand_zoom) > 0.001:
+            self._hand_zoom += (self._hand_zoom_target - self._hand_zoom) * 0.20
 
         # ── Live audio reactivity ────────────────────────────────────────────
         # A viseme schedule, if one is playing, gives both the level and the
@@ -892,6 +970,7 @@ class HudCanvas(NeuralVizMixin, QOpenGLWidget):
             if self._on_screen() and not (
                 self._neural_quick_ready
                 and self.hud_style in ("neural", "neural_orb")
+                and not self._hand_3d_active
             ):
                 self.update()
 
@@ -1079,7 +1158,8 @@ class HudCanvas(NeuralVizMixin, QOpenGLWidget):
             self._paint_canvas()
 
     def _paint_canvas(self):
-        if self._neural_quick_ready and self.hud_style in ("neural", "neural_orb"):
+        if (self._neural_quick_ready and self.hud_style in ("neural", "neural_orb")
+                and not self._hand_3d_active):
             self._sync_neural_quick()
             return
         p = QPainter(self)
@@ -1127,14 +1207,33 @@ class HudCanvas(NeuralVizMixin, QOpenGLWidget):
             self._avatar.paint(p, cx, _head_cy, _r_head, _main, _acc, qcol(C.BG))
 
         elif self.hud_style in ("neural", "neural_orb"):
-            if _OPENGL_CANVAS_AVAILABLE and self._neural_gl_hardware:
-                self._paint_neural_network(
-                    p, W, H, cx, cy, fw, orb_mode=self.hud_style == "neural_orb"
-                )
+            if self._hand_3d_active:
+                p.save()
+                p.translate(cx, cy)
+                p.scale(self._hand_zoom, self._hand_zoom)
+                p.translate(-cx, -cy)
+                self._paint_neural_hand_3d(p, W, H, cx, cy, fw)
+                p.restore()
             else:
-                self._paint_neural_network_scaled(
-                    p, W, H, cx, cy, fw, orb_mode=self.hud_style == "neural_orb"
-                )
+                p.save()
+                p.translate(cx, cy)
+                p.rotate(self._hand_rotation)
+                yaw = math.radians(self._hand_yaw)
+                pitch = math.radians(self._hand_tilt)
+                p.shear(math.sin(yaw) * 0.24, -math.sin(pitch) * 0.18)
+                p.scale(0.82 + 0.18 * abs(math.cos(yaw)),
+                        0.82 + 0.18 * abs(math.cos(pitch)))
+                p.scale(self._hand_zoom, self._hand_zoom)
+                p.translate(-cx, -cy)
+                if _OPENGL_CANVAS_AVAILABLE and self._neural_gl_hardware:
+                    self._paint_neural_network(
+                        p, W, H, cx, cy, fw, orb_mode=self.hud_style == "neural_orb"
+                    )
+                else:
+                    self._paint_neural_network_scaled(
+                        p, W, H, cx, cy, fw, orb_mode=self.hud_style == "neural_orb"
+                    )
+                p.restore()
 
         # JARVIS logo / reactor core — kept as the original selectable mode
         # and as a fallback if the face mesh is unavailable.
@@ -1240,6 +1339,9 @@ class NeuralImmersiveOverlay(QWidget):
         self.on_interrupt = None
         self.on_wake = None
         self.on_console = None
+        self.on_hand_control = None
+        self.on_hand_reset = None
+        self._neural_hand_view = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 10, 20, 12)
@@ -1268,12 +1370,33 @@ class NeuralImmersiveOverlay(QWidget):
         self.wake_button = self._button("SLEEP / WAKE", "#FFBF55")
         self.wake_button.clicked.connect(lambda: self.on_wake and self.on_wake())
         bar.addWidget(self.wake_button)
+        self.hand_button = self._button("HAND CONTROL", "#55E9FF")
+        self.hand_button.setToolTip(
+            "Ask for camera permission, then rotate the neural field with an open palm and resize by pinching."
+        )
+        self.hand_button.clicked.connect(
+            lambda: self.on_hand_control and self.on_hand_control()
+        )
+        bar.addWidget(self.hand_button)
+        self.hand_reset_button = self._button("RESET FIELD", "#AFC1F4")
+        self.hand_reset_button.setToolTip("Center and restore the neural field scale")
+        self.hand_reset_button.clicked.connect(
+            lambda: self.on_hand_reset and self.on_hand_reset()
+        )
+        bar.addWidget(self.hand_reset_button)
         console_button = self._button("OPEN CONSOLE", "#BFA4FF")
         console_button.clicked.connect(lambda: self.on_console and self.on_console())
         bar.addWidget(console_button)
         root.addLayout(bar)
 
         root.addWidget(self.hud, stretch=1)
+
+        if _NEURAL_HAND_WEBVIEW_AVAILABLE:
+            self._neural_hand_view = QWebEngineView(self)
+            self._neural_hand_view.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self._neural_hand_view.setStyleSheet("background: transparent; border: none;")
+            self._neural_hand_view.page().setBackgroundColor(QColor(0, 0, 0, 0))
+            self._neural_hand_view.hide()
 
         command_bar = QHBoxLayout()
         command_bar.setSpacing(7)
@@ -1347,6 +1470,24 @@ class NeuralImmersiveOverlay(QWidget):
         self.hud.muted = bool(muted)
         self.mute_button.setText("MIC  /  MUTED" if muted else "MIC  /  ON")
         self.mute_button.setStyleSheet(self._button_style("#FF5268" if muted else "#62F0B2"))
+
+    def set_hand_control_active(self, active: bool) -> None:
+        self.hand_button.setText("STOP HAND" if active else "HAND CONTROL")
+        self.hand_button.setStyleSheet(
+            self._button_style("#FF6682" if active else "#55E9FF")
+        )
+        if self._neural_hand_view is not None:
+            self._neural_hand_view.setVisible(bool(active))
+            if active:
+                self._neural_hand_view.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._neural_hand_view is not None:
+            size = 258
+            self._neural_hand_view.setGeometry(
+                max(12, self.width() - size - 22), 54, size, size
+            )
 
     @staticmethod
     def _button_style(color: str) -> str:
@@ -3730,6 +3871,7 @@ class MainWindow(QMainWindow):
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
+    _neural_hand_start_sig = pyqtSignal()     # marshal camera startup from confirmation worker to Qt
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
@@ -3848,6 +3990,7 @@ class MainWindow(QMainWindow):
         self._workspace.close_requested.connect(self._close_workspace)
         self._workspace.interrupt_requested.connect(self._do_interrupt)
         self._workspace.feature_requested.connect(self._open_holo_feature)
+        self._workspace.neural_hand_update.connect(self._on_neural_hand_update)
         self._holo_news_sig.connect(self._open_holo_news_voice)
         self._workspace.route_requested.connect(lambda destination, origin: self._show_earth(destination, origin, "flight_route"))
         self._holo_stop_sig.connect(self._workspace.stop_holo_camera)
@@ -3908,6 +4051,7 @@ class MainWindow(QMainWindow):
         self._camera_sig.connect(self._show_camera_frame)
         self._confirm_sig.connect(self._show_confirm_banner)
         self._confirm_hide_sig.connect(self._hide_confirm_banner)
+        self._neural_hand_start_sig.connect(self._start_neural_hand_control_after_confirmation)
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._clipboard_sig.connect(self._show_clipboard_panel)
@@ -3936,12 +4080,32 @@ class MainWindow(QMainWindow):
         self._immersive_overlay.on_interrupt = self._do_interrupt
         self._immersive_overlay.on_wake = self._tap_wake_manual
         self._immersive_overlay.on_console = self._leave_immersive_view
+        self._immersive_overlay.on_hand_control = self._toggle_neural_hand_control
+        self._immersive_overlay.on_hand_reset = self._reset_neural_hand_pose
         self._immersive_overlay.set_muted(self._muted)
         self._immersive_overlay.set_state(self.hud.state)
         self._immersive_overlay.hide()
         # The second canvas is dormant until its full-screen view is requested.
         self._immersive_overlay.hud._tmr.stop()
         self._immersive_open = False
+        self._neural_hand_active = False
+        self._neural_hand_page = None
+        self._neural_hand_profile = None
+        if self._immersive_overlay._neural_hand_view is not None:
+            server = self._workspace._holo_server
+            if server is not None and QWebEnginePage is not None:
+                profile = self._workspace._holo_profile
+                if profile is None:
+                    profile = QWebEngineProfile(self._immersive_overlay._neural_hand_view)
+                self._neural_hand_profile = profile
+                self._neural_hand_page = QWebEnginePage(
+                    profile, self._immersive_overlay._neural_hand_view
+                )
+                self._neural_hand_page.setBackgroundColor(QColor(0, 0, 0, 0))
+                self._neural_hand_page.featurePermissionRequested.connect(
+                    self._grant_neural_hand_camera
+                )
+                self._immersive_overlay._neural_hand_view.setPage(self._neural_hand_page)
 
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
@@ -4395,13 +4559,15 @@ class MainWindow(QMainWindow):
         Create a desktop shortcut on Windows / macOS / Linux.
         Never opens a terminal, console, or PowerShell window on any platform.
         """
+        import shlex
         import stat as _stat
-        script  = Path(__file__).resolve().parent / "main.py"
-        python  = Path(sys.executable)
+        argv, work_dir = self._autostart_target()
+        launch_args = str(Path(argv[1])) if len(argv) > 1 else ""
+        target = Path(argv[0])
         desktop = self._get_desktop_dir()
 
         # Arc-reactor icon (.ico — also exported as .png for Linux/macOS)
-        ico_path = Path(__file__).resolve().parent / "config" / "jarvis.ico"
+        ico_path = Path(work_dir) / "config" / "jarvis.ico"
         if not ico_path.exists():
             self._build_jarvis_icon(ico_path)
 
@@ -4410,12 +4576,14 @@ class MainWindow(QMainWindow):
 
             # ── Windows ───────────────────────────────────────────────────────
             if _os == "Windows":
-                pythonw  = python.parent / "pythonw.exe"
-                target   = str(pythonw if pythonw.exists() else python)
+                if not getattr(sys, "frozen", False):
+                    pythonw = target.with_name("pythonw.exe")
+                    if pythonw.is_file():
+                        target = pythonw
                 lnk      = str(desktop / "J.A.R.V.I.S.lnk")
                 icon_loc = str(ico_path) if ico_path.exists() else f"{target},0"
-                self._create_lnk_windows(lnk, target, str(script),
-                                         str(script.parent), icon_loc)
+                self._create_lnk_windows(lnk, str(target), launch_args,
+                                         work_dir, icon_loc)
 
             # ── macOS — proper .app bundle (no Terminal window) ───────────────
             elif _os == "Darwin":
@@ -4428,10 +4596,12 @@ class MainWindow(QMainWindow):
                 # Launcher executable (bash — runs as background process,
                 # macOS does NOT open Terminal for executables inside .app bundles)
                 launcher = mac_dir / "JARVIS"
+                command = " ".join(shlex.quote(arg) for arg in argv)
                 launcher.write_text(
-                    "#!/usr/bin/env bash\n"
-                    f'cd "{script.parent}"\n'
-                    f'exec "{python}" "{script}"\n'
+                    "#!/bin/sh\n"
+                    f"cd {shlex.quote(work_dir)} || exit 1\n"
+                    f"exec {command}\n",
+                    encoding="utf-8",
                 )
                 launcher.chmod(launcher.stat().st_mode
                                | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
@@ -4482,17 +4652,20 @@ class MainWindow(QMainWindow):
                     except Exception:
                         png_path = ico_path  # fallback to .ico
 
-                icon_line = f"Icon={png_path}\n" if png_path.exists() else ""
+                icon_line = (f"Icon={self._desktop_entry_path(str(png_path))}\n"
+                             if png_path.exists() else "")
                 desk = desktop / "J.A.R.V.I.S.desktop"
+                exec_line = " ".join(self._desktop_exec_arg(arg) for arg in argv)
                 desk.write_text(
                     "[Desktop Entry]\n"
                     "Name=J.A.R.V.I.S\n"
-                    f"Exec={python} {script}\n"
-                    f"Path={script.parent}\n"
+                    f"Exec={exec_line}\n"
+                    f"Path={self._desktop_entry_path(work_dir)}\n"
                     "Type=Application\n"
                     "Terminal=false\n"
                     "Categories=Utility;\n"
-                    + icon_line
+                    + icon_line,
+                    encoding="utf-8",
                 )
                 desk.chmod(desk.stat().st_mode | 0o755)
 
@@ -4542,9 +4715,137 @@ class MainWindow(QMainWindow):
         self._immersive_open = True
         self._immersive_overlay.hud.update()
 
+    def _toggle_neural_hand_control(self):
+        if self._neural_hand_active:
+            self._stop_neural_hand_control()
+            return
+        if not self._ready:
+            self._log.append_log("SYS: Complete JARVIS setup before enabling neural hand control.")
+            return
+        view = self._immersive_overlay._neural_hand_view
+        server = self._workspace._holo_server
+        if view is None or server is None or self._neural_hand_page is None:
+            self._log.append_log(
+                "ERR: Hand control needs PyQt6-WebEngine and the bundled Holo tracking assets."
+            )
+            return
+
+        # Use the same HUD confirmation banner and exact voice phrases as
+        # sensitive actions. The callback runs on core.confirm's worker thread;
+        # the signal below safely returns camera/UI work to Qt's main thread.
+        from core.confirm import request
+
+        result = request(
+            "neural-camera",
+            "Enable hand control camera",
+            "JARVIS will auto-detect and start the built-in laptop camera for local hand tracking. "
+            "A small circular preview stays at the top right. Video is processed locally, "
+            "not recorded or uploaded. Say CONFIRM ACTION or CANCEL ACTION, or use the HUD buttons.",
+            self._request_neural_hand_start,
+        )
+        if not result.startswith("[CONFIRMATION_PENDING]"):
+            self._log.append_log(f"SYS: {result}")
+
+    def _request_neural_hand_start(self) -> str:
+        self._neural_hand_start_sig.emit()
+        return "The local camera startup request was granted."
+
+    def _start_neural_hand_control_after_confirmation(self):
+        if self._neural_hand_active:
+            return
+        view = self._immersive_overlay._neural_hand_view
+        server = self._workspace._holo_server
+        if view is None or server is None or self._neural_hand_page is None:
+            self._log.append_log("ERR: Neural hand-control camera is unavailable.")
+            return
+        self._neural_hand_active = True
+        self._immersive_overlay.hud._hand_3d_active = True
+        self._immersive_overlay.hud._sync_neural_quick(force=True)
+        self._immersive_overlay.hud.update()
+        if not self._immersive_open:
+            style = self.hud.hud_style if self.hud.hud_style in ("neural", "neural_orb") else "neural"
+            self._enter_immersive_view(style)
+        self._immersive_overlay.set_hand_control_active(True)
+        self._neural_hand_btn.setText("✋ STOP")
+        self._neural_hand_btn.setStyleSheet(
+            "QPushButton { color:#FF6682; background:transparent; border:1px solid #FF6682; "
+            "border-radius:3px; padding:0 7px; }"
+        )
+        url = QUrl(server.url + "neural_control.html")
+        view = self._immersive_overlay._neural_hand_view
+        view.load(url)
+        view.show()
+        view.raise_()
+
+    def _grant_neural_hand_camera(self, origin, feature) -> None:
+        page = self._neural_hand_page
+        server = self._workspace._holo_server
+        if page is None:
+            return
+        try:
+            host = QUrl(origin).host().lower()
+            port = QUrl(origin).port()
+            expected_port = QUrl(server.url).port() if server else -1
+            is_video = feature == QWebEnginePage.Feature.MediaVideoCapture
+            allowed = self._neural_hand_active and host == "127.0.0.1" \
+                and port == expected_port and is_video
+            policy = QWebEnginePage.PermissionPolicy
+            page.setFeaturePermission(
+                origin, feature,
+                policy.PermissionGrantedByUser if allowed else policy.PermissionDeniedByUser,
+            )
+        except Exception:
+            return
+
+    def _on_neural_hand_update(self, pose: object) -> None:
+        if not self._neural_hand_active:
+            return
+        try:
+            self._immersive_overlay.hud.apply_neural_hand_pose(pose)
+        except RuntimeError:
+            pass
+
+    def _reset_neural_hand_pose(self) -> None:
+        for canvas in (self.hud, self._immersive_overlay.hud):
+            canvas._hand_rotation = 0.0
+            canvas._hand_yaw = 0.0
+            canvas._hand_tilt = 0.0
+            canvas._hand_zoom = 1.0
+            canvas._hand_zoom_target = 1.0
+            canvas._hand_prev_point = None
+            canvas._hand_pinching = False
+            canvas._hand_prev_angle = None
+            canvas.update()
+
+    def _stop_neural_hand_control(self) -> None:
+        self._neural_hand_active = False
+        self._immersive_overlay.hud._hand_3d_active = False
+        self._immersive_overlay.hud.update()
+        view = self._immersive_overlay._neural_hand_view
+        if view is not None:
+            try:
+                view.page().runJavaScript(
+                    "if (window.jarvisStopNeuralHands) window.jarvisStopNeuralHands();"
+                )
+                view.hide()
+            except RuntimeError:
+                pass
+        if hasattr(self, "_immersive_overlay"):
+            self._immersive_overlay.set_hand_control_active(False)
+        if hasattr(self, "_neural_hand_btn"):
+            self._neural_hand_btn.setText("✋ HAND")
+            self._neural_hand_btn.setStyleSheet(f"""
+                QPushButton {{ color:#55E9FF; background:transparent;
+                    border:1px solid {C.BORDER_A}; border-radius:3px; padding:0 7px; }}
+                QPushButton:hover {{ color:{C.WHITE}; border-color:#55E9FF;
+                    background:{C.PRI_GHO}; }}
+            """)
+
     def _leave_immersive_view(self):
         if not getattr(self, "_immersive_open", False):
             return
+        if self._neural_hand_active:
+            self._stop_neural_hand_control()
         self._immersive_overlay.hide()
         self._immersive_overlay.hud._tmr.stop()
         self.hud._tmr.setInterval(16)
@@ -4718,6 +5019,21 @@ class MainWindow(QMainWindow):
             lambda _checked=False: self._enter_immersive_view("neural")
         )
         lay.addWidget(self._neural_view_btn)
+        self._neural_hand_btn = QPushButton("✋ HAND")
+        self._neural_hand_btn.setFixedHeight(26)
+        self._neural_hand_btn.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
+        self._neural_hand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._neural_hand_btn.setToolTip(
+            "Enable local hand control for rotating and resizing the neural field"
+        )
+        self._neural_hand_btn.setStyleSheet(f"""
+            QPushButton {{ color:#55E9FF; background:transparent;
+                border:1px solid {C.BORDER_A}; border-radius:3px; padding:0 7px; }}
+            QPushButton:hover {{ color:{C.WHITE}; border-color:#55E9FF;
+                background:{C.PRI_GHO}; }}
+        """)
+        self._neural_hand_btn.clicked.connect(self._toggle_neural_hand_control)
+        lay.addWidget(self._neural_hand_btn)
         lay.addStretch()
 
         mid = QVBoxLayout(); mid.setSpacing(1)
@@ -5685,20 +6001,55 @@ class MainWindow(QMainWindow):
 
     # ── Auto-start ──────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _autostart_target() -> tuple[list[str], str]:
+        """Return argv and the app's real working directory for login launch.
+
+        Login services start without the same current directory as a terminal.
+        Keep paths as argv elements until each OS-specific file format is written,
+        and support frozen builds where there is no separately launchable main.py.
+        """
+        if getattr(sys, "frozen", False):
+            # In a one-file PyInstaller build, __file__ points into a temporary
+            # extraction directory that is removed when this process exits.
+            base = Path(sys.executable).resolve().parent
+            return [str(Path(sys.executable).resolve())], str(base)
+        base = Path(__file__).resolve().parent
+        return [str(Path(sys.executable).resolve()), str(base / "main.py")], str(base)
+
+    @staticmethod
+    def _desktop_exec_arg(value: str) -> str:
+        """Quote one argument according to the freedesktop Exec field rules."""
+        escaped = (value.replace("\\", "\\\\").replace('"', '\\"')
+                   .replace("$", "\\$").replace("`", "\\`").replace("%", "%%"))
+        return f'"{escaped}"'
+
+    @staticmethod
+    def _desktop_entry_path(value: str) -> str:
+        """Escape a path value in a freedesktop .desktop file."""
+        return (value.replace("\\", "\\\\").replace("\n", "\\n")
+                .replace("\t", "\\t").replace("\r", "\\r")
+                .replace(" ", "\\s"))
+
     def _check_autostart(self) -> bool:
         """Returns True if auto-start is currently registered on this OS."""
         try:
             if _OS == "Windows":
                 import winreg
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                    r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
                 try:
-                    winreg.QueryValueEx(key, "JARVIS_AI")
-                    return True
+                    key = winreg.OpenKey(
+                        winreg.HKEY_CURRENT_USER,
+                        r"Software\Microsoft\Windows\CurrentVersion\Run",
+                        0, winreg.KEY_READ,
+                    )
                 except FileNotFoundError:
                     return False
-                finally:
-                    winreg.CloseKey(key)
+                with key:
+                    try:
+                        winreg.QueryValueEx(key, "JARVIS_AI")
+                        return True
+                    except FileNotFoundError:
+                        return False
             elif _OS == "Darwin":
                 return (Path.home() / "Library" / "LaunchAgents"
                         / "com.jarvis.assistant.plist").exists()
@@ -5710,39 +6061,44 @@ class MainWindow(QMainWindow):
     def _toggle_autostart(self):
         currently_on = self._check_autostart()
         try:
-            script = str(Path(__file__).resolve().parent / "main.py")
+            argv, work_dir = self._autostart_target()
             if _OS == "Windows":
                 import winreg
-                reg = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                    r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_ALL_ACCESS)
-                if currently_on:
-                    winreg.DeleteValue(reg, "JARVIS_AI")
-                else:
-                    pythonw = Path(sys.executable).parent / "pythonw.exe"
-                    exe = str(pythonw if pythonw.exists() else sys.executable)
-                    winreg.SetValueEx(reg, "JARVIS_AI", 0, winreg.REG_SZ,
-                                      f'"{exe}" "{script}"')
-                winreg.CloseKey(reg)
+                run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+                with winreg.CreateKeyEx(
+                    winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE
+                ) as reg:
+                    if currently_on:
+                        winreg.DeleteValue(reg, "JARVIS_AI")
+                    else:
+                        target = Path(argv[0])
+                        # pythonw avoids opening a console at login; a packaged
+                        # GUI executable should be launched directly.
+                        if not getattr(sys, "frozen", False):
+                            pythonw = target.with_name("pythonw.exe")
+                            if pythonw.is_file():
+                                target = pythonw
+                        command = " ".join(
+                            f'"{arg}"' for arg in [str(target), *argv[1:]]
+                        )
+                        winreg.SetValueEx(
+                            reg, "JARVIS_AI", 0, winreg.REG_SZ, command
+                        )
             elif _OS == "Darwin":
+                import plistlib
                 plist_dir = Path.home() / "Library" / "LaunchAgents"
                 plist_dir.mkdir(parents=True, exist_ok=True)
                 plist = plist_dir / "com.jarvis.assistant.plist"
                 if currently_on:
                     plist.unlink(missing_ok=True)
                 else:
-                    plist.write_text(
-                        '<?xml version="1.0" encoding="UTF-8"?>\n'
-                        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-                        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-                        '<plist version="1.0"><dict>\n'
-                        '  <key>Label</key><string>com.jarvis.assistant</string>\n'
-                        '  <key>ProgramArguments</key><array>\n'
-                        f'    <string>{sys.executable}</string>\n'
-                        f'    <string>{script}</string>\n'
-                        '  </array>\n'
-                        '  <key>RunAtLoad</key><true/>\n'
-                        '</dict></plist>\n'
-                    )
+                    payload = {
+                        "Label": "com.jarvis.assistant",
+                        "ProgramArguments": argv,
+                        "WorkingDirectory": work_dir,
+                        "RunAtLoad": True,
+                    }
+                    plist.write_bytes(plistlib.dumps(payload, fmt=plistlib.FMT_XML))
             else:
                 desk_dir = Path.home() / ".config" / "autostart"
                 desk_dir.mkdir(parents=True, exist_ok=True)
@@ -5750,14 +6106,20 @@ class MainWindow(QMainWindow):
                 if currently_on:
                     desk.unlink(missing_ok=True)
                 else:
+                    exec_line = " ".join(
+                        self._desktop_exec_arg(arg) for arg in argv
+                    )
                     desk.write_text(
                         "[Desktop Entry]\n"
                         f"Name={self._assistant_name}\n"
-                        f"Exec={sys.executable} {script}\n"
+                        f"Exec={exec_line}\n"
+                        f"Path={self._desktop_entry_path(work_dir)}\n"
                         "Type=Application\nTerminal=false\n"
                         "X-GNOME-Autostart-enabled=true\n"
                     )
-            enabled = not currently_on
+            enabled = self._check_autostart()
+            if enabled == currently_on:
+                raise RuntimeError("the operating system did not update its auto-start entry")
             self._update_autostart_btn(enabled)
             self._log.append_log(
                 f"SYS: Auto-start {'enabled' if enabled else 'disabled'}.")
@@ -6083,6 +6445,36 @@ class MainWindow(QMainWindow):
                     self._log.append_log(f"SYS: {result}")
             except Exception as e:
                 self._log.append_log(f"ERR: Voice ID — {e}")
+
+    def set_voice_id_enabled(self, enabled: bool):
+        """Reflect the enforced Voice ID state in the settings control."""
+        button = getattr(self, "_voice_id_btn", None)
+        if button is None:
+            return
+        if _OS != "Windows":
+            button.setText("🔐  VOICE ID: WINDOWS ONLY")
+            button.setEnabled(False)
+            return
+        if enabled:
+            button.setText("🔐  VOICE ID: ACTIVE")
+            button.setStyleSheet(
+                f"QPushButton {{ color: {C.GREEN}; background: #082116; "
+                f"border: 1px solid {C.GREEN_D}; border-radius: 3px; }}"
+            )
+            button.setToolTip(
+                "Owner speaker verification is required for sensitive actions and spoken approvals. "
+                "Right-click to replace or remove the local profile."
+            )
+        else:
+            button.setText("🔐  VOICE ID: OFF")
+            button.setStyleSheet(
+                f"QPushButton {{ color: {C.TEXT_MED}; background: transparent; "
+                f"border: 1px solid {C.BORDER}; border-radius: 3px; }}"
+            )
+            button.setToolTip(
+                "Click to enroll your voice if no profile exists, or enable an existing profile. "
+                "Right-click for enrollment and profile removal options."
+            )
 
     def _voice_id_menu(self, pos):
         if not self.on_voice_id_action:
@@ -6483,6 +6875,8 @@ class MainWindow(QMainWindow):
 
 
     def closeEvent(self, event):
+        if getattr(self, "_neural_hand_active", False):
+            self._stop_neural_hand_control()
         try:
             self._workspace.shutdown_holo()
         except Exception:
@@ -6630,6 +7024,9 @@ class JarvisUI:
     @on_voice_id_action.setter
     def on_voice_id_action(self, cb):
         self._win.on_voice_id_action = cb
+
+    def set_voice_id_enabled(self, enabled: bool):
+        self._win.set_voice_id_enabled(enabled)
 
     def set_audio_level(self, level: float) -> None:
         """Thread-safe: feed a 0.0–1.0 live audio level to the HUD waveform.

@@ -315,6 +315,16 @@ def _voice_id_authorized() -> bool:
         return False
 
 
+def voice_id_required() -> bool:
+    """Expose the configured owner-check state to the confirmation gate."""
+    return _voice_id_is_required()
+
+
+def authorize_voice_confirmation() -> bool:
+    """Check speaker identity before a spoken approval can run an action."""
+    return not _voice_id_is_required() or _voice_id_authorized()
+
+
 def mark_untrusted_seen() -> None:
     """Call by injection_guard.wrap_untrusted() whenever external content
     entered the model's context this turn."""

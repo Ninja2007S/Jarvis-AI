@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import ipaddress
+import math
 import re
 import socket
 import threading
@@ -189,8 +190,9 @@ def _sample_tree(root: Path) -> list[dict]:
 class HoloGestureServer:
     """Serve bundled assets and the selected notes folder only on loopback."""
 
-    def __init__(self, event_callback=None):
+    def __init__(self, event_callback=None, neural_control_callback=None):
         owner = self
+        self._neural_control_callback = neural_control_callback
         self._notes_root = _SAMPLE_ROOT
         self._news_items: list[dict] = []
         self._news_images: dict[int, tuple[bytes, str]] = {}
@@ -262,6 +264,8 @@ class HoloGestureServer:
                 path = unquote(request_url.path)
                 if path in {"/", "/holo.html"}:
                     target = _ASSET_ROOT / "holo.html"
+                elif path == "/neural_control.html":
+                    target = _ASSET_ROOT / "neural_control.html"
                 elif path == "/api/preferences":
                     with owner._prefs_lock:
                         payload = {"accent": _load_holo_accent()}
@@ -331,13 +335,13 @@ class HoloGestureServer:
                     content_type = "application/octet-stream"
                 elif target.suffix == ".glb":
                     content_type = "model/gltf-binary"
-                if target.name == "holo.html":
+                if target.name in {"holo.html", "neural_control.html"}:
                     content_type = "text/html; charset=utf-8"
                 self._send(200, body, content_type)
 
             def do_POST(self):
                 path = urlsplit(self.path).path
-                if path not in {"/api/state", "/api/diag", "/api/preferences"}:
+                if path not in {"/api/state", "/api/diag", "/api/preferences", "/api/neural-control"}:
                     self._send(404, b"not found", "text/plain; charset=utf-8")
                     return
                 try:
@@ -346,6 +350,34 @@ class HoloGestureServer:
                         self._send(413, b"request too large", "text/plain; charset=utf-8")
                         return
                     data = json.loads(self.rfile.read(length) or b"{}")
+                    if path == "/api/neural-control":
+                        mode = str(data.get("mode", "idle"))
+                        if mode not in {"idle", "rotate", "scale"}:
+                            self._send(400, b'{"ok":false}', "application/json; charset=utf-8")
+                            return
+                        pose = {"mode": mode}
+                        if mode == "rotate":
+                            x, y = float(data.get("x", 0.5)), float(data.get("y", 0.5))
+                            angle = float(data.get("angle", 0.0))
+                            dual = bool(data.get("dual", False))
+                            if not all(math.isfinite(value) for value in (x, y, angle)):
+                                self._send(400, b'{"ok":false}', "application/json; charset=utf-8")
+                                return
+                            pose.update(point=(max(0.0, min(1.0, x)),
+                                               max(0.0, min(1.0, y))),
+                                        angle=max(-360.0, min(360.0, angle)), dual=dual)
+                        elif mode == "scale":
+                            span, angle = float(data.get("span", 0.0)), float(data.get("angle", 0.0))
+                            if not all(math.isfinite(value) for value in (span, angle)):
+                                self._send(400, b'{"ok":false}', "application/json; charset=utf-8")
+                                return
+                            pose.update(span=max(0.0, min(1.5, span)),
+                                        angle=max(-360.0, min(360.0, angle)))
+                        callback = owner._neural_control_callback
+                        if callback is not None:
+                            callback(pose)
+                        self._send(200, b'{"ok":true}', "application/json; charset=utf-8")
+                        return
                     if path == "/api/preferences":
                         accent = str(data.get("accent", ""))[:16]
                         with owner._prefs_lock:

@@ -43,6 +43,7 @@ import sys
 import traceback
 import base64
 import os
+import secrets
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -82,6 +83,7 @@ from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import audio_devices
 from core                      import security
+from core                      import voice_id
 from core                      import injection_guard
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
@@ -629,6 +631,21 @@ def _contains_cancelled_error(exc: BaseException) -> bool:
 class JarvisLive:
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
+        self._voice_id_enabled = voice_id.is_enabled()
+        self._voice_id_audio_lock = threading.Lock()
+        self._voice_id_audio_chunks: deque[tuple[float, bytes]] = deque(
+            maxlen=max(1, int(SEND_SAMPLE_RATE * 6 / CHUNK_SIZE))
+        )
+        self._voice_id_turn_audio = b""
+        self._voice_id_audio_turn_active = False
+        self._voice_id_enroll_lock = threading.Lock()
+        self._voice_id_enroll_active = False
+        self._voice_id_enroll_chunks: list[bytes] = []
+        self._voice_id_enroll_samples = 0
+        self._voice_id_enroll_challenge = ""
+        self._voice_id_enroll_matched = False
+        self._voice_id_enroll_transcript = ""
+        self._voice_id_enroll_candidate: tuple[bytes, float] | None = None
         self._asst_name     = "JARVI    S"   # updated each session from config
         self.session              = None
         self.audio_in_queue       = None
@@ -698,6 +715,8 @@ class JarvisLive:
         self.ui.on_voice_change   = self._on_voice_change     # voice picker → rebuild session
         self.ui.on_audio_device_change = self._on_audio_device_change
         self.ui.on_voice_personality_change = self._on_voice_personality_change
+        self.ui.on_voice_id_action = self._voice_id_action
+        self.ui.set_voice_id_enabled(self._voice_id_enabled)
         self._reconnect_event: asyncio.Event | None = None
         self._reconnect_keep = True   # False → next rebuild drops the resumption handle
 
@@ -1064,6 +1083,200 @@ class JarvisLive:
         manual = self._dashboard.get_manual_url()
         return url, key, f"{url}/auto-login?key={key}", manual
 
+    @staticmethod
+    def _voice_text_key(text: str) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+", str(text or "").casefold()))
+
+    def _voice_id_action(self, action: str) -> str:
+        """UI callback for local Voice ID enrollment, toggle, and removal."""
+        action = str(action or "").strip().lower()
+        try:
+            if action == "toggle":
+                if voice_id.is_enabled():
+                    voice_id.disable()
+                    self._voice_id_enabled = False
+                    self.ui.set_voice_id_enabled(False)
+                    with self._voice_id_audio_lock:
+                        self._voice_id_audio_chunks.clear()
+                        self._voice_id_turn_audio = b""
+                    return "Voice ID disabled. Sensitive actions will follow their normal confirmation policy."
+                if not voice_id.is_enrolled():
+                    return self._voice_id_action("enroll")
+                voice_id.enable()
+                self._voice_id_enabled = True
+                self.ui.set_voice_id_enabled(True)
+                return "Voice ID enabled. Sensitive actions and spoken approvals will check your speaker profile."
+
+            if action == "enroll":
+                if not voice_id.backend_ready():
+                    return "Voice ID is unavailable. Install requirements-voice-id.txt with Python 3.12, then restart JARVIS."
+                # The challenge is transcribed by the existing Live session.
+                # A deliberate enrollment click may therefore wake a sleeping
+                # session so the already-open mic can validate the sentence.
+                self.wake(reason="Voice ID enrollment")
+                challenge = secrets.choice((
+                    "Copper leaves drift past the harbor before sunrise.",
+                    "Please verify my voice before Jarvis changes anything.",
+                    "A quiet silver train crosses the valley tonight.",
+                    "Blue lanterns glow beside the old stone bridge.",
+                ))
+                with self._voice_id_enroll_lock:
+                    self._voice_id_enroll_active = True
+                    self._voice_id_enroll_chunks = []
+                    self._voice_id_enroll_samples = 0
+                    self._voice_id_enroll_challenge = challenge
+                    self._voice_id_enroll_matched = False
+                    self._voice_id_enroll_transcript = ""
+                    self._voice_id_enroll_candidate = None
+                self.ui.show_content(
+                    "VOICE ID ENROLLMENT",
+                    f"Speak this sentence once, clearly, after starting enrollment:\n\n{challenge}\n\n"
+                    "Keep JARVIS quiet while you speak. Audio is processed locally; only an encrypted voice profile is saved.",
+                )
+                threading.Timer(
+                    40.0, self._expire_voice_id_enrollment, args=(challenge,),
+                ).start()
+                return f"Enrollment started. Speak the sentence shown in the HUD: {challenge}"
+
+            if action == "remove":
+                voice_id.remove_profile()
+                self._voice_id_enabled = False
+                self.ui.set_voice_id_enabled(False)
+                with self._voice_id_audio_lock:
+                    self._voice_id_audio_chunks.clear()
+                    self._voice_id_turn_audio = b""
+                return "Encrypted Voice ID profile removed and speaker checks disabled."
+        except Exception as exc:
+            return f"Voice ID could not be updated: {type(exc).__name__}: {exc}"
+        return "Unknown Voice ID action."
+
+    def _expire_voice_id_enrollment(self, challenge: str) -> None:
+        with self._voice_id_enroll_lock:
+            if self._voice_id_enroll_challenge != challenge:
+                return
+            self._voice_id_enroll_active = False
+            self._voice_id_enroll_chunks.clear()
+            self._voice_id_enroll_samples = 0
+            self._voice_id_enroll_candidate = None
+            self._voice_id_enroll_challenge = ""
+            self._voice_id_enroll_matched = False
+            self._voice_id_enroll_transcript = ""
+        self.ui.write_log("SEC: Voice ID enrollment expired; no profile was saved.")
+
+    def _capture_voice_id_enrollment(self, indata, frames: int) -> None:
+        """Collect a short sample from the already-open mic stream; never save raw audio."""
+        if self.ui.muted or self._phone_active:
+            return
+        with self._speaking_lock:
+            if self._is_speaking:
+                return
+        data = indata.tobytes()
+        ready_sample = None
+        with self._voice_id_enroll_lock:
+            if not self._voice_id_enroll_active:
+                return
+            self._voice_id_enroll_chunks.append(data)
+            self._voice_id_enroll_samples += int(frames)
+            # Five seconds is long enough for the challenge and gives ECAPA a
+            # steadier profile than the previous minimum-length sample.
+            if self._voice_id_enroll_samples >= SEND_SAMPLE_RATE * 5:
+                candidate = b"".join(self._voice_id_enroll_chunks)
+                self._voice_id_enroll_chunks = []
+                self._voice_id_enroll_samples = 0
+                self._voice_id_enroll_active = False
+                if self._voice_id_enroll_matched:
+                    ready_sample = candidate
+                    self._voice_id_enroll_challenge = ""
+                    self._voice_id_enroll_matched = False
+                    self._voice_id_enroll_transcript = ""
+                else:
+                    self._voice_id_enroll_candidate = (candidate, time.monotonic())
+        if ready_sample is not None:
+            self._begin_voice_id_save(ready_sample)
+
+    def _accept_voice_id_transcript(self, transcript: str) -> None:
+        normalized = self._voice_text_key(transcript)
+        ready_sample = None
+        with self._voice_id_enroll_lock:
+            challenge = self._voice_id_enroll_challenge
+            if not challenge:
+                return
+            self._voice_id_enroll_transcript = (
+                f"{self._voice_id_enroll_transcript} {normalized}".strip()[-500:]
+            )
+            if self._voice_text_key(challenge) in self._voice_id_enroll_transcript:
+                self._voice_id_enroll_matched = True
+                candidate = self._voice_id_enroll_candidate
+                if candidate and time.monotonic() - candidate[1] <= 30.0:
+                    ready_sample = candidate[0]
+                    self._voice_id_enroll_candidate = None
+                    self._voice_id_enroll_challenge = ""
+                    self._voice_id_enroll_matched = False
+                    self._voice_id_enroll_transcript = ""
+            elif (self._voice_id_enroll_candidate
+                  and time.monotonic() - self._voice_id_enroll_candidate[1] > 30.0):
+                self._voice_id_enroll_candidate = None
+        if ready_sample is not None:
+            self._begin_voice_id_save(ready_sample)
+
+    def _begin_voice_id_save(self, pcm: bytes) -> None:
+        def save_profile():
+            try:
+                voice_id.enroll(np.frombuffer(pcm, dtype=np.int16))
+                self._voice_id_enabled = voice_id.is_enabled()
+                self.ui.set_voice_id_enabled(self._voice_id_enabled)
+                self.ui.write_log("SEC: Voice ID enrollment complete. Raw recording discarded; encrypted speaker profile stored locally.")
+            except Exception as exc:
+                self.ui.write_log(f"SEC: Voice ID enrollment failed: {type(exc).__name__}: {exc}")
+        threading.Thread(target=save_profile, name="voice-id-enrollment", daemon=True).start()
+
+    def _append_voice_id_audio(self, data: bytes) -> None:
+        if not self._voice_id_enabled or not data:
+            return
+        samples = np.frombuffer(data, dtype=np.int16)
+        if not samples.size:
+            return
+        rms = float(np.sqrt(np.mean(np.square(samples.astype(np.float32) / 32768.0))))
+        # Keep quiet placeholders in the ring so old speech expires by elapsed
+        # microphone time instead of lingering indefinitely when the room goes
+        # quiet. Only non-quiet chunks are joined into the verification sample.
+        chunk = bytes(data) if rms >= 0.0025 else b""
+        with self._voice_id_audio_lock:
+            self._voice_id_audio_chunks.append((time.monotonic(), chunk))
+
+    def _expire_voice_id_audio(self) -> None:
+        """Advance the rolling audio window without retaining blocked audio."""
+        if not self._voice_id_enabled:
+            return
+        with self._voice_id_audio_lock:
+            self._voice_id_audio_chunks.append((time.monotonic(), b""))
+
+    def _snapshot_voice_id_audio(self, *, new_turn: bool = False) -> None:
+        if not self._voice_id_enabled:
+            return
+        with self._voice_id_audio_lock:
+            recent = b"".join(
+                chunk for _timestamp, chunk in self._voice_id_audio_chunks if chunk
+            )
+            self._voice_id_audio_chunks.clear()
+            if new_turn:
+                self._voice_id_turn_audio = recent
+            elif recent:
+                self._voice_id_turn_audio = (self._voice_id_turn_audio + recent)[-192000:]
+
+    def _verify_voice_id_for_current_turn(self) -> bool:
+        if not self._voice_id_enabled or not voice_id.is_enabled():
+            return not voice_id.is_enabled()
+        with self._voice_id_audio_lock:
+            pcm = self._voice_id_turn_audio
+        if len(pcm) < int(SEND_SAMPLE_RATE * voice_id.MIN_AUDIO_SECONDS * 2):
+            self.ui.write_log("SEC: Voice ID needs more clear speech; spoken approval denied.")
+            return False
+        matched, score = voice_id.verify(np.frombuffer(pcm, dtype=np.int16))
+        if not matched:
+            self.ui.write_log(f"SEC: Voice ID did not match (score {score:.2f}); spoken approval denied.")
+        return matched
+
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
@@ -1073,7 +1286,11 @@ class JarvisLive:
         if self._wake_enabled and not self._awake:
             self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
             return
-        security.mark_user_turn_started()
+        security.mark_user_turn_started(voice_verified=True)
+        with self._voice_id_audio_lock:
+            self._voice_id_turn_audio = b""
+            self._voice_id_audio_chunks.clear()
+            self._voice_id_audio_turn_active = False
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -1757,6 +1974,7 @@ class JarvisLive:
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
+            self._capture_voice_id_enrollment(indata, frames)
             # ── Wake-word gate ───────────────────────────────────────────────
             # While asleep, the mic audio NEVER goes to Gemini (nothing is
             # streamed, so JARVIS can't respond to speech not addressed to it and
@@ -1765,6 +1983,7 @@ class JarvisLive:
             # only a queue push, so the audio path is never slowed. When wake word
             # is off (default) or we're awake, this is a single boolean check.
             if self._wake_enabled and not self._awake:
+                self._expire_voice_id_audio()
                 clap = self._clap_detector
                 if clap is not None:
                     clap.feed(indata)
@@ -1818,6 +2037,7 @@ class JarvisLive:
                 # detector still gates all audio while speech is audible, and
                 # gates the quiet gap whenever it is ready.
                 if jarvis_speaking or detector_can_interrupt:
+                    self._expire_voice_id_audio()
                     return
             else:
                 with self._wake_interrupt_lock:
@@ -1833,9 +2053,11 @@ class JarvisLive:
                 try:
                     if not self._echo.is_user_speech(
                             indata, SEND_SAMPLE_RATE, _pcm_level(indata)):
+                        self._expire_voice_id_audio()
                         return
                     self._tail_until = 0.0      # a real voice ends the tail early
                 except Exception:
+                    self._expire_voice_id_audio()
                     return
             elif self._echo._hist:
                 self._echo.reset()
@@ -1845,10 +2067,12 @@ class JarvisLive:
             # opens it, which is the whole point: nothing leaves the machine
             # unless you are holding the key.
             if self._ptt_enabled and not self._ptt_held:
+                self._expire_voice_id_audio()
                 return
 
             if not self.ui.muted and not self._phone_active:
                 data = indata.tobytes()
+                self._append_voice_id_audio(data)
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
                     {"data": data, "mime_type": "audio/pcm"}
@@ -1860,6 +2084,8 @@ class JarvisLive:
                     self.ui.set_audio_level(_pcm_level(indata))
                 except Exception:
                     pass
+            else:
+                self._expire_voice_id_audio()
 
         try:
             def _open_mic(dev):
@@ -2052,15 +2278,27 @@ class JarvisLive:
                                 # turn_complete from the interrupted response.
                                 self._remember_spoken_language(txt)
                                 self._last_user_speech = time.monotonic()
+                                self._accept_voice_id_transcript(txt)
+                                with self._voice_id_audio_lock:
+                                    first_audio_transcript = not self._voice_id_audio_turn_active
+                                    self._voice_id_audio_turn_active = True
+                                self._snapshot_voice_id_audio(new_turn=first_audio_transcript)
                                 security.mark_user_turn_started()
                                 if not voice_confirmation_consumed:
-                                    decision = confirm_gate.resolve_by_voice(txt)
+                                    decision = await asyncio.to_thread(
+                                        confirm_gate.resolve_by_voice, txt
+                                    )
                                     if decision:
                                         voice_confirmation_consumed = True
                                         if decision == "manual_click_required":
                                             self.ui.write_log(
                                                 "SEC: This action needs a manual HUD click; "
                                                 "the voice phrase did not approve it."
+                                            )
+                                        elif decision == "voice_id_required":
+                                            self.ui.write_log(
+                                                "SEC: Voice ID did not verify this speaker; "
+                                                "spoken approval denied. Use the HUD click."
                                             )
                                         else:
                                             self.ui.write_log(
@@ -2074,6 +2312,8 @@ class JarvisLive:
 
                         if sc.turn_complete:
                             self._assistant_turn_pending = False
+                            with self._voice_id_audio_lock:
+                                self._voice_id_audio_turn_active = False
                             if self._turn_done_event:
                                 self._turn_done_event.set()
 
@@ -2877,7 +3117,11 @@ class JarvisLive:
             hide = self.ui.hide_confirm,
             log  = self.ui.write_log,
         )
-        security.bind(logger=self.ui.write_log)
+        security.bind(
+            logger=self.ui.write_log,
+            voice_id_required=voice_id.is_enabled,
+            voice_id_verifier=self._verify_voice_id_for_current_turn,
+        )
         _ledger_ok, _ledger_status = security.verify_log()
         self.ui.write_log(
             ("SEC: " if _ledger_ok else "SECURITY ALERT: ") + _ledger_status

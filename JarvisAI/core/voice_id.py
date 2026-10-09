@@ -79,7 +79,18 @@ def _set_enabled(enabled: bool) -> None:
             ) from e
     config["voice_id_enabled"] = bool(enabled)
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(config, indent=4), encoding="utf-8")
+    # Replace atomically so a crash or power loss cannot truncate the shared
+    # credential file while toggling Voice ID. The temporary path is ignored
+    # by the project's Git rules as well.
+    temp_path = CONFIG_FILE.with_name("api_keys.json.tmp")
+    try:
+        temp_path.write_text(json.dumps(config, indent=4), encoding="utf-8")
+        os.replace(temp_path, CONFIG_FILE)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def enable() -> None:

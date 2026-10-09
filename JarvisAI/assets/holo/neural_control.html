@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>JARVIS Neural Hand Control</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin:0; width:258px; height:258px; overflow:hidden; background:transparent; }
+  body { color:#dffbff; font:10px "Consolas","Cascadia Mono",monospace; }
+  #lens { position:relative; width:250px; height:250px; margin:4px; overflow:hidden;
+    border-radius:50%; border:1px solid rgba(85,233,255,.9);
+    background:radial-gradient(circle at 50% 42%,#132b38 0,#061019 58%,#02060d 100%);
+    box-shadow:0 0 12px rgba(51,220,255,.32),inset 0 0 22px rgba(72,208,255,.18); }
+  #cam { width:100%; height:100%; object-fit:cover; transform:scaleX(-1);
+    opacity:.87; background:#030a10; }
+  #shade { position:absolute; inset:0; border-radius:50%; pointer-events:none;
+    background:linear-gradient(180deg,rgba(1,7,13,.68),transparent 29%,transparent 63%,rgba(1,7,13,.8)); }
+  #top { position:absolute; inset:10px 18px auto; display:flex; justify-content:space-between;
+    align-items:center; color:#9af4ff; text-shadow:0 0 6px #00c9ec; font-size:9px; letter-spacing:.1em; }
+  #status { position:absolute; left:20px; right:20px; bottom:20px; text-align:center;
+    color:#c2fcff; text-shadow:0 0 7px #00c9ec; min-height:24px; line-height:1.3; }
+  #tracking { position:absolute; width:9px; height:9px; display:none; border-radius:50%;
+    border:1px solid white; background:#44f5ff; box-shadow:0 0 10px #44f5ff; pointer-events:none; }
+</style>
+</head>
+<body>
+  <section id="lens" aria-label="Local hand control camera">
+    <video id="cam" autoplay muted playsinline></video>
+    <div id="shade"></div>
+    <div id="top"><span>NEURAL CONTROL</span><span id="live">LOCAL</span></div>
+    <div id="status">WAITING FOR JARVIS APPROVAL</div>
+    <i id="tracking"></i>
+  </section>
+<script type="module">
+const video = document.getElementById('cam');
+const status = document.getElementById('status');
+const live = document.getElementById('live');
+const marker = document.getElementById('tracking');
+const virtualCamera = /(phone\s*link|virtual|remote|obs|droidcam|iriun|camo|epoccam|manycam|snap\s*camera|vcam|xsplit)/i;
+const builtInCamera = /(integrated|internal|built[ -]?in|webcam|laptop|lifecam|brio|c920|c922|uvc)/i;
+let cameraStream = null, landmarker = null, lastVideoTime = -1, pinchActive = false;
+let delegate = 'none', lastPost = 0, lastHandPoint = null, smooth = null;
+let frameLoop = 0, stopped = false;
+
+function setStatus(text){ status.textContent = text; }
+async function listCameras(){
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cameras = devices.filter(d => d.kind === 'videoinput' && d.label && !virtualCamera.test(d.label));
+    let pick = cameras.find(d => builtInCamera.test(d.label));
+    // Device names vary by manufacturer. If Windows exposes no familiar
+    // integrated-camera name, choose the first non-virtual local camera.
+    if (!pick && cameras.length) pick = cameras[0];
+    return pick || null;
+  } catch (_) { return null; }
+}
+
+async function loadTracker(){
+  if (landmarker) return;
+  setStatus('LOADING LOCAL HAND TRACKER…');
+  const mp = await import('/vendor/vision_bundle.mjs');
+  const files = await mp.FilesetResolver.forVisionTasks('/vendor/wasm');
+  const options = delegateName => ({
+    baseOptions:{modelAssetPath:'/vendor/hand_landmarker.task',delegate:delegateName},
+    runningMode:'VIDEO',numHands:2,minHandDetectionConfidence:.6,
+    minHandPresenceConfidence:.6,minTrackingConfidence:.6
+  });
+  try { landmarker = await mp.HandLandmarker.createFromOptions(files, options('GPU')); delegate='GPU'; }
+  catch (_) { landmarker = await mp.HandLandmarker.createFromOptions(files, options('CPU')); delegate='CPU'; }
+}
+
+async function startCamera(){
+  if (cameraStream) return;
+  let discoveryStream = null;
+  try {
+    setStatus('OPENING LOCAL CAMERA…');
+    // Open a temporary default stream only after the HUD's explicit approval.
+    // This grants the local WebEngine origin access so device labels become
+    // available; then immediately stop it and select the integrated camera.
+    discoveryStream = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
+    const selected = await listCameras();
+    discoveryStream.getTracks().forEach(track=>track.stop());
+    discoveryStream = null;
+    if(!selected){
+      setStatus('NO CAMERA FOUND · CHECK WINDOWS PRIVACY SETTINGS');
+      return;
+    }
+    setStatus(`STARTING ${selected.label.slice(0,24).toUpperCase()}…`);
+    cameraStream = await navigator.mediaDevices.getUserMedia({video:{
+      deviceId:{exact:selected.deviceId},width:{ideal:1280},height:{ideal:720}
+    },audio:false});
+    video.srcObject = cameraStream;
+    await video.play();
+    await loadTracker();
+    live.textContent=`LIVE · ${delegate}`;
+    setStatus('ONE PALM: ROTATE 3D · PINCH BOTH: SCALE');
+    stopped=false; frameLoop=requestAnimationFrame(trackFrame);
+  } catch (error) {
+    if(discoveryStream) discoveryStream.getTracks().forEach(track=>track.stop());
+    if(cameraStream) cameraStream.getTracks().forEach(track=>track.stop());
+    cameraStream=null; video.srcObject=null;
+    setStatus(error?.name==='NotAllowedError'?'CAMERA PERMISSION DENIED':
+      error?.name==='NotReadableError'?'CAMERA BUSY · CLOSE OTHER APPS':'CAMERA UNAVAILABLE · RETRY');
+  }
+}
+
+async function sendPose(pose){
+  try {
+    await fetch('/api/neural-control',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(pose)});
+  } catch (_) {}
+}
+
+function describeHand(landmarks){
+  const palm=Math.max(.04,Math.hypot(landmarks[0].x-landmarks[9].x,landmarks[0].y-landmarks[9].y));
+  const pinchRatio=Math.hypot(landmarks[4].x-landmarks[8].x,landmarks[4].y-landmarks[8].y)/palm;
+  const open=[8,12,16,20].every(i=>landmarks[i].y<landmarks[i-2].y);
+  const pinching=pinchRatio<.40;
+  const point={x:1-landmarks[9].x,y:landmarks[9].y};
+  const pinchPoint={x:1-(landmarks[4].x+landmarks[8].x)/2,
+                    y:(landmarks[4].y+landmarks[8].y)/2};
+  return {point,pinchPoint,pinching,open};
+}
+
+function trackFrame(now){
+  if (stopped || !cameraStream) return;
+  if (video.currentTime!==lastVideoTime && video.videoWidth && now-lastPost>=72){
+    lastVideoTime=video.currentTime; lastPost=now;
+    try {
+      const found=landmarker.detectForVideo(video,now).landmarks||[];
+      const hands=found.filter(hand=>hand&&hand.length>20).map(describeHand)
+        .sort((a,b)=>a.point.x-b.point.x);
+      if (hands.length>=2 && hands[0].pinching && hands[1].pinching){
+        const a=hands[0].pinchPoint,b=hands[1].pinchPoint;
+        const center={x:(a.x+b.x)/2,y:(a.y+b.y)/2};
+        const span=Math.hypot(b.x-a.x,b.y-a.y);
+        const angle=Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI;
+        smooth=center;
+        const r=document.getElementById('lens').getBoundingClientRect();
+        marker.style.display='block'; marker.style.left=`${20+smooth.x*(r.width-40)}px`;
+        marker.style.top=`${25+smooth.y*(r.height-60)}px`;
+        setStatus('PINCH BOTH · SPREAD / CLOSE TO SCALE · TWIST TO ROLL');
+        sendPose({mode:'scale',span,angle}); lastHandPoint=true;
+      } else {
+        const openHands=hands.filter(hand=>hand.open);
+        if(openHands.length){
+          const dual=openHands.length>=2;
+          const point=dual?{
+            x:(openHands[0].point.x+openHands[1].point.x)/2,
+            y:(openHands[0].point.y+openHands[1].point.y)/2
+          }:openHands[0].point;
+          const angle=dual?Math.atan2(openHands[1].point.y-openHands[0].point.y,
+                                     openHands[1].point.x-openHands[0].point.x)*180/Math.PI:0;
+          smooth=smooth?{x:smooth.x+(point.x-smooth.x)*.42,y:smooth.y+(point.y-smooth.y)*.42}:point;
+          const r=document.getElementById('lens').getBoundingClientRect();
+          marker.style.display='block'; marker.style.left=`${20+smooth.x*(r.width-40)}px`;
+          marker.style.top=`${25+smooth.y*(r.height-60)}px`;
+          setStatus(dual?'TWO PALMS · MOVE TO ROTATE · TWIST TO ROLL':'ONE PALM · MOVE TO ROTATE 3D');
+          sendPose({mode:'rotate',x:smooth.x,y:smooth.y,dual,angle}); lastHandPoint=true;
+        } else {
+          marker.style.display='none';
+          setStatus(hands.length>=2?'PINCH WITH BOTH HANDS TO RESIZE':'SHOW ONE OR TWO HANDS');
+          if(lastHandPoint){sendPose({mode:'idle'});lastHandPoint=null;}
+          smooth=null;
+        }
+      }
+    } catch (_) { setStatus('HAND TRACKING FRAME SKIPPED'); }
+  }
+  frameLoop=requestAnimationFrame(trackFrame);
+}
+
+async function stopCamera(){
+  stopped=true; cancelAnimationFrame(frameLoop); frameLoop=0;
+  if(cameraStream){cameraStream.getTracks().forEach(track=>track.stop());cameraStream=null;}
+  video.srcObject=null; marker.style.display='none'; smooth=null; lastHandPoint=null;
+  pinchActive=false;
+  live.textContent='LOCAL';
+  setStatus('CAMERA STOPPED');
+  try { await sendPose({mode:'idle'}); } catch (_) {}
+}
+
+window.jarvisStopNeuralHands=stopCamera;
+window.jarvisStartNeuralHands=startCamera;
+// Python only loads this page after the user approves from JARVIS's own
+// confirmation banner, so camera startup can begin immediately here.
+startCamera();
+</script>
+</body>
+</html>

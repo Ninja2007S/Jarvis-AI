@@ -244,6 +244,7 @@ class HudWorkspace(QWidget):
     holo_event = pyqtSignal(str, str)
     news_image_loaded = pyqtSignal(int, str, bytes, str)
     feature_requested = pyqtSignal(str)
+    neural_hand_update = pyqtSignal(object)
 
     _TABS = (
         ("gestures", "HOLO HANDS"), ("video", "MEDIA"), ("web", "WEB"), ("images", "IMAGES"),
@@ -376,7 +377,8 @@ class HudWorkspace(QWidget):
         if self._holo_view:
             self._configure_webview(self._holo_view)
             self._holo_server = HoloGestureServer(
-                lambda event, card: self.holo_event.emit(event, card)
+                lambda event, card: self.holo_event.emit(event, card),
+                lambda pose: self.neural_hand_update.emit(pose),
             )
             if QWebEnginePage is not None and QWebEngineProfile is not None:
                 self._holo_profile = QWebEngineProfile(self._holo_view)

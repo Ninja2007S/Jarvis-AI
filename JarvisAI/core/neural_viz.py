@@ -251,6 +251,49 @@ class NeuralVizMixin:
         self._neural_layouts = {False: self._layout_synapse(rng),
                                 True: self._layout_orb(rng)}
         self._build_orb_assets(rng)
+        self._build_hand_3d_assets()
+
+    def _build_hand_3d_assets(self) -> None:
+        """Embed the existing visualization graphs in 3D without replacing them.
+
+        Particle IDs, original edge rows, tree nodes/parents, regions, dust,
+        stars, and sphere vertices all come from ``_neural_layouts`` and
+        ``_neural_sphere``. We add only a stable depth coordinate to each
+        existing XY element; no replacement neurons or edges are generated.
+        """
+        self._hand_3d_layouts = {}
+        for orb, layout in self._neural_layouts.items():
+            tree = layout["tree"]
+            tree_z = []
+            for i, parent in enumerate(tree["par"]):
+                if parent < 0:
+                    tree_z.append(0.0)
+                else:
+                    seed = tree["seed"][i]
+                    depth = tree["dep"][i]
+                    bend = math.sin(seed * 1.73 + i * 0.037) * (0.10 + min(4, depth) * 0.035)
+                    tree_z.append(max(-0.72, min(0.72, tree_z[parent] * 0.78 + bend)))
+
+            particle_z = []
+            for x, y, _radius, _color, seed, _drift, cluster in layout["particles"]:
+                z = (math.sin(seed * 1.41 + x * 2.7) * 0.34
+                     + math.cos(seed * 0.73 + y * 2.1) * 0.22
+                     + math.sin(cluster * 1.91) * 0.12)
+                particle_z.append(z)
+
+            center_z = [math.sin(i * 1.91) * 0.24 for i in range(len(layout["centers"]))]
+            dust_z = [math.sin(off * 1.6 + x * 2.0) * 0.48
+                      for x, _y, _size, _color, off in layout["dust"]]
+            star_z = [((layer - 1) * 0.46 + math.sin(off * 1.3 + x) * 0.18)
+                      for x, _y, _size, off, layer, _tint in layout["stars"]]
+            self._hand_3d_layouts[orb] = {
+                "layout": layout,
+                "tree_z": tree_z,
+                "particle_z": particle_z,
+                "center_z": center_z,
+                "dust_z": dust_z,
+                "star_z": star_z,
+            }
 
     def _layout_synapse(self, rng) -> dict:
         """Visualization 1: wide field, seven regions, trunks from the core."""
@@ -429,6 +472,277 @@ class NeuralVizMixin:
         p.setCompositionMode(OVER)
         p.setOpacity(1.0)
         self._nrl_tags(v, pos)
+
+    def _paint_neural_hand_3d(self, p: QPainter, W: float, H: float,
+                              cx: float, cy: float, fw: float) -> None:
+        """Render the selected original network with a real XYZ camera.
+
+        The 2D graph's particle IDs, edge rows, branch parents, colors, and
+        labels are preserved exactly. ``_build_hand_3d_assets`` supplies only
+        stable depth offsets for those same source elements.
+        """
+        orb = self.hud_style == "neural_orb"
+        source = self._hand_3d_layouts[orb]
+        lay = source["layout"]
+        phase = self._neural_phase
+        energy, flash = _clamp(self._neural_energy), _clamp(self._neural_flash)
+        amp = _clamp(self._amp_disp)
+        active = self.state in ("THINKING", "PROCESSING") or self.speaking
+        motion = 1.0 if active else 0.42
+        if orb:
+            sx = sy = fw * 0.175
+            sz = fw * 0.31
+        else:
+            sx = min(W * 0.56, H * 0.78)
+            sy = min(H * 0.54, W * 0.38)
+            sz = min(sx, sy) * 0.88
+        unit = max(1.0, (sx + sy) * 0.5)
+
+        yaw = math.radians(getattr(self, "_hand_yaw", 0.0)) + phase * 0.035 * motion
+        pitch = math.radians(getattr(self, "_hand_tilt", 0.0))
+        roll = math.radians(getattr(self, "_hand_rotation", 0.0))
+        cyaw, syaw = math.cos(yaw), math.sin(yaw)
+        cpitch, spitch = math.cos(pitch), math.sin(pitch)
+        croll, sroll = math.cos(roll), math.sin(roll)
+        camera = 5.0
+
+        def project(x, y, z, depth_ratio=None):
+            # Convert the original XY layout and its stable depth into XYZ,
+            # rotate in world space, then perspective-project into the HUD.
+            x, y = x * sx / unit, y * sy / unit
+            z = z * (sz / unit if depth_ratio is None else depth_ratio)
+            x1, z1 = x * cyaw + z * syaw, -x * syaw + z * cyaw
+            y2, z2 = y * cpitch - z1 * spitch, y * spitch + z1 * cpitch
+            x3, y3 = x1 * croll - y2 * sroll, x1 * sroll + y2 * croll
+            factor = camera / max(camera * 0.48, camera - z2)
+            return cx + x3 * unit * factor, cy - y3 * unit * factor, z2
+
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        p.setCompositionMode(OVER)
+        p.setOpacity(1.0)
+        p.fillRect(QRectF(0, 0, W, H), QColor(3, 5, 14))
+        palette = self._neural_rgb
+
+        # Original nebula pools and stars, now placed at the same volume depths.
+        for i, (x, y, radius, color, strength) in enumerate(lay["nebula"]):
+            z = source["center_z"][i] if i < len(source["center_z"]) else 0.0
+            px, py, _ = project(x, y, z)
+            rad = radius * max(sx, sy) * 0.42
+            grad = QRadialGradient(px, py, max(1.0, rad))
+            rgb = palette[color]
+            grad.setColorAt(0.0, _rgba(rgb, 40 * strength))
+            grad.setColorAt(0.48, _rgba(rgb, 17 * strength))
+            grad.setColorAt(1.0, _rgba(rgb, 0))
+            p.setPen(NOPEN); p.setBrush(QBrush(grad))
+            p.drawEllipse(QRectF(px-rad, py-rad, 2*rad, 2*rad))
+
+        p.setCompositionMode(PLUS)
+        stars = {}
+        for i, (x, y, size, off, layer, tint) in enumerate(lay["stars"]):
+            z = source["star_z"][i]
+            px, py, depth = project(x, y, z)
+            tw = 0.5 + 0.5 * math.sin(phase * (0.5 + 0.25 * layer) + off)
+            alpha = 26 + 120 * tw * (0.30 + energy * 0.70) * (0.6 + 0.25 * layer)
+            band = 0 if alpha < 55 else (1 if alpha < 95 else 2)
+            radius = size * (0.45 + 0.18 * band) * (1.0 + depth * 0.08)
+            _bucket(stars, (tint, band), _dots).addEllipse(
+                QRectF(px-radius, py-radius, radius*2, radius*2))
+        p.setPen(NOPEN)
+        for (tint, band), path in stars.items():
+            rgb = _mix(palette[tint], WHITE, 0.45) if tint < 7 else (190, 208, 255)
+            p.setBrush(QBrush(_rgba(rgb, (70, 130, 205)[band])))
+            p.drawPath(path)
+
+        dust_paths = {}
+        for i, (x, y, size, color, off) in enumerate(lay["dust"]):
+            tw = 0.5 + 0.5 * math.sin(phase * 0.8 + off)
+            dx = x + math.sin(phase * 0.3 + off) * 0.01 * lay["dscale"] * motion
+            dy = y + math.cos(phase * 0.27 + off) * 0.01 * lay["dscale"] * motion
+            px, py, _ = project(dx, dy, source["dust_z"][i])
+            radius = size * (0.7 + 0.5 * tw)
+            _bucket(dust_paths, (color, tw >= 0.5), _dots).addEllipse(
+                QRectF(px-radius, py-radius, radius*2, radius*2))
+        for (color, bright), path in dust_paths.items():
+            p.setBrush(QBrush(_rgba(palette[color], 120 if bright else 55)))
+            p.drawPath(path)
+
+        # Original branch graph. Parent-child connections and all original
+        # branch colors remain unchanged; only a depth coordinate is added.
+        tree = lay["tree"]
+        tree_pos = []
+        tree_paths, branch_glows = {}, []
+        front_wave = (phase * (0.075 + 0.05 * energy)) % 1.55
+        shock = (1.0 - flash) * 1.45 if flash > 0.03 else None
+        for i, (x, y, parent) in enumerate(zip(tree["x"], tree["y"], tree["par"])):
+            seed, depth = tree["seed"][i], tree["dep"][i]
+            amt = (0.004 + 0.007 * (depth + 1)) * lay["sway"] * motion
+            a = phase * 0.55 + seed
+            x += math.sin(a) * amt
+            y += math.cos(a * 0.83) * amt
+            z = source["tree_z"][i]
+            point = project(x, y, z)
+            tree_pos.append(point)
+            if parent < 0:
+                continue
+            px, py, pz = tree_pos[parent]
+            qx, qy, qz = point
+            bend = (seed - math.pi) / math.pi * 0.34 + math.sin(phase * 0.9 + seed * 2.0) * 0.08 * motion
+            mx = (px + qx) * 0.5 - (qy - py) * bend
+            my = (py + qy) * 0.5 + (qx - px) * bend
+            lit = math.exp(-((tree["dist"][i] - front_wave) ** 2) * 260.0)
+            if shock is not None:
+                lit += 1.25 * math.exp(-((tree["dist"][i] - shock) ** 2) * 160.0)
+            hot = lit > 0.30 or math.sin(phase * 1.1 + seed * 5.0) > 0.965
+            bucket = (tree["col"][i], 1 if hot else 0)
+            path = _bucket(tree_paths, bucket)
+            path.moveTo(px, py); path.quadTo(mx, my, qx, qy)
+            if hot and lit > 0.55 and (i & 1) == 0 and len(branch_glows) < 38:
+                branch_glows.append((qx, qy, tree["col"][i], lit))
+
+        p.setBrush(NOBRUSH)
+        for (color, hot), path in tree_paths.items():
+            rgb = palette[color]
+            p.setPen(QPen(_rgba(rgb, 50 + 42*energy if hot else 24 + 12*energy),
+                          1.5 if hot else 0.72, SOLID, ROUND, ROUNDJ))
+            p.drawPath(path)
+            if hot:
+                p.setPen(QPen(_rgba(_mix(rgb, WHITE, 0.35), 175), 0.72, SOLID, ROUND, ROUNDJ))
+                p.drawPath(path)
+
+        # Original animated filaments, reprojected from their moving 3D control
+        # points rather than overlaid as flat screen-space curves.
+        nfil = lay["fil"]
+        for i in range(nfil):
+            if orb:
+                angle = TAU*i/nfil + math.sin(phase*0.2+i)*0.06*motion
+                reach = 1.9 + 1.5*(0.5+0.5*math.sin(i*4.71+0.4))
+                start = (math.cos(angle)*1.14, math.sin(angle)*1.14, math.sin(angle*1.7)*0.42)
+                end = (math.cos(angle+0.55)*reach, math.sin(angle+0.55)*reach,
+                       math.sin(angle+0.55)*0.62)
+                bend_scale = 0.52
+            else:
+                angle = TAU*i/nfil + math.sin(phase*0.22+i)*0.075*motion
+                length = 0.36+0.40*(0.5+0.5*math.sin(i*4.71+0.4))
+                if i % 6 in (0, 1): length = 0.92+0.42*(0.5+0.5*math.sin(i*2.37))
+                core_x, core_y = lay["core"]
+                start = (core_x, core_y, 0.0)
+                end = (core_x+math.cos(angle)*length, core_y+math.sin(angle)*length,
+                       math.sin(angle*1.7)*0.58)
+                bend_scale = 0.28
+            s, e = project(*start), project(*end)
+            dx, dy = e[0]-s[0], e[1]-s[1]
+            bend = math.sin(phase*0.75+i*0.93)*bend_scale*motion
+            c1 = (s[0]+dx*0.34-dy*bend, s[1]+dy*0.34+dx*bend)
+            c2 = (s[0]+dx*0.70+dy*bend, s[1]+dy*0.70-dx*bend)
+            path = QPainterPath(QPointF(s[0],s[1]))
+            path.cubicTo(QPointF(*c1), QPointF(*c2), QPointF(e[0],e[1]))
+            wave = 0.5+0.5*math.sin(phase*1.2-i*0.66)
+            rgb = self._neural_ramp[((i % BANDS)*(RAMP_N//BANDS)+int(phase*2.2)) % RAMP_N]
+            p.setPen(QPen(_rgba(rgb, 25+42*energy+40*wave*energy+35*flash),
+                          0.65+wave*0.55, SOLID, ROUND, ROUNDJ))
+            p.drawPath(path)
+
+        # Original particle graph and exact source edge topology.
+        particle_pos = []
+        particle_dots, particle_trails, edge_paths, cross_paths = {}, {}, {}, []
+        waves = [0.5+0.5*math.sin(phase*(0.78+r*0.075)+r*1.91) for r in range(7)]
+        fire = (self._neural_call_count*3+(1 if self.speaking else 0)) % 7
+        for i, (x, y, radius, color, off, drift, cluster) in enumerate(lay["particles"]):
+            drive = 0.16+0.44*energy+0.22*waves[cluster]+flash*(0.42 if cluster==fire else 0.09)
+            amt = drift*lay["dscale"]*motion
+            x += math.sin(phase*(0.65+drift*18+cluster*0.035)+off)*amt
+            y += math.cos(phase*(0.58+cluster*0.027)+off)*amt
+            z = source["particle_z"][i] + math.sin(phase*0.21+off)*drift*0.45
+            px, py, depth = project(x, y, z)
+            particle_pos.append((px, py, depth))
+            pulse = 0.5+0.5*math.sin(phase*(0.9+drift*12+cluster*0.06)+off+cluster*0.93)
+            brightness = min(1.0,0.18+drive*0.55+pulse*0.20+flash*0.22)
+            bucket = min(2,int(brightness*3))
+            rr = radius*(0.72+0.70*pulse+energy*0.36)*(1.0+depth*0.05)
+            _bucket(particle_dots,(color,bucket),_dots).addEllipse(QRectF(px-rr,py-rr,2*rr,2*rr))
+            angle = off+phase*(0.16+0.10*motion)+cluster*0.71
+            ux, uy = math.cos(angle), math.sin(angle)
+            trail = (2.6+radius*3.6)*(0.70+pulse*0.62+drive*0.48)
+            path = _bucket(particle_trails,(color,bucket))
+            path.moveTo(px-ux*trail*0.82,py-uy*trail*0.82)
+            path.lineTo(px+ux*trail*0.34,py+uy*trail*0.34)
+
+        local, cross = {}, []
+        for ei, (a,b,color,off,direction,dst) in enumerate(lay["edges"]):
+            st, en = particle_pos[a], particle_pos[b]
+            pulse = 0.5+0.5*math.sin(phase*direction*(1.1+energy+color*0.08)+off+color*1.27)
+            if dst != color:
+                cross.append((st,en,color,dst,pulse,off,direction)); continue
+            bend = math.sin(off+phase*(0.24+color*0.025))*(3+12*energy)*lay["bend"]
+            path = _bucket(local,(lay["ccol"][color],0 if pulse<0.48 else (1 if pulse<0.82 else 2)))
+            path.moveTo(st[0],st[1]); path.quadTo((st[0]+en[0])*0.5+bend,
+                (st[1]+en[1])*0.5-bend*0.4,en[0],en[1])
+
+        p.setPen(NOPEN)
+        for (color, band), path in particle_dots.items():
+            p.setBrush(QBrush(_rgba(palette[color], (82,145,210)[band])))
+            p.drawPath(path)
+        for (color, band), path in particle_trails.items():
+            p.setPen(QPen(_rgba(palette[color], (30,55,88)[band]),0.8,SOLID,ROUND,ROUNDJ))
+            p.drawPath(path)
+        p.setBrush(NOBRUSH)
+        for (color, band), path in local.items():
+            rgb=palette[color]
+            p.setPen(QPen(_rgba(rgb,(28,46,68)[band]),(2.1,2.8,3.5)[band],SOLID,ROUND,ROUNDJ)); p.drawPath(path)
+            p.setPen(QPen(_rgba(rgb,(75,130,200)[band]),(0.55,0.78,1.0)[band],SOLID,ROUND,ROUNDJ)); p.drawPath(path)
+        for st,en,color,dst,pulse,off,direction in cross:
+            ca,cb=palette[lay["ccol"][color]],palette[lay["ccol"][dst]]
+            path=QPainterPath(QPointF(st[0],st[1]))
+            bend=math.sin(off+phase*0.3)*(en[0]-st[0])*0.12
+            path.quadTo((st[0]+en[0])*0.5-bend,(st[1]+en[1])*0.5+bend,en[0],en[1])
+            grad=QLinearGradient(QPointF(st[0],st[1]),QPointF(en[0],en[1]))
+            alpha=38+100*pulse+25*energy+35*flash
+            grad.setColorAt(0.0,_rgba(ca,alpha)); grad.setColorAt(1.0,_rgba(cb,alpha))
+            p.setPen(QPen(QBrush(grad),0.7+1.0*pulse,SOLID,ROUND,ROUNDJ)); p.drawPath(path)
+
+        # The original orbital globe mesh is retained only for Visualization 2.
+        if orb:
+            mesh={}
+            sph=self._neural_sphere
+            sphere_pos=[project(x,y,z,depth_ratio=sx/unit) for x,y,z in sph]
+            for a,b in self._neural_sphere_edges:
+                band=self._neural_sphere_band[a]
+                layer=0 if (sphere_pos[a][2]+sphere_pos[b][2])*0.5 < -0.1 else 1
+                path=_bucket(mesh,(band,layer))
+                path.moveTo(sphere_pos[a][0],sphere_pos[a][1]); path.lineTo(sphere_pos[b][0],sphere_pos[b][1])
+            shift=int(phase*3.2+self._neural_call_count*5)%RAMP_N
+            for (band,layer),path in mesh.items():
+                rgb=self._neural_ramp[(band*(RAMP_N//BANDS)+shift)%RAMP_N]
+                p.setPen(QPen(_rgba(rgb,30 if layer==0 else 122+int(energy*52)),
+                              0.65 if layer==0 else 1.0,SOLID,ROUND,ROUNDJ)); p.drawPath(path)
+
+        p.setCompositionMode(OVER)
+        # Labels are attached to the original cluster centres and rotate with
+        # their actual regions rather than being fixed to the screen.
+        flow=int(energy*100)
+        for ci,(x,y,color) in enumerate(lay["centers"]):
+            lx,ly,depth=project(x,y,source["center_z"][ci])
+            if depth < -sz*0.12: continue
+            title=next((name for name,c in REGIONS if c==color),"NEURAL REGION")
+            width=126 if orb else 118; height=26
+            box=QRectF(_clamp(lx-width/2,4,W-width-4),_clamp(ly-height/2,22,H-height-28),width,height)
+            rgb=palette[color]
+            p.setPen(QPen(_rgba(rgb,145),0.8)); p.setBrush(QColor(5,8,20,205)); p.drawRoundedRect(box,2,2)
+            p.setPen(QPen(_rgba(rgb,240))); p.setFont(QFont("Consolas",max(6,int(fw*0.010)),QFont.Weight.Bold))
+            p.drawText(QRectF(box.x()+5,box.y()+2,box.width()-10,11),Qt.AlignmentFlag.AlignLeft,title)
+            p.setPen(QPen(QColor(205,214,232,195))); p.setFont(QFont("Consolas",max(5,int(fw*0.008))))
+            p.drawText(QRectF(box.x()+5,box.y()+13,box.width()-10,10),Qt.AlignmentFlag.AlignLeft,
+                       f"{len(lay['members'][ci])} nodes · signal {flow:02d}%")
+
+        state_label="SPEAKING" if self.speaking else ("THINKING" if active else
+                     ("LISTENING" if self.state=="LISTENING" else "STANDBY"))
+        name="NEURAL ORB" if orb else "SYNAPSE FIELD"
+        p.setFont(QFont("Consolas",8,QFont.Weight.Bold)); p.setPen(QPen(QColor(190,210,235,215)))
+        p.drawText(QRectF(20,12,W-40,16),Qt.AlignmentFlag.AlignLeft,
+                   f"{name}  /  3D {state_label}")
+        p.drawText(QRectF(20,12,W-40,16),Qt.AlignmentFlag.AlignRight,
+                   f"ACTIVITY {flow:02d}%  ·  CALL {self._neural_call_count:04d}")
 
     # ---------------------------------------------------------- backdrop
     def _nrl_nebula(self, v):
@@ -940,15 +1254,22 @@ class NeuralVizMixin:
         p.setOpacity(1.0)
 
         # 4. rotate and project the mesh
-        yaw = phase * (0.12 + 0.23 * energy + 0.11 * amp)
-        pitch = 0.24 + sin(phase * 0.23) * 0.10
-        ca, sa, cp, sp = cos(yaw), sin(yaw), cos(pitch), sin(pitch)
+        # The procedural drift keeps the globe alive at rest; hand yaw/pitch
+        # add directly to its 3D orientation when the local camera is active.
+        yaw = phase * (0.12 + 0.23 * energy + 0.11 * amp) \
+              + math.radians(getattr(self, "_hand_yaw", 0.0))
+        pitch = 0.24 + sin(phase * 0.23) * 0.10 \
+                + math.radians(getattr(self, "_hand_tilt", 0.0))
+        roll = math.radians(getattr(self, "_hand_rotation", 0.0))
+        ca, sa, cp, sp, cr, sr = cos(yaw), sin(yaw), cos(pitch), sin(pitch), cos(roll), sin(roll)
 
         def project(x, y, z):
             xr, zr = x * ca + z * sa, -x * sa + z * ca
             yr, z2 = y * cp - zr * sp, y * sp + zr * cp
             f = 1.0 / max(0.78, 1.0 - z2 * 0.12)
-            return cx + xr * R * f, cy + yr * R * f, z2
+            # Roll the already yawed/pitched 3D point around the camera axis.
+            x2, y2 = xr * cr - yr * sr, xr * sr + yr * cr
+            return cx + x2 * R * f, cy + y2 * R * f, z2
 
         sph, bands = self._neural_sphere, self._neural_sphere_band
         n = len(sph)

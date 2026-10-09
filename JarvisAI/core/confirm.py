@@ -124,6 +124,12 @@ def resolve(accepted: bool, source: str = "HUD") -> None:
     with _lock:
         p, _pending = _pending, None
 
+    _finish(p, accepted, source)
+
+
+def _finish(p: _Pending | None, accepted: bool, source: str) -> None:
+    """Complete an already-claimed confirmation without holding `_lock`."""
+
     if _hide_cb:
         try:
             _hide_cb()
@@ -153,12 +159,12 @@ def resolve(accepted: bool, source: str = "HUD") -> None:
 
 
 def resolve_by_voice(text: str) -> str | None:
-    """Resolve a pending action only for a short, exact spoken phrase.
+    """Resolve a pending action only for an exact phrase and verified speaker.
 
-    This is not speaker identification: the active microphone transcript is
-    treated as the user's authorization. Requiring an explicit phrase, and only
-    accepting it while a live confirmation is pending, avoids treating ordinary
-    speech such as "yes" as approval.
+    Requiring an explicit phrase, and only accepting it while a live confirmation
+    is pending, avoids treating ordinary speech such as "yes" as approval.
+    Speaker-model inference runs outside `_lock`, so a slow check never blocks a
+    manual HUD click; the pending object is checked again before consuming it.
     """
     phrase = " ".join(re.findall(r"[a-z0-9]+", str(text or "").casefold()))
     accepted = {"confirm", "confirm action", "approve", "approve action"}
@@ -180,7 +186,20 @@ def resolve_by_voice(text: str) -> str | None:
         if decision and pending.key in _MANUAL_CLICK_ONLY_KEYS:
             _log(f"SEC: Voice approval ignored — manual HUD click required for {pending.title}.")
             return "manual_click_required"
-    resolve(decision, source="voice")
+    if decision:
+        try:
+            from core import security
+            if not security.authorize_voice_confirmation():
+                _log(f"SEC: Voice ID blocked spoken approval for {pending.title}.")
+                return "voice_id_required"
+        except Exception:
+            _log(f"SEC: Voice ID check unavailable; spoken approval denied for {pending.title}.")
+            return "voice_id_required"
+    with _lock:
+        if _pending is not pending:
+            return "confirmation_changed"
+        _pending = None
+    _finish(pending, decision, source="voice")
     return label
 
 

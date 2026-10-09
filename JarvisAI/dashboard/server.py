@@ -680,10 +680,27 @@ class DashboardServer:
 
 
         @app.get("/auto-login")
-        async def auto_login(key: str = ""):
+        async def auto_login(req: Request, key: str = ""):
             """QR code target — validates one-time key, creates session, redirects phone."""
+            from core import security
+            client_ip = req.client.host if req.client else "unknown"
+            # QR auto-login creates the same authenticated session as /login.
+            # Apply the same per-source throttle here too; otherwise a leaked or
+            # guessed six-character pairing code could be brute-forced through
+            # this GET route without touching the /login limiter.
+            if self._rate_limited(client_ip):
+                security.audit("dashboard_login", "auto_login", "SENSITIVE", "denied",
+                               f"rate-limited: {client_ip}")
+                return HTMLResponse(
+                    "<!doctype html><html><body><h2>Too many pairing attempts</h2>"
+                    "<p>Wait a minute, then generate a new QR code in JARVIS.</p></body></html>",
+                    status_code=429,
+                    headers={"Cache-Control": "no-store"},
+                )
             now = time.time()
             if not key or key not in self._pending_keys or self._pending_keys[key] <= now:
+                security.audit("dashboard_login", "auto_login", "SENSITIVE", "denied",
+                               f"invalid or expired QR key: {client_ip}")
                 return HTMLResponse("""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width">
 <style>
@@ -702,6 +719,8 @@ class DashboardServer:
             self._token_keys[tok] = key
             self._aes_key(key)
             self._device_sessions[dev_tok] = {"session_key": key}
+            security.audit("dashboard_login", "auto_login", "SENSITIVE", "ran",
+                           f"QR pairing: {client_ip}")
 
             if self._connect_callback:
                 self._connect_callback()
@@ -724,7 +743,7 @@ class DashboardServer:
   setTimeout(function(){{location.replace('/')}},400);
 </script>
 <p>Connecting to JARVIS…</p>
-</body></html>""")
+</body></html>""", headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
         @app.post("/api/device-login")
         async def device_login_ep(req: Request):
