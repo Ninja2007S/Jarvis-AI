@@ -366,6 +366,13 @@ def tier_for(name: str, params: dict | None = None) -> str:
     if name == "holo_gestures":
         action = str((params or {}).get("action", "show")).strip().lower()
         return TIER_SAFE if action in {"close", "stop", "hide"} else TIER_DANGEROUS
+    if name == "youtube_video":
+        # These controls only affect the embedded HUD player. External browser
+        # control remains a separate browser_control tool and requires approval.
+        action = str((params or {}).get("action", "")).strip().lower()
+        if action in {"pause", "play_pause", "fast_forward", "seek", "stop",
+                      "sound_on", "unmute", "sound_off", "mute"}:
+            return TIER_SAFE
     base = _TIERS.get(name, TIER_SENSITIVE)
     if base == TIER_DANGEROUS:
         return base
@@ -638,6 +645,18 @@ def guard(name: str, params: dict, run: Callable[[], str]) -> str:
     Returns the string that should go back to the model as the tool result.
     """
     tier = tier_for(name, params)
+
+    # HUD media controls skip the confirmation banner, but they must still be
+    # traceable to a fresh user request so untrusted page/email content cannot
+    # silently stop playback or enable audio.
+    if (name == "youtube_video"
+            and str((params or {}).get("action", "")).strip().lower()
+            in {"pause", "play_pause", "fast_forward", "seek", "stop",
+                "sound_on", "unmute", "sound_off", "mute"}
+            and _untrusted_context()):
+        audit("call", name, tier, "denied", "HUD media control requested from untrusted context")
+        return ("I won't change HUD playback based on content I just read. "
+                "Ask me directly to control the video.")
 
     # 1) provenance check — a state-changing action should not fire off the
     #    back of content Jarvis merely read (a web page, email, OCR, or file)

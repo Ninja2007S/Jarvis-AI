@@ -96,7 +96,14 @@ class StartupVideoSplash(QWidget):
 
 
 def create_startup_splash() -> StartupVideoSplash | None:
-    """Build the splash when the optional intro file exists; otherwise skip."""
+    """Build the splash when enabled and the optional intro file exists."""
+    try:
+        from memory.config_manager import get_startup_video_enabled
+        if not get_startup_video_enabled():
+            return None
+    except Exception as exc:
+        # A broken preference read must not prevent the normal HUD from opening.
+        print(f"[Startup] Could not read intro preference; using default: {exc}")
     path = startup_video_path()
     if not path.is_file():
         return None

@@ -433,13 +433,21 @@ TOOL_DECLARATIONS = [
     {
         "name": "system_status",
         "description": (
-            "Returns real-time system metrics: CPU usage, RAM, GPU load, CPU temperature, "
-            "uptime, and process count. Use when the user asks about computer performance, "
-            "temperature, memory, or resource usage."
+            "Returns real-time system metrics: CPU/GPU load, RAM, storage, network throughput, "
+            "battery, temperatures when exposed, processor/device details, uptime, and process count. "
+            "Use when the user asks about computer performance, "
+            "temperature, memory, storage, network, battery, or resource usage. When the user "
+            "asks to show a specific metric, set focus to cpu, gpu, ram, disk, network, or overview."
         ),
         "parameters": {
             "type": "OBJECT",
-            "properties": {},
+            "properties": {
+                "focus": {
+                    "type": "STRING",
+                    "enum": ["overview", "cpu", "gpu", "ram", "disk", "network"],
+                    "description": "Which telemetry panel to highlight; use ram for memory/RAM questions.",
+                },
+            },
         }
     },
     {
@@ -694,7 +702,7 @@ class JarvisLive:
         # request that follows "Hey Jarvis" instead of losing them to inference
         # latency. This buffer is cleared on every interrupt and never written
         # to disk.
-        self._wake_interrupt_audio = deque(maxlen=12)  # ~768 ms at 16 kHz
+        self._wake_interrupt_audio = deque(maxlen=24)  # ~1.5 s at 16 kHz
         self._wake_interrupt_lock = threading.Lock()
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
@@ -1482,11 +1490,17 @@ class JarvisLive:
                     pending_mic.get_nowait()
                 except Exception:
                     break
-            for data in wake_audio:
-                try:
-                    pending_mic.put_nowait({"data": data, "mime_type": "audio/pcm"})
-                except Exception:
-                    break
+            # Send the captured wake phrase and beginning of the request as one
+            # PCM frame. Many tiny websocket writes add avoidable scheduling
+            # latency and can let the live turn-end detector see speech as
+            # fragmented input.
+            try:
+                pending_mic.put_nowait({
+                    "data": b"".join(wake_audio),
+                    "mime_type": "audio/pcm",
+                })
+            except Exception:
+                pass
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -1815,7 +1829,7 @@ class JarvisLive:
                     lambda: security.guard(name, args, get_system_status),
                 )
                 if hasattr(self.ui, "show_live_panel"):
-                    self.ui.show_live_panel("system")
+                    self.ui.show_live_panel("system", args.get("focus"))
                 result = str(r)
 
             elif name == "manage_monitor":
@@ -2018,7 +2032,8 @@ class JarvisLive:
             # voice interruptions until JARVIS is restarted.
             det = self._wake_detector
             detector_can_interrupt = bool(
-                self._wake_enabled and det is not None and det.ready and not self.ui.muted
+                det is not None and det.ready
+                and not self.ui.muted
                 and not self._phone_active
                 and (not self._ptt_enabled or self._ptt_held)
             )

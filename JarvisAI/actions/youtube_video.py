@@ -338,16 +338,29 @@ def _handle_play(parameters: dict, player) -> str:
 
 
 def _handle_pause(parameters: dict, player=None, speak=None) -> str:
-    """Pause the active YouTube browser media session using the shared control."""
+    """Pause playback in the embedded HUD only."""
     if player and hasattr(player, "pause_video"):
         player.pause_video()
         return "Paused the video in the JARVIS HUD."
+    return "The JARVIS HUD video player is not available."
+
+
+def _handle_fast_forward(parameters: dict, player=None, speak=None) -> str:
+    if not player or not hasattr(player, "seek_video"):
+        return "The JARVIS HUD video player is not available."
     try:
-        from actions.computer_settings import computer_settings
-        return computer_settings({"action": "pause_video"}, player=player)
-    except Exception as e:
-        print(f"[YouTube] ⚠️ Pause failed: {e}")
-        return f"Could not pause YouTube playback: {e}"
+        seconds = max(5, min(120, int(parameters.get("seconds", 10))))
+    except (TypeError, ValueError):
+        seconds = 10
+    player.seek_video(seconds)
+    return f"Skipped ahead {seconds} seconds in the JARVIS HUD video."
+
+
+def _handle_stop(parameters: dict, player=None, speak=None) -> str:
+    if not player or not hasattr(player, "stop_video"):
+        return "The JARVIS HUD video player is not available."
+    player.stop_video()
+    return "Stopped the video in the JARVIS HUD."
 
 
 def _handle_sound(parameters: dict, player, muted: bool) -> str:
@@ -456,6 +469,9 @@ _ACTION_MAP = {
     "play":      _handle_play,
     "pause":     _handle_pause,
     "play_pause": _handle_pause,
+    "fast_forward": _handle_fast_forward,
+    "seek":      _handle_fast_forward,
+    "stop":      _handle_stop,
     "sound_on":  lambda parameters, player, speak=None: _handle_sound(parameters, player, False),
     "unmute":    lambda parameters, player, speak=None: _handle_sound(parameters, player, False),
     "sound_off": lambda parameters, player, speak=None: _handle_sound(parameters, player, True),
@@ -484,7 +500,8 @@ def youtube_video(
     if handler is None:
         return (
             f"Unknown YouTube action: '{action}'. "
-            "Available: play, pause, sound_on, sound_off, summarize, get_info, trending."
+            "Available: play, pause, fast_forward, stop, sound_on, sound_off, "
+            "summarize, get_info, trending."
         )
 
     try:
@@ -499,13 +516,13 @@ def youtube_video(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "youtube_video",
-    "description": "Controls video in the native JARVIS HUD. Use action='play' with a query for YouTube search, or pass url for a YouTube/direct video URL or local file path. HUD playback always starts muted. Enable sound only when the user explicitly asks by using action='sound_on' (or 'unmute'); use action='sound_off' (or 'mute') to silence it and 'pause' to pause. Summarize/get_info/trending remain available.",
+    "description": "Controls video in the native JARVIS HUD. Use action='play' with a query for YouTube search, or pass url for a YouTube/direct video URL or local file path. HUD playback starts muted. Without confirmation, voice controls can pause, fast-forward (default 10 seconds; set seconds), stop, unmute/sound_on, and mute/sound_off the HUD player. These controls never operate an external browser; use browser_control for browser playback, which requires confirmation. Summarize/get_info/trending remain available.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "play | pause | sound_on | sound_off | summarize | get_info | trending (default: play)"
+                "description": "play | pause | fast_forward | stop | unmute/sound_on | mute/sound_off | summarize | get_info | trending. Fast-forward skips 10 seconds by default. These playback controls affect the embedded HUD player; browser actions use browser_control and require confirmation."
             },
             "query": {
                 "type": "STRING",
@@ -522,6 +539,10 @@ TOOL = {
             "region": {
                 "type": "STRING",
                 "description": "Country code for trending e.g. TR, US"
+            },
+            "seconds": {
+                "type": "INTEGER",
+                "description": "Seconds to skip forward (5–120, default 10), used by fast_forward/seek"
             },
             "url": {
                 "type": "STRING",

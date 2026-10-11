@@ -23,7 +23,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QGraphicsOpacityEffect, QScrollArea, QSizePolicy, QStackedLayout, QStackedWidget, QTabWidget,
     QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
@@ -175,8 +175,12 @@ class _MetricPlot(QWidget):
         self.setMinimumHeight(170)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._series: dict[str, list[float | None]] = {}
-        self._colors = {"CPU": QColor(_TEAL), "RAM": QColor(_AMBER),
-                        "GPU": QColor("#91a7de"), "PRICE": QColor(_TEAL)}
+        self._colors = {
+            "CPU": QColor("#17baff"), "RAM": QColor("#00e5ad"),
+            "GPU": QColor("#d52dff"), "DISK": QColor("#ffbd38"),
+            "RX": QColor("#00e5ad"), "TX": QColor("#168fff"),
+            "PRICE": QColor(_TEAL),
+        }
 
     def add_sample(self, values: dict[str, float | None], limit: int = 100):
         keys = set(self._series) | set(values)
@@ -233,6 +237,84 @@ class _MetricPlot(QWidget):
         p.drawText(area.left(), self.height() - 4, legend)
 
 
+class _TelemetryGauge(QWidget):
+    """Low-cost animated neon ring, drawn only by Qt when its value changes."""
+
+    def __init__(self, accent: str, label: str = "USAGE", parent=None):
+        super().__init__(parent)
+        self._accent = QColor(accent)
+        self._label = label.upper()
+        self._value = 0.0
+        self._start_value = 0.0
+        self._target_value = 0.0
+        self._available = False
+        self._started = 0.0
+        self._focused = False
+        self._timer = QTimer(self)
+        self._timer.setInterval(20)
+        self._timer.timeout.connect(self._advance)
+        self.setMinimumSize(104, 104)
+        self.setMaximumSize(148, 148)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def set_value(self, value):
+        if value is None:
+            self._available = False
+            self._timer.stop()
+            self.update()
+            return
+        try:
+            target = max(0.0, min(100.0, float(value)))
+        except (TypeError, ValueError):
+            return
+        self._available = True
+        self._start_value = self._value
+        self._target_value = target
+        self._started = time.monotonic()
+        self._timer.start()
+
+    def set_focused(self, focused: bool):
+        self._focused = bool(focused)
+        self.update()
+
+    def _advance(self):
+        progress = min(1.0, (time.monotonic() - self._started) / 0.55)
+        eased = 1.0 - (1.0 - progress) ** 3
+        self._value = self._start_value + (self._target_value - self._start_value) * eased
+        self.update()
+        if progress >= 1.0:
+            self._timer.stop()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(4, 11, 24, 210))
+        p.drawEllipse(self.rect().adjusted(2, 2, -2, -2))
+        side = max(12, min(self.width(), self.height()) - 18)
+        ring = self.rect().adjusted((self.width() - side) // 2,
+                                    (self.height() - side) // 2,
+                                    -(self.width() - side) // 2,
+                                    -(self.height() - side) // 2)
+        p.setPen(QPen(QColor(self._accent.red(), self._accent.green(), self._accent.blue(), 54), 7))
+        p.drawArc(ring, 225 * 16, -270 * 16)
+        if self._available:
+            p.setPen(QPen(QColor(self._accent.red(), self._accent.green(), self._accent.blue(), 45), 11))
+            p.drawArc(ring, 225 * 16, -int(270 * 16 * self._value / 100.0))
+            p.setPen(QPen(self._accent, 5 if self._focused else 4))
+            p.drawArc(ring, 225 * 16, -int(270 * 16 * self._value / 100.0))
+        if self._focused:
+            p.setPen(QPen(QColor(self._accent.red(), self._accent.green(), self._accent.blue(), 110), 1))
+            p.drawEllipse(ring.adjusted(-6, -6, 6, 6))
+        p.setPen(QColor("#e7f5ff" if self._available else "#7890a8"))
+        p.setFont(QFont("Segoe UI", max(13, side // 6), QFont.Weight.DemiBold))
+        value_text = f"{self._value:.0f}%" if self._available else "N/A"
+        p.drawText(self.rect().adjusted(0, -4, 0, -5), Qt.AlignmentFlag.AlignCenter, value_text)
+        p.setPen(self._accent)
+        p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        p.drawText(self.rect().adjusted(0, side // 3, 0, -7), Qt.AlignmentFlag.AlignCenter, self._label)
+
+
 class HudWorkspace(QWidget):
     """One native display surface for media, documents and live information."""
 
@@ -240,6 +322,7 @@ class HudWorkspace(QWidget):
     interrupt_requested = pyqtSignal()
     route_requested = pyqtSignal(str, str)
     market_loaded = pyqtSignal(object)
+    system_metrics_loaded = pyqtSignal(object)
     thumbnail_loaded = pyqtSignal(int, bytes)
     holo_event = pyqtSignal(str, str)
     news_image_loaded = pyqtSignal(int, str, bytes, str)
@@ -261,14 +344,22 @@ class HudWorkspace(QWidget):
         self.setStyleSheet(f"background:{_BG}; color:{_TEXT};")
         self._reminders: list[dict] = []
         self._video_muted = True
+        self._video_active = False
         self._timer_total = 0
         self._timer_deadline = 0.0
         self._timer_running = False
         self._pomodoro_work = False
+        self._system_sample_active = False
+        self._system_focus = "overview"
+        self._system_gauges = {}
+        self._system_details = {}
+        self._system_plots = {}
+        self._system_cards = {}
         self._sample_timer = QTimer(self)
         self._sample_timer.timeout.connect(self._sample_system)
-        self._sample_timer.start(2000)
+        self._sample_timer.start(1500)
         self.market_loaded.connect(self._on_market_loaded)
+        self.system_metrics_loaded.connect(self._on_system_metrics_loaded)
         self.thumbnail_loaded.connect(self._on_thumbnail_loaded)
         self.news_image_loaded.connect(self._on_news_image_loaded)
         self._gallery_buttons = []
@@ -911,12 +1002,142 @@ class HudWorkspace(QWidget):
 
     def _make_system_page(self) -> QWidget:
         page = QWidget()
+        page.setStyleSheet("background:#020917;color:#d9efff;")
         lay = QVBoxLayout(page)
-        self._system_status = QLabel("CPU  —    RAM  —    GPU  —    BATTERY  —")
-        self._system_status.setStyleSheet(f"color:{_TEAL};font:bold 9pt 'Courier New';padding:8px;")
-        lay.addWidget(self._system_status)
-        self._system_plot = _MetricPlot()
-        lay.addWidget(self._system_plot, 1)
+        lay.setContentsMargins(8, 6, 8, 8)
+        lay.setSpacing(7)
+
+        title_row = QHBoxLayout()
+        heading = QLabel("SYSTEM TELEMETRY")
+        heading.setStyleSheet("color:#57caff;font: bold 15pt 'Segoe UI';letter-spacing:2px;")
+        title_row.addWidget(heading)
+        subtitle = QLabel("REAL-TIME PERFORMANCE  /  LOCAL MACHINE")
+        subtitle.setStyleSheet("color:#69bce8;font: bold 8pt 'Segoe UI';letter-spacing:1px;")
+        title_row.addWidget(subtitle)
+        title_row.addStretch(1)
+        self._system_datetime = QLabel(datetime.now().strftime("%H:%M  ·  %a, %d %b %Y"))
+        self._system_datetime.setStyleSheet("color:#9bc9e7;font:bold 9pt 'Segoe UI';padding-right:10px;")
+        title_row.addWidget(self._system_datetime)
+        self._system_status = QLabel("●  SAMPLING SYSTEM SENSORS")
+        self._system_status.setStyleSheet("color:#00e5ad;font:bold 8pt 'Consolas';")
+        title_row.addWidget(self._system_status)
+        lay.addLayout(title_row)
+
+        self._system_hardware = QLabel("DETECTING PROCESSOR · GRAPHICS · MEMORY · OPERATING SYSTEM")
+        self._system_hardware.setStyleSheet("color:#82a9c4;font:8pt 'Consolas';padding:2px 4px;")
+        lay.addWidget(self._system_hardware)
+
+        host = QWidget()
+        host.setStyleSheet("background:transparent;")
+        grid = QGridLayout(host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+
+        def metric_panel(key: str, title: str, accent: str, detail: str):
+            frame = QFrame()
+            frame.setObjectName(f"telemetry_{key}")
+            frame.setMinimumHeight(205)
+            frame.setStyleSheet(
+                f"QFrame#telemetry_{key}{{background:#050f20;border:1px solid #15517c;}}"
+                "QLabel{border:0;background:transparent;}"
+            )
+            box = QVBoxLayout(frame)
+            box.setContentsMargins(9, 7, 9, 7)
+            box.setSpacing(4)
+            top = QHBoxLayout()
+            label = QLabel(title.upper())
+            label.setStyleSheet(f"color:{accent};font:bold 10pt 'Segoe UI';letter-spacing:1px;")
+            top.addWidget(label)
+            top.addStretch(1)
+            live = QLabel("LIVE")
+            live.setStyleSheet(f"color:{accent};font:bold 7pt 'Consolas';border:1px solid {accent};padding:2px 5px;")
+            top.addWidget(live)
+            box.addLayout(top)
+            body = QHBoxLayout()
+            gauge = _TelemetryGauge(accent)
+            body.addWidget(gauge, 0, Qt.AlignmentFlag.AlignVCenter)
+            details = QLabel(detail)
+            details.setWordWrap(True)
+            details.setMinimumWidth(90)
+            details.setStyleSheet("color:#d8efff;font:9pt 'Segoe UI';line-height:1.35;")
+            body.addWidget(details, 1, Qt.AlignmentFlag.AlignVCenter)
+            box.addLayout(body, 1)
+            plot = _MetricPlot()
+            plot.setMinimumHeight(66)
+            plot.setMaximumHeight(83)
+            plot._colors[key.upper()] = QColor(accent)
+            box.addWidget(plot)
+            self._system_gauges[key] = gauge
+            self._system_details[key] = details
+            self._system_plots[key] = plot
+            self._system_cards[key] = frame
+            return frame
+
+        grid.addWidget(metric_panel("cpu", "CPU", "#16baff", "Loading processor details…"), 0, 0)
+        grid.addWidget(metric_panel("gpu", "GPU", "#d52dff", "Reading graphics adapter…"), 0, 1)
+        grid.addWidget(metric_panel("ram", "MEMORY", "#00e5ad", "Reading physical memory…"), 0, 2)
+        grid.addWidget(metric_panel("disk", "STORAGE", "#ffbd38", "Reading system drive…"), 1, 0)
+
+        network = QFrame()
+        network.setObjectName("telemetry_network")
+        network.setMinimumHeight(205)
+        network.setStyleSheet("QFrame#telemetry_network{background:#050f20;border:1px solid #15517c;} QLabel{border:0;background:transparent;}")
+        net_box = QVBoxLayout(network)
+        net_box.setContentsMargins(9, 7, 9, 7)
+        net_top = QHBoxLayout()
+        net_title = QLabel("NETWORK")
+        net_title.setStyleSheet("color:#27aaff;font:bold 10pt 'Segoe UI';letter-spacing:1px;")
+        net_top.addWidget(net_title)
+        net_top.addStretch(1)
+        net_live = QLabel("LIVE")
+        net_live.setStyleSheet("color:#27aaff;font:bold 7pt 'Consolas';border:1px solid #27aaff;padding:2px 5px;")
+        net_top.addWidget(net_live)
+        net_box.addLayout(net_top)
+        net_values = QHBoxLayout()
+        self._system_rx_label = QLabel("↑  — Mbps  DOWNLOAD")
+        self._system_rx_label.setStyleSheet("color:#00e5ad;font:bold 11pt 'Segoe UI';")
+        self._system_tx_label = QLabel("↓  — Mbps  UPLOAD")
+        self._system_tx_label.setStyleSheet("color:#27aaff;font:bold 11pt 'Segoe UI';")
+        net_values.addWidget(self._system_rx_label)
+        net_values.addWidget(self._system_tx_label)
+        net_box.addLayout(net_values)
+        self._system_net_plot = _MetricPlot()
+        self._system_net_plot._colors.update({"RX": QColor("#00e5ad"), "TX": QColor("#168fff")})
+        self._system_net_plot.setMinimumHeight(100)
+        net_box.addWidget(self._system_net_plot, 1)
+        self._system_cards["network"] = network
+        grid.addWidget(network, 1, 1)
+
+        quick = QFrame()
+        quick.setObjectName("telemetry_quick")
+        quick.setMinimumHeight(205)
+        quick.setStyleSheet("QFrame#telemetry_quick{background:#050f20;border:1px solid #15517c;} QLabel{border:0;background:transparent;}")
+        quick_box = QVBoxLayout(quick)
+        quick_box.setContentsMargins(11, 9, 11, 9)
+        quick_title = QLabel("QUICK INFO  /  DEVICE STATUS")
+        quick_title.setStyleSheet("color:#68caff;font:bold 10pt 'Segoe UI';letter-spacing:1px;")
+        quick_box.addWidget(quick_title)
+        self._system_quick = QLabel("Operating system: —\nBattery: —\nUptime: —\nProcesses: —")
+        self._system_quick.setWordWrap(True)
+        self._system_quick.setStyleSheet("color:#d9efff;font:10pt 'Segoe UI';line-height:1.6;padding:4px;")
+        quick_box.addWidget(self._system_quick, 1)
+        self._system_temp = QLabel("TEMPERATURES   CPU  —     GPU  —")
+        self._system_temp.setStyleSheet("color:#8cb9d5;font:bold 8pt 'Consolas';border-top:1px solid #163750;padding-top:8px;")
+        quick_box.addWidget(self._system_temp)
+        self._system_cards["overview"] = quick
+        grid.addWidget(quick, 1, 2)
+        for col in range(3):
+            grid.setColumnStretch(col, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea{background:#020917;border:0;} QScrollBar:vertical{background:#06111f;width:9px;} QScrollBar::handle:vertical{background:#15517c;min-height:24px;}")
+        scroll.setWidget(host)
+        lay.addWidget(scroll, 1)
         return page
 
     def _make_timer_page(self) -> QWidget:
@@ -977,8 +1198,42 @@ class HudWorkspace(QWidget):
         self.tabs.setCurrentIndex(index)
         self._view_title.setText((title or key.replace("_", " ")).upper()[:45])
 
-    def show_view(self, key: str, title: str | None = None):
+    def show_view(self, key: str, title: str | None = None, focus: str | None = None):
+        if key == "system":
+            self.show_system_panel(focus)
+            return
         self._select(key, title)
+
+    def show_system_panel(self, focus: str | None = None):
+        aliases = {
+            "memory": "ram", "mem": "ram", "disk": "disk", "storage": "disk",
+            "processor": "cpu", "graphics": "gpu", "temperature": "overview",
+            "temps": "overview", "all": "overview", "system": "overview",
+        }
+        normalized = str(focus or "overview").strip().casefold()
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in {"overview", "cpu", "gpu", "ram", "disk", "network"}:
+            normalized = "overview"
+        self._system_focus = normalized
+        title = "SYSTEM TELEMETRY" if normalized == "overview" else f"SYSTEM TELEMETRY · {normalized.upper()}"
+        self._select("system", title)
+        for key, frame in self._system_cards.items():
+            if key == "overview":
+                focused = normalized == "overview"
+            else:
+                focused = key == normalized
+            color = {
+                "cpu": "#16baff", "gpu": "#d52dff", "ram": "#00e5ad",
+                "disk": "#ffbd38", "network": "#27aaff", "overview": "#68caff",
+            }.get(key, "#15517c")
+            border = color if focused else "#15517c"
+            frame.setStyleSheet(
+                f"QFrame#{frame.objectName()}{{background:#050f20;border:1px solid {border};}}"
+                "QLabel{border:0;background:transparent;}"
+            )
+        for key, gauge in self._system_gauges.items():
+            gauge.set_focused(normalized == key)
+        self._sample_system()
 
     def show_video(self, source: str, title: str = "JARVIS VIDEO"):
         source = str(source or "").strip()
@@ -1015,7 +1270,8 @@ class HudWorkspace(QWidget):
             const fallbackUrl=__WATCH_URL__;
             function fallbackToWatch(reason){const box=document.getElementById('ytError');box.hidden=false;box.textContent=reason+' — opening the YouTube watch page inside the HUD…';setTimeout(()=>location.replace(fallbackUrl),900);}
             let apiReady=false;
-            function onYouTubeIframeAPIReady(){apiReady=true;new YT.Player('yt',{events:{onError:(event)=>{
+            window.jarvisYtPlayer=null;
+            function onYouTubeIframeAPIReady(){apiReady=true;window.jarvisYtPlayer=new YT.Player('yt',{events:{onError:(event)=>{
               const messages={2:'Invalid video request',5:'HTML5 playback error',100:'Video unavailable or private',101:'This video blocks embedded playback',150:'This video blocks embedded playback',153:'YouTube did not receive an HTTP Referer/client identity'};
               const message='YouTube player error '+event.data+': '+(messages[event.data]||'Playback failed');
               if([101,150,153].includes(event.data))fallbackToWatch(message);else{const box=document.getElementById('ytError');box.hidden=false;box.textContent=message;}
@@ -1036,6 +1292,7 @@ class HudWorkspace(QWidget):
             self._video_view.page().setAudioMuted(True)
         self._video_label.setText((title or path.name if local else title or "VIDEO")[:70].upper())
         self._video_muted = True
+        self._video_active = True
         self._video_sound.setText("ENABLE SOUND  ◌")
         self._video_view.setHtml(media_html, base_url)
         self._select("video", title or "VIDEO / MUTED")
@@ -1046,7 +1303,7 @@ class HudWorkspace(QWidget):
         self.set_video_muted(not self._video_muted)
 
     def set_video_muted(self, muted: bool):
-        if not self._video_view:
+        if not self._video_view or not self._video_active:
             return
         self._video_muted = bool(muted)
         self._video_view.page().setAudioMuted(self._video_muted)
@@ -1058,8 +1315,32 @@ class HudWorkspace(QWidget):
             self._video_sound.setText("ENABLE SOUND  ◌")
 
     def _pause_video(self):
-        if self._video_view:
+        if self._video_view and self._video_active:
             self._video_view.page().runJavaScript("""(()=>{const v=document.querySelector('video'); if(v)v.pause(); const f=document.querySelector('iframe'); if(f)f.contentWindow.postMessage(JSON.stringify({event:'command',func:'pauseVideo',args:[]}), '*');})()""")
+
+    def seek_video(self, seconds: int = 10):
+        if not self._video_view or not self._video_active:
+            return
+        seconds = max(5, min(120, int(seconds)))
+        self._video_view.page().runJavaScript(f"""(()=>{{
+          const v=document.querySelector('video');
+          if(v){{v.currentTime=Math.max(0,v.currentTime+{seconds});return;}}
+          const p=window.jarvisYtPlayer;
+          if(p&&typeof p.getCurrentTime==='function'){{p.seekTo(p.getCurrentTime()+{seconds},true);return;}}
+        }})()""")
+
+    def stop_video(self):
+        if not self._video_view or not self._video_active:
+            return
+        self._video_view.page().runJavaScript("""(()=>{
+          const v=document.querySelector('video');if(v){v.pause();v.currentTime=0;}
+          const p=window.jarvisYtPlayer;
+          if(p&&typeof p.stopVideo==='function'){p.stopVideo();return;}
+          const f=document.querySelector('iframe');
+          if(f)f.contentWindow.postMessage(JSON.stringify({event:'command',func:'stopVideo',args:[]}), '*');
+        })()""")
+        self._video_label.setText("VIDEO STOPPED")
+        self._video_sound.setText("ENABLE SOUND  ◌")
 
     def _pick_video(self):
         path, _ = QFileDialog.getOpenFileName(self, "Choose a video", "", "Video (*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.ogv)")
@@ -1383,23 +1664,94 @@ class HudWorkspace(QWidget):
         layout.addStretch(1)
 
     def _sample_system(self):
+        """Collect hardware metrics off the UI thread to keep the HUD responsive."""
+        if not hasattr(self, "tabs") or self.tabs.currentIndex() != self._page_index.get("system", -1):
+            return
+        if self._system_sample_active:
+            return
+        self._system_sample_active = True
+        threading.Thread(
+            target=self._collect_system_sample,
+            daemon=True,
+            name="JarvisSystemTelemetry",
+        ).start()
+
+    def _collect_system_sample(self):
         try:
-            import psutil
-            cpu = float(psutil.cpu_percent(interval=None))
-            ram = float(psutil.virtual_memory().percent)
-            gpu = None
-            try:
-                from actions.system_monitor import _get_gpu_usage
-                value = _get_gpu_usage()
-                gpu = float(value) if value is not None and value >= 0 else None
-            except Exception:
-                pass
-            battery = psutil.sensors_battery()
-            batt = f"{battery.percent:.0f}%" + (" / AC" if battery.power_plugged else " / BATTERY") if battery else "N/A"
-            self._system_status.setText(f"CPU {cpu:4.0f}%    RAM {ram:4.0f}%    GPU {f'{gpu:.0f}%' if gpu is not None else 'N/A'}    BATTERY {batt}")
-            self._system_plot.add_sample({"CPU": cpu, "RAM": ram, "GPU": gpu})
-        except Exception:
-            pass
+            from actions.system_monitor import get_system_status
+
+            snapshot = get_system_status()
+            self.system_metrics_loaded.emit(snapshot)
+        except Exception as exc:
+            self.system_metrics_loaded.emit({"error": str(exc)[:160]})
+
+    def _on_system_metrics_loaded(self, snapshot: dict):
+        self._system_sample_active = False
+        if not isinstance(snapshot, dict) or snapshot.get("error"):
+            self._system_status.setText("● SENSOR READ FAILED · RETRYING")
+            return
+
+        values = {
+            "cpu": snapshot.get("cpu_percent"),
+            "gpu": snapshot.get("gpu_percent"),
+            "ram": snapshot.get("ram_percent"),
+            "disk": snapshot.get("disk_percent"),
+        }
+        for key, value in values.items():
+            self._system_gauges[key].set_value(value)
+            self._system_gauges[key].set_focused(self._system_focus == key)
+            self._system_plots[key].add_sample({key.upper(): value})
+
+        cpu_name = str(snapshot.get("cpu_name") or "CPU model unavailable")
+        cores = snapshot.get("cpu_cores") or "—"
+        threads = snapshot.get("cpu_threads") or "—"
+        freq = snapshot.get("cpu_freq_mhz")
+        cpu_detail = f"{cpu_name}\n{cores} cores / {threads} threads"
+        if freq:
+            cpu_detail += f"\n{float(freq) / 1000:.2f} GHz current"
+        self._system_details["cpu"].setText(cpu_detail)
+
+        ram_used = snapshot.get("ram_used_gb")
+        ram_total = snapshot.get("ram_total_gb")
+        ram_available = snapshot.get("ram_available_gb")
+        self._system_details["ram"].setText(
+            f"{ram_used if ram_used is not None else '—'} / {ram_total if ram_total is not None else '—'} GB used\n"
+            f"{ram_available if ram_available is not None else '—'} GB available"
+        )
+        self._system_details["gpu"].setText(str(snapshot.get("gpu_name") or "GPU model unavailable")[:100])
+        self._system_details["disk"].setText(
+            f"{snapshot.get('disk_used_gb') if snapshot.get('disk_used_gb') is not None else '—'} / "
+            f"{snapshot.get('disk_total_gb') if snapshot.get('disk_total_gb') is not None else '—'} GB used\n"
+            f"{snapshot.get('disk_free_gb') if snapshot.get('disk_free_gb') is not None else '—'} GB free"
+        )
+
+        rx = float(snapshot.get("network_rx_mbps") or 0.0)
+        tx = float(snapshot.get("network_tx_mbps") or 0.0)
+        self._system_rx_label.setText(f"↑  {rx:.1f} Mbps  DOWNLOAD")
+        self._system_tx_label.setText(f"↓  {tx:.1f} Mbps  UPLOAD")
+        self._system_net_plot.add_sample({"RX": rx, "TX": tx})
+
+        battery = snapshot.get("battery_percent")
+        if battery is None:
+            battery_text = "Not reported by this device"
+        else:
+            battery_text = f"{battery:.0f}%  ·  {'AC power' if snapshot.get('battery_plugged') else 'on battery'}"
+        self._system_quick.setText(
+            f"Operating system: {snapshot.get('os_name', '—')}\n"
+            f"Architecture: {snapshot.get('architecture', '—')}\n"
+            f"Battery: {battery_text}\n"
+            f"Uptime: {snapshot.get('uptime', '—')}   ·   Processes: {snapshot.get('process_count', '—')}"
+        )
+        self._system_temp.setText(
+            f"TEMPERATURES   CPU  {snapshot.get('cpu_temp_c') if snapshot.get('cpu_temp_c') is not None else 'N/A'}°C"
+            "     GPU  driver sensor unavailable"
+        )
+        self._system_hardware.setText(
+            f"{cpu_name[:66]}    ·    {str(snapshot.get('gpu_name') or 'Graphics adapter unavailable')[:62]}    ·    "
+            f"{snapshot.get('ram_total_gb', '—')} GB RAM    ·    {snapshot.get('os_name', 'Unknown OS')}"
+        )
+        self._system_status.setText(f"●  LIVE  /  UPDATED {datetime.now().strftime('%H:%M:%S')}")
+        self._system_datetime.setText(datetime.now().strftime("%H:%M  ·  %a, %d %b %Y"))
 
     def _load_market(self):
         symbol = self._market_symbol.text().strip().upper()

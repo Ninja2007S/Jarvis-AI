@@ -34,8 +34,8 @@ SAMPLE_RATE = 16000
 # Do not let the tail of one wake phrase re-trigger the detector or immediately
 # barge into the greeting. Re-arm only after both the cooldown and a quiet score
 # run, so sustained scores from the same phrase cannot fire repeatedly.
-RETRIGGER_COOLDOWN_SEC = 1.5
-REARM_QUIET_FRAMES = 8
+RETRIGGER_COOLDOWN_SEC = 0.75
+REARM_QUIET_FRAMES = 5
 
 
 def is_installed() -> bool:
@@ -129,7 +129,12 @@ class WakeWordDetector:
         # See PluginRegistry: `logger` is the console and gets everything,
         # `notify` is the activity log and gets only what the user must act on.
         self._notify    = notify or (lambda _msg: None)
-        self._queue: queue.Queue = queue.Queue(maxsize=50)
+        # Keep only a short, fresh window of microphone frames. A deep FIFO can
+        # make wake detection seconds late when inference falls behind the mic
+        # (for example while the animated HUD is busy). Fresh audio is more
+        # useful than replaying a stale queue, and the main audio path has its
+        # own pre-roll buffer for preserving the spoken command.
+        self._queue: queue.Queue = queue.Queue(maxsize=10)
         self._thread: threading.Thread | None = None
         self._running = False
         self._model = None
@@ -183,7 +188,16 @@ class WakeWordDetector:
         try:
             # frame_int16 is a numpy int16 array (possibly 2-D mono) — flatten to 1-D
             data = frame_int16[:, 0].copy() if getattr(frame_int16, "ndim", 1) > 1 else frame_int16.copy()
-            self._queue.put_nowait(data)
+            try:
+                self._queue.put_nowait(data)
+            except queue.Full:
+                # Discard the oldest stale block and keep the newest one. This
+                # bounds detector lag to roughly 640 ms even on a busy CPU.
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+                self._queue.put_nowait(data)
         except queue.Full:
             pass
         except Exception:

@@ -176,6 +176,16 @@ def save_neural_render_scale(scale: float) -> None:
     _save_flag("neural_render_scale", value)
 
 
+def get_startup_video_enabled() -> bool:
+    """Whether to show the optional intro video before the desktop HUD."""
+    return bool(load_api_keys().get("startup_video_enabled", True))
+
+
+def save_startup_video_enabled(enabled: bool) -> None:
+    """Persist the startup intro preference alongside other local settings."""
+    _save_flag("startup_video_enabled", bool(enabled))
+
+
 # ── Live-session tuning ──────────────────────────────────────────────────────
 # Everything here is optional and has a working default, so an untouched
 # config behaves exactly like a configured one. Each value is also a way out:

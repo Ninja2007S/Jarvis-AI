@@ -37,6 +37,11 @@ It can:
 * 📝 Capture caller messages as voicemail transcripts
 * 📱 Provide a remote dashboard for your phone
 * 🎨 Display an animated holographic-style avatar
+* 🧠 Show two full-screen, state-reactive neural visualizations with optional hand control
+* 📈 Display animated cross-platform system telemetry and live data panels
+* ✋ Use the laptop camera for a local Holo gesture workspace and face-mesh overlay
+* 🎙️ Choose a response personality and voice, then remember the style locally
+* 🤖 Select Gemini, OpenAI GPT, or Claude for supported one-shot text/image tasks
 * 🛡️ Apply security controls before executing sensitive actions
 * 🩺 Self-Healing System Version 1: read-only checks and approval-gated repairs
 * 💬 Communicate naturally through voice
@@ -45,6 +50,27 @@ It can:
 The goal is simple:
 
 > **Build a personal AI that lives on your computer instead of inside a browser tab.**
+
+## Feature guide at a glance
+
+JARVIS is operated from the native desktop window. Speak naturally, type into
+the command field, or use the matching HUD panel. Common starting requests are:
+
+| Try saying | What opens or happens |
+| --- | --- |
+| “Show my RAM usage” / “Show system status” | Animated System Telemetry panel focused on RAM or the requested metric. |
+| “Show me the Earth” / “Take me to Kandy, Sri Lanka” | Interactive globe or place-centered map in the HUD. |
+| “Show Holo” / “Open the hand-gesture interface” | Full-screen Holo workspace after the security confirmation. |
+| “Play [title] on YouTube” | Muted video in the native HUD; request sound when wanted. |
+| “Search for [topic]” / “Open that article in the HUD” | Search cards or the internal web reader. |
+| “Read this PDF” / “Summarize this file” | Document preview and summary in the HUD. |
+| “Weather in Colombo” / “Find flights from Colombo to Tokyo” | Forecast or flight cards in the HUD. |
+| “Start a 20 minute timer” / “Set a reminder…” | Visible countdown or scheduled reminder. |
+| “Quiz me on [topic]” | Spoken interactive quiz, when the Quiz plugin is enabled. |
+
+Sensitive operations still use JARVIS's normal security checks and approval
+flow. A panel or card is for viewing and navigation; opening one does not grant
+permission to send messages, change system settings, or perform another action.
 
 ## 🌍 Interactive Earth, Place Search, and Routes
 
@@ -82,7 +108,7 @@ The panel displays map attribution. OSM tile use follows its [tile policy](https
 
 ## Startup Video Intro
 
-JARVIS can play an optional video with embedded sound before opening its native PyQt desktop HUD. Put your clip at `assets/startup_intro.mp4`. The intro has a **SKIP INTRO** button and also skips with **Esc**. If the clip is absent or Qt Multimedia cannot play it, JARVIS opens normally. H.264 video with AAC audio is a practical MP4 format; codec support depends on the installed operating system multimedia backend.
+JARVIS can play an optional video with embedded sound before opening its native PyQt desktop HUD. Put your clip at `assets/startup_intro.mp4`. In the desktop app, open **⚙ Settings & Controls** and toggle **STARTUP INTRO VIDEO: ON/OFF**; the choice is saved locally and takes effect the next time JARVIS starts. The intro has a **SKIP INTRO** button and also skips with **Esc**. If the clip is absent or Qt Multimedia cannot play it, JARVIS opens normally. H.264 video with AAC audio is a practical MP4 format; codec support depends on the installed operating system multimedia backend.
 # 🚀 Core Features
 
 ## 🎙️ Real-Time Voice
@@ -115,13 +141,32 @@ to speak.
 
 On Windows, the shortcut works globally. On macOS and Linux, it falls back to window-level input.
 
-### Wake-word interruption while Jarvis is speaking
+### Wake, clap wake, and interruption
 
-When the local **"Hey Jarvis"** detector is installed and ready, saying **"Hey Jarvis"** while Jarvis is speaking interrupts playback and returns the assistant to listening. Only a local wake-word match triggers this voice interruption; ordinary speech and background sounds do not stop playback. The wake-word check runs locally and its audio is not streamed to Gemini as a command.
+Install the local **Hey Jarvis** model from **⚙ → WAKE WORD** if it is not
+already ready. When Wake Word is enabled and JARVIS is asleep, say **“Hey
+Jarvis”** to wake it. If the local clap detector is installed and enabled,
+two claps also wake JARVIS. The wake greeting includes the local date and time;
+the wake and Morning Brief news briefing reads the retrieved Newsfirst and Ada
+Derana topics.
 
-Install or enable the detector from **⚙ → WAKE WORD**. The feature is unavailable if the model is not ready. Mute, phone-call audio, and push-to-talk settings also gate the microphone path. The HUD's **INTERRUPT [ESC]** control remains available as a manual option.
+While JARVIS is speaking or handling a response, say **“Hey Jarvis”** to stop
+its current speech and begin a new request. Only the local detector's match
+triggers voice interruption; ordinary speech and background sounds do not.
+The detector keeps a short in-memory audio pre-roll so the start of the request
+after the wake phrase is less likely to be clipped. The wake detector itself
+runs locally and makes no network request. During assistant speech, mic audio is
+kept local until a wake match; after a match, the short buffered phrase/request
+audio and following speech are sent to the active Live conversation as user
+audio. Press **Esc** or click **INTERRUPT [ESC]** for manual interruption. The
+microphone's mute, phone-audio, and push-to-talk states still apply. If the
+detector is unavailable, use the manual interrupt.
 
-When wake-word mode is enabled and Jarvis is asleep, clap twice to wake it. Jarvis then gives the wake greeting, tells you the local date and time, and reads every retrieved Newsfirst/Ada Derana news topic. Startup briefings do the same when Morning Brief is enabled. JARVIS remembers whether the user's latest clearly recognized speech was Sinhala or English in local memory and speaks the briefing in that language, translating headlines and context where needed. The clap detector runs locally; its audio stays on the computer.
+JARVIS remembers the last clearly recognized Sinhala or English utterance in
+local memory and uses that language for the next wake/news briefing. Headlines
+and context are translated into that language where needed. Clap detection and
+wake-word recognition run locally; the two-clap sound itself is not forwarded
+to Gemini by the detector.
 
 ## 🔀 Selectable AI API Providers
 
@@ -136,48 +181,36 @@ python -m pip install -r requirements.txt
 ```
 ## 🧠 Task-Aware Model Routing
 
-JARVIS chooses a model tier based on the work. Ordinary voice conversation stays
-on the low-latency Live session. Difficult open-ended questions can be handed to
-the `deep_reasoning` plugin; code generation and developer-agent work use the
-deep tier; routine classification uses the fast tier; and grounded web searches
-use the search tier. On the default free-tier route, fast and deep one-shot
-work share the quota-first ladder in `core/gemini.py`: Gemma 4, then Gemini
-Flash-Lite compatibility models. `DEEP` is retained as an alias for the
-reasoning tier used by older actions. Gemini 3.1 Pro Preview is not in this
-free-tier ladder; selecting it requires paid-tier access and would need an
-explicit model configuration.
+JARVIS routes ordinary voice conversation through Gemini Live. For one-shot
+work, difficult questions can use the `deep_reasoning` plugin, code generation
+and developer tasks use the reasoning tier, routine classification uses the
+fast tier, and grounded web searches use the search tier. `DEEP` remains an
+alias for the reasoning tier used by older actions.
 
-Free-tier grounded search first tries Gemini 2.5 Flash-Lite, with Gemini 2.5
-Flash as a fallback. Google currently limits 2.5 model access for new projects;
-if unavailable, JARVIS falls back to the caller's non-Gemini search path.
-Google documents up to 500 free Google Search grounded requests per day for
-Gemini 2.5 Flash and Flash-Lite combined. Paid-tier routing uses the configured
-Gemini 3.x models, where grounding is billed/limited under Google's current
-pricing. Set `JARVIS_GEMINI_FREE_TIER=false` only if you intentionally want
-the paid-tier search models. See Google's current
-[model list](https://ai.google.dev/gemini-api/docs/models),
+The default free-tier fast and reasoning ladder in `core/gemini.py` is
+`gemma-4-26b-a4b-it`, `gemma-4-31b-it`, `gemini-3.5-flash-lite`, then
+`gemini-3.1-flash-lite`. Free-tier grounded search tries Gemini 2.5 Flash-Lite
+then Gemini 2.5 Flash; if the project cannot access these models, JARVIS uses
+the non-Gemini search fallback. When explicitly configured for paid-tier use,
+the grounded-search ladder is Gemini 3.8 Flash then Gemini 3.5 Flash-Lite.
+Keep `JARVIS_GEMINI_FREE_TIER=true` unless paid-tier use is intended. Model
+availability, pricing, and quotas can change and depend on your Google project;
+check Google's [model list](https://ai.google.dev/gemini-api/docs/models),
 [pricing](https://ai.google.dev/gemini-api/docs/pricing), and
-[rate-limit details](https://ai.google.dev/gemini-api/docs/rate-limits).
+[rate limits](https://ai.google.dev/gemini-api/docs/rate-limits).
 
-One-shot Gemini calls cool a model for five minutes after quota errors and for
-30 seconds after transient server errors (5xx), then try the next model in that
-task's ladder. The per-model request gap defaults to four seconds for free-tier
-traffic and can be adjusted with `JARVIS_GEMINI_REQUEST_GAP_SECONDS`. Actual
-limits vary by project and model; check AI Studio. If the always-on Live model is
-rate-limited, JARVIS reconnects on a lower-cost native-audio model, then tries
-the next configured Live option if needed. The most recent completed transcript
-is carried into the replacement session; the Live resumption token itself is
-not reused across models. A switch briefly interrupts audio. If the Google
-project or API key has exhausted a quota shared by all available models, model
-switching cannot bypass that account-wide limit. Gemini 3.8 Live is skipped
-when proactive audio is disabled because that model keeps proactive audio on;
-Google bills input while the Live session listens, so model fallback may change
-usage costs.
+One-shot calls cool a model for five minutes after quota errors and 30 seconds
+after transient 5xx errors before trying the next model. Free-tier calls use a
+four-second per-model request gap by default; adjust it with
+`JARVIS_GEMINI_REQUEST_GAP_SECONDS`. If a Live model is rate-limited, JARVIS
+reconnects to a configured native-audio fallback and carries recent completed
+conversation text into the new session. A model switch briefly interrupts
+audio, and cannot evade a project-wide quota shared by all models. Gemini 3.8
+Live is skipped when proactive audio is disabled because that model keeps
+proactive audio enabled; always-on listening can affect usage costs.
 
-Model ladders and one-shot cooldowns are maintained in `core/gemini.py`; the
-Live fallback list and cooldown are in `main.py`. Google can change model
-availability and quotas, so an individual fallback only works if that model is
-enabled for your API project.
+The one-shot ladders live in `core/gemini.py`; Live fallback handling is in
+`main.py`. A fallback only works when that model is enabled for your project.
 
 ---
 
@@ -1027,6 +1060,7 @@ All discovered capabilities are passed through the security layer before executi
 | 📅 `calendar_google`  | List, check, and create Google Calendar events | Google OAuth            |
 | 📞 `phone_call`       | Answer calls and capture caller messages       | Twilio                  |
 | 📷 `instagram_account` | Read Instagram DMs, send/reply, publish and schedule image posts | Meta Instagram API + Professional account |
+| 🎵 `spotify_control`  | Search and control Spotify playback            | Spotify desktop/app     |
 | 🏠 `home_automation`  | Control Tuya / Smart Life devices              | Device IDs + local keys |
 | 🖨️ `printer_control` | Control a 3D printer over MQTT                 | MQTT configuration      |
 | 🧠 `quiz`             | Interactive spoken quiz/study mode             | None                    |
@@ -1044,6 +1078,7 @@ All discovered capabilities are passed through the security layer before executi
 | 🔔 `proactive`           | Provides proactive intelligence                    |
 | ⏰ `reminder`             | Handles reminders                                  |
 | 🖥️ `system_monitor`     | Monitors system hardware                           |
+| 📊 `system_status`      | Opens the live System Telemetry HUD for a chosen metric | None                |
 | ⚙️ `computer_settings`   | Controls supported system settings                 |
 | 🖱️ `computer_control`   | Performs computer operations                       |
 | 🚀 `open_app`            | Launches applications                              |
@@ -1053,6 +1088,7 @@ All discovered capabilities are passed through the security layer before executi
 | 💬 `send_message`        | Sends supported messages                           |
 | 🌤️ `weather_report`     | Retrieves weather information                      |
 | ✈️ `flight_finder`       | Searches flight information                        |
+| 🌍 `earth_globe`         | Opens the Earth/map HUD, finds places, and plots routes | Internet/map services |
 | ✋ `holo_gestures`       | Opens or closes the local hand-gesture HUD         |
 | 🎬 `youtube_video`       | Searches and controls YouTube                      |
 | 🎮 `game_updater`        | Manages supported game updates                     |
@@ -1158,6 +1194,9 @@ Example:
 ```
 
 Jarvis can capture the screen and analyze it within the same conversation.
+For privacy, screen or camera capture is initiated by an explicit request and
+passes through the security layer; a live camera stream can be closed by saying
+**“close camera”** or using its close control.
 
 ---
 
@@ -1356,39 +1395,59 @@ file.
 
 # 🎨 Customization
 
-Jarvis can be customized directly from the interface.
+Open the left settings drawer to change the assistant and user names, select one
+of the Gemini Live voice presets, set the HUD accent colour, choose microphone
+and speaker devices, configure push-to-talk and wake behavior, manage plugins,
+select the one-shot AI provider, and edit response personality. Changes that
+need a new Live session reconnect while retaining recent conversation context.
+Use **CREATE DESKTOP SHORTCUT** to make a launcher and **AUTO-START** to
+enable/disable startup with the operating system where supported. Press **F11**
+or use **FULLSCREEN** to toggle the regular desktop window size. The first-run
+wizard collects the provider choice and setup needed to connect JARVIS.
 
-You can change:
+### Response personality and voice
 
-* Assistant name
-* User name
-* Voice
-* HUD colour
-* Interface settings
-* Push-to-talk
-* Wake word
-* Audio devices
+Click **RESPONSE PERSONALITY** in the settings drawer to choose a saved style:
+**Conversational**, **Concise**, **Technical**, **Emergency**, **Research**,
+**System**, or **Custom**. Each standard mode can have bounded personal tuning;
+Custom has a name and your own short style instructions. Save the profile to
+store it in this device's local memory. It changes wording and tone only; it
+cannot change permissions, confirmation rules, or safety checks.
 
-The HUD selector offers three desktop-native visual modes. The selection is
-saved and restored the next time JARVIS starts.
+The voice selector offers the Gemini Live presets **Charon**, **Puck**, **Kore**,
+**Fenrir**, and **Aoede**. Try each in the UI and save the one you prefer; these
+are provider voice names, and availability depends on the active Gemini Live
+model. One-shot OpenAI/Claude/Gemini selection is separate from the Live voice.
 
-### 🧑‍🎤 Face Mesh
+### HUD visualizations
 
-Animated face mesh with gaze and mouth movement synchronized to JARVIS speech.
+The saved HUD selector contains four views. **Visualization 1** (the default)
+is the full-screen synapse field with long colored fibers. **Visualization 2**
+is the luminous neural orb. Both respond to listening level, thinking, active
+tool calls, and speech, and open as a full-screen overlay with a compact control
+bar. Use **OPEN CONSOLE** to return to the regular desktop console. **FACE MESH**
+shows the animated face and speech-synced mouth; **JARVIS LOGO** shows the
+reactor identity mark.
 
-### ⚛️ JARVIS Logo
+The neural views are live visualizations of JARVIS state and audio—not a view of
+the model's actual hidden neural activations. The renderer uses Qt Quick/GPU
+scene rendering when the driver and Qt backend support it, with a QPainter CPU
+fallback otherwise. **CPU FALLBACK** selects 1.0×, 0.75×, or 0.6× only for that
+fallback; lower scales trade sharpness for speed. When the GPU scene graph is
+active, the animation stays at native resolution.
 
-The original JARVIS reactor/logo, animated by assistant state and voice level.
+### Neural field hand control
 
-### 🧠 Neural Network
-
-A detailed, live layered network with SENSE, ENCODE, ATTEND, REASON, TOOLS,
-FORM, and VOICE stages. Nodes, synaptic paths, and traveling signal sparks
-respond to listening audio, thinking, active tool calls, and spoken responses.
-Each active assistant call produces a distinct pulse and increments the call
-counter in the HUD. Choose the mode from the HUD selector beside the audio
-controls. The network is an activity visualization driven by JARVIS's live
-state and audio; it does not expose the AI model's internal activations.
+Select a neural visualization and click **HAND** in the console strip or
+**HAND CONTROL** in the full-screen overlay. Approve the JARVIS camera request;
+the feature auto-detects a built-in/local camera, starts it, and shows a small
+round camera preview at the top right. Camera frames are processed locally and
+are not recorded or uploaded by hand tracking. Use one open palm to rotate the
+3D field, two open palms to rotate and roll it, and pinch with both hands to
+spread/close and resize it. **RESET FIELD** centers and restores the scale;
+**STOP HAND** releases the camera. OS camera permission, PyQt WebEngine, and
+the bundled Holo tracking assets are required. If tracking does not start, stop
+other apps using the camera and check the desktop OS camera permission.
 
 ---
 
@@ -1412,6 +1471,10 @@ an action by itself.
   choose the laptop camera in the selector, then click **START LOCAL CAMERA**.
   **STOP CAMERA** releases it. Press **Esc** or **RETURN TO AVATAR** to exit
   full-screen. Windows/macOS/Linux camera privacy settings still apply.
+* To show the animated face-tracking overlay, move a fingertip from above to
+  below your face. Move a fingertip from below to above your face to clear it.
+  Holo animates the mesh in and out and uses the local MediaPipe face tracker;
+  lighting, camera framing, and tracking confidence affect alignment.
 * The hand model, tracking code, scene, notes, and 3D props are bundled under
   `JarvisAI/assets/holo/`. Video frames are processed in the local Qt WebEngine
   view. The Holo gesture deck blocks requests to external hosts; its loopback-only
@@ -1468,8 +1531,11 @@ an action by itself.
 * For a file on the PC, open **MEDIA** and click **LOAD LOCAL VIDEO…**, then
   choose the file. Playback and supported codecs depend on the Qt WebEngine
   build installed on the PC.
-* Click **ENABLE SOUND** or say **“Jarvis, enable video sound.”** Say **“mute
-  video”** to silence it again. Click **PAUSE** or say **“pause the video.”**
+* Click **ENABLE SOUND** or say **“Jarvis, unmute the video.”** Say **“mute
+  video”** to silence it again. Say **“fast forward 10 seconds”** to skip ahead,
+  **“pause the video”** to pause, or **“stop the video”** to stop HUD playback.
+  These voice controls act on the embedded HUD player and do not ask for
+  confirmation. Browser playback remains behind the browser confirmation gate.
 * If YouTube blocks embedding (errors 101/150) or refuses the player identity
   (153), JARVIS attempts to open the regular YouTube watch page **inside the
   HUD**. Unavailable/private videos can still fail. If an error banner remains,
@@ -1518,9 +1584,19 @@ an action by itself.
 
 ## Live data panels
 
-* Say **“Show system charts”** or open **SYSTEM** for a scrolling CPU/RAM chart,
-  available GPU readings, and battery/AC state. GPU readings depend on the
-  detected hardware and optional NVIDIA monitoring support.
+* Say **“Show my RAM usage,” “Show CPU usage,” “Show GPU usage,” “Show storage,”**
+  **“Show network speed,”** or **“Show system status.”** JARVIS opens the
+  animated **SYSTEM TELEMETRY** panel and highlights the requested card. It
+  displays live CPU, GPU, memory, storage, and network gauges/graphs. The panel
+  uses cyan for CPU, magenta for GPU, teal for memory, amber for storage, and
+  teal/blue for download/upload. It also shows
+  available device information, battery/AC state, OS, architecture, uptime,
+  process count, and temperatures. The gauges animate when fresh readings
+  arrive. The detected laptop details are read from the current operating
+  system; a metric appears as unavailable when the OS or driver does not expose
+  it. GPU usage depends on installed hardware/driver support (NVIDIA NVML is
+  available on compatible systems; integrated GPU metrics may be unavailable).
+  The dashboard is a local monitor and does not send telemetry to GitHub.
 * Ask **“Weather in Colombo”** (or another city) to fetch a five-day forecast
   into **WEATHER**. It uses [Open-Meteo](https://open-meteo.com/en/docs); an
   internet connection is required.
@@ -1711,6 +1787,8 @@ JarvisAI/
 │   ├── send_message.py
 │   ├── weather_report.py
 │   ├── flight_finder.py
+│   ├── earth_globe.py
+│   ├── spotify_control.py
 │   ├── youtube_video.py
 │   ├── game_updater.py
 │   ├── code_helper.py
@@ -1732,12 +1810,15 @@ JarvisAI/
 │   └── _template.py
 │
 ├── assets/
-│   └── holo/                 # bundled local gesture UI, hand model, and 3D props
+│   ├── holo/                 # local hand/face tracking, neural hand control, 3D deck
+│   ├── neural/               # GPU neural visualization scene
+│   └── startup_intro.mp4     # optional user-provided intro clip
 │
 ├── memory/
 │   ├── memory_manager.py
 │   ├── config_manager.py
-│   └── long_term.json
+│   ├── voice_personality.py
+│   └── long_term.json          # generated local memory; do not commit
 │
 ├── core/
 │   ├── prompt.txt
@@ -1745,33 +1826,38 @@ JarvisAI/
 │   ├── sandbox.py
 │   ├── injection_guard.py
 │   ├── confirm.py
-│   ├── audit_log.py
 │   ├── avatar.py
 │   ├── avatar_mesh.py
 │   ├── face_model.obj
+│   ├── neural_viz.py
 │   ├── viseme.py
 │   ├── echo.py
 │   ├── hotkey.py
 │   ├── undo.py
 │   ├── audio_devices.py
 │   ├── gemini.py
+│   ├── ai_providers.py
+│   ├── provider_settings.py
+│   ├── startup_video.py
+│   ├── clap_wake.py
+│   ├── wake_word.py
+│   ├── phone_proximity.py
 │   ├── hud_workspace.py
 │   ├── holo_gestures.py
 │   ├── earth_globe.py
 │   ├── earth_globe.html
 │   ├── plugin_loader.py
-│   ├── action_loader.py
-│   └── wake_word.py
+│   └── action_loader.py
 │
 ├── security/
-│   └── audit_log.jsonl
+│   └── audit_log.jsonl        # generated local security log; do not commit
 │
 ├── sandbox_runs/
 │   └── {temporary execution directories}
 │
 ├── dashboard/
 │   └── server.py
-│
+
 └── config/
     ├── api_keys.json
     ├── google_credentials.json

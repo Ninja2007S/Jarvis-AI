@@ -4,7 +4,10 @@ Zero subprocess calls on all platforms — uses ctypes/pynvml/psutil/wmi only.
 """
 import ctypes
 import platform
+import threading
 import time
+from functools import lru_cache
+from pathlib import Path
 
 import psutil
 
@@ -23,6 +26,17 @@ _CPU_STREAK = 3
 # ── NVML DLL cache (Windows: nvml.dll, Linux: libnvidia-ml.so.1) ─────────────
 _nvml_lib: object = None
 _nvml_ok:  object = None   # None=untested  True=works  False=unavailable
+_pynvml_module = None
+_pynvml_device = None
+_pynvml_ok: bool | None = None
+_wmi_gpu_connection = None
+_wmi_gpu_ok: bool | None = None
+_wmi_temp_connection = None
+_wmi_temp_ok: bool | None = None
+_wmi_gpu_counter_ok: bool | None = None
+_network_lock = threading.Lock()
+_network_previous = None
+_network_previous_at = 0.0
 
 
 def _nvml_gpu() -> float:
@@ -70,16 +84,153 @@ def _nvml_gpu() -> float:
 
 
 def _get_gpu_usage() -> float:
-    # pynvml — subprocess-free, works everywhere if installed
-    try:
-        import pynvml  # type: ignore
-        pynvml.nvmlInit()
-        h = pynvml.nvmlDeviceGetHandleByIndex(0)
-        return float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
-    except Exception:
-        pass
+    """Read NVIDIA utilization without reinitializing NVML every poll."""
+    global _pynvml_module, _pynvml_device, _pynvml_ok
+    if _pynvml_ok is not False:
+        try:
+            if _pynvml_device is None:
+                import pynvml  # type: ignore
+                pynvml.nvmlInit()
+                _pynvml_module = pynvml
+                _pynvml_device = pynvml.nvmlDeviceGetHandleByIndex(0)
+                _pynvml_ok = True
+            return float(_pynvml_module.nvmlDeviceGetUtilizationRates(_pynvml_device).gpu)
+        except Exception:
+            _pynvml_ok = False
 
-    return _nvml_gpu()
+    value = _nvml_gpu()
+    if value >= 0:
+        return value
+    return _windows_gpu_usage()
+
+
+def _get_wmi_gpu_connection():
+    global _wmi_gpu_connection, _wmi_gpu_ok
+    if _wmi_gpu_ok is False:
+        return None
+    try:
+        if _wmi_gpu_connection is None:
+            import wmi  # type: ignore
+            _wmi_gpu_connection = wmi.WMI(namespace="root/cimv2")
+        _wmi_gpu_ok = True
+        return _wmi_gpu_connection
+    except Exception:
+        _wmi_gpu_ok = False
+        return None
+
+
+def _windows_gpu_usage() -> float:
+    """Use Windows' built-in GPU engine counters for integrated adapters."""
+    global _wmi_gpu_counter_ok
+    if _OS != "Windows":
+        return -1.0
+    if _wmi_gpu_counter_ok is False:
+        return -1.0
+    try:
+        wmi_conn = _get_wmi_gpu_connection()
+        if wmi_conn is None:
+            _wmi_gpu_counter_ok = False
+            return -1.0
+        rows = wmi_conn.Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine()
+        three_d = [
+            max(0.0, float(row.UtilizationPercentage))
+            for row in rows
+            if "engtype_3d" in str(getattr(row, "Name", "")).lower()
+        ]
+        if three_d:
+            # The counter is per process/engine. Sum those rows, capped at the
+            # full scale, so shared use is visible without reporting >100%.
+            return min(100.0, sum(three_d))
+        _wmi_gpu_counter_ok = False
+    except Exception:
+        _wmi_gpu_counter_ok = False
+    return -1.0
+
+
+@lru_cache(maxsize=1)
+def _cpu_name() -> str:
+    """Best-effort CPU model discovery across Windows, macOS and Linux."""
+    if _OS == "Windows":
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+            if value:
+                return " ".join(str(value).split())
+        except Exception:
+            pass
+    elif _OS == "Linux":
+        try:
+            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore").splitlines():
+                key, sep, value = line.partition(":")
+                if sep and key.strip().lower() in {"model name", "hardware"} and value.strip():
+                    return " ".join(value.split())
+        except Exception:
+            pass
+    elif _OS == "Darwin":
+        # On macOS, ask the system's sysctl API directly instead of launching
+        # `system_profiler` on each refresh. Intel Macs expose the brand string;
+        # Apple Silicon systems may expose it on newer OS versions.
+        try:
+            libc = ctypes.CDLL(None)
+            query = libc.sysctlbyname
+            query.argtypes = [ctypes.c_char_p, ctypes.c_void_p,
+                              ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p,
+                              ctypes.c_size_t]
+            query.restype = ctypes.c_int
+            size = ctypes.c_size_t(0)
+            if query(b"machdep.cpu.brand_string", None, ctypes.byref(size), None, 0) == 0 and size.value:
+                buffer = ctypes.create_string_buffer(size.value)
+                if query(b"machdep.cpu.brand_string", buffer, ctypes.byref(size), None, 0) == 0:
+                    brand = buffer.value.decode("utf-8", "replace").strip()
+                    if brand:
+                        return brand
+        except Exception:
+            pass
+    name = platform.processor().strip()
+    return name or platform.machine() or "CPU details unavailable"
+
+
+@lru_cache(maxsize=1)
+def _gpu_name() -> str:
+    """Return a GPU model when the installed driver API exposes one."""
+    global _pynvml_module, _pynvml_device, _pynvml_ok
+    if _pynvml_ok is not False:
+        try:
+            if _pynvml_device is None:
+                import pynvml  # type: ignore
+                pynvml.nvmlInit()
+                _pynvml_module = pynvml
+                _pynvml_device = pynvml.nvmlDeviceGetHandleByIndex(0)
+                _pynvml_ok = True
+            value = _pynvml_module.nvmlDeviceGetName(_pynvml_device)
+            return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+        except Exception:
+            _pynvml_ok = False
+    if _OS == "Windows":
+        try:
+            wmi_conn = _get_wmi_gpu_connection()
+            names = [str(item.Name).strip() for item in wmi_conn.Win32_VideoController() if getattr(item, "Name", None)] if wmi_conn else []
+            if names:
+                return " / ".join(dict.fromkeys(names))
+        except Exception:
+            pass
+    if _OS == "Linux":
+        try:
+            devices = []
+            for vendor_file in Path("/sys/class/drm").glob("card[0-9]/device/vendor"):
+                vendor = vendor_file.read_text(encoding="ascii", errors="ignore").strip().lower()
+                label = {"0x8086": "Intel graphics", "0x1002": "AMD graphics", "0x10de": "NVIDIA graphics"}.get(vendor)
+                if label and label not in devices:
+                    devices.append(label)
+            if devices:
+                return " / ".join(devices)
+        except Exception:
+            pass
+    return "GPU model unavailable from installed driver APIs"
 
 
 def _get_cpu_temp() -> float:
@@ -97,17 +248,40 @@ def _get_cpu_temp() -> float:
         pass
 
     # Windows: wmi module (pure Python COM, zero subprocess)
-    if _OS == "Windows":
+    global _wmi_temp_connection, _wmi_temp_ok
+    if _OS == "Windows" and _wmi_temp_ok is not False:
         try:
-            import wmi  # type: ignore
-            w = wmi.WMI(namespace="root/wmi")
-            tz = w.MSAcpi_ThermalZoneTemperature()
+            if _wmi_temp_connection is None:
+                import wmi  # type: ignore
+                _wmi_temp_connection = wmi.WMI(namespace="root/wmi")
+            tz = _wmi_temp_connection.MSAcpi_ThermalZoneTemperature()
             if tz:
+                _wmi_temp_ok = True
                 return (tz[0].CurrentTemperature / 10.0) - 273.15
         except Exception:
-            pass
+            _wmi_temp_ok = False
 
     return -1.0
+
+
+def _network_rates() -> tuple[float, float]:
+    """Return aggregate RX/TX throughput in Mbps from monotonic byte deltas."""
+    global _network_previous, _network_previous_at
+    try:
+        counters = psutil.net_io_counters()
+        now = time.monotonic()
+        with _network_lock:
+            previous, previous_at = _network_previous, _network_previous_at
+            _network_previous = counters
+            _network_previous_at = now
+        if previous is None:
+            return 0.0, 0.0
+        elapsed = max(0.001, now - previous_at)
+        rx = max(0.0, (counters.bytes_recv - previous.bytes_recv) * 8 / elapsed / 1_000_000)
+        tx = max(0.0, (counters.bytes_sent - previous.bytes_sent) * 8 / elapsed / 1_000_000)
+        return rx, tx
+    except Exception:
+        return 0.0, 0.0
 
 
 def get_system_status() -> dict:
@@ -122,14 +296,48 @@ def get_system_status() -> dict:
     uptime_h    = int(uptime_secs // 3600)
     uptime_m    = int((uptime_secs % 3600) // 60)
 
+    disk_root = Path.home().anchor or "/"
+    try:
+        disk = psutil.disk_usage(disk_root)
+        disk_percent = round(disk.percent, 1)
+        disk_used_gb = round(disk.used / 1024 ** 3, 1)
+        disk_total_gb = round(disk.total / 1024 ** 3, 1)
+        disk_free_gb = round(disk.free / 1024 ** 3, 1)
+    except Exception:
+        disk_percent = disk_used_gb = disk_total_gb = disk_free_gb = None
+    battery = psutil.sensors_battery()
+    try:
+        freq = psutil.cpu_freq()
+        current_mhz = round(float(freq.current), 0) if freq and freq.current else None
+    except Exception:
+        current_mhz = None
+    network_rx, network_tx = _network_rates()
+
     return {
         "cpu_percent":   round(cpu, 1),
+        "cpu_name":      _cpu_name(),
+        "cpu_cores":     psutil.cpu_count(logical=False),
+        "cpu_threads":   psutil.cpu_count(logical=True),
+        "cpu_freq_mhz":  current_mhz,
         "ram_percent":   round(ram.percent, 1),
         "ram_used_gb":   round(ram.used   / 1024 ** 3, 1),
         "ram_total_gb":  round(ram.total  / 1024 ** 3, 1),
+        "ram_available_gb": round(ram.available / 1024 ** 3, 1),
         "cpu_temp_c":    round(temp, 1) if temp > 0 else None,
         "gpu_percent":   round(gpu,  1) if gpu  >= 0 else None,
+        "gpu_name":      _gpu_name(),
+        "disk_percent":  disk_percent,
+        "disk_used_gb":  disk_used_gb,
+        "disk_total_gb": disk_total_gb,
+        "disk_free_gb":  disk_free_gb,
+        "battery_percent": round(float(battery.percent), 1) if battery else None,
+        "battery_plugged": bool(battery.power_plugged) if battery else None,
+        "network_rx_mbps": round(network_rx, 2),
+        "network_tx_mbps": round(network_tx, 2),
+        "os_name":       f"{platform.system()} {platform.release()}".strip(),
+        "architecture":  platform.machine() or "Unknown",
         "uptime":        f"{uptime_h}h {uptime_m}m",
+        "uptime_seconds": round(uptime_secs),
         "process_count": len(psutil.pids()),
     }
 

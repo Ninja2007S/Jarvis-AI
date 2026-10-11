@@ -4184,6 +4184,10 @@ class MainWindow(QMainWindow):
             self._workspace.show_holo_gestures()
         elif kind == "video_pause":
             self._workspace._pause_video()
+        elif kind == "video_seek":
+            self._workspace.seek_video(int(data.get("seconds", 10)))
+        elif kind == "video_stop":
+            self._workspace.stop_video()
         elif kind == "video_mute":
             self._workspace.set_video_muted(bool(data.get("muted", True)))
         elif kind == "video":
@@ -4219,6 +4223,8 @@ class MainWindow(QMainWindow):
             self._workspace.start_countdown(data.get("minutes", 25), data.get("label", "COUNTDOWN"))
         elif kind == "market":
             self._workspace.show_market_query(data.get("symbol", ""))
+        elif kind == "system":
+            self._workspace.show_system_panel(data.get("focus") or data.get("metric"))
         else:
             self._workspace.show_view(kind)
         if kind != "holo":
@@ -5286,6 +5292,17 @@ class MainWindow(QMainWindow):
         self._autostart_btn.clicked.connect(self._toggle_autostart)
         lay.addWidget(self._autostart_btn)
 
+        self._startup_video_btn = QPushButton()
+        self._startup_video_btn.setFixedHeight(26)
+        self._startup_video_btn.setFont(QFont("Courier New", 7))
+        self._startup_video_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._startup_video_btn.setToolTip(
+            "Choose whether the optional intro video plays before the HUD on launch."
+        )
+        self._startup_video_btn.clicked.connect(self._toggle_startup_video)
+        lay.addWidget(self._startup_video_btn)
+        self._refresh_startup_video_btn()
+
         cust_btn = QPushButton("⚙  CUSTOMISE ASSISTANT")
         cust_btn.setFixedHeight(26)
         cust_btn.setFont(QFont("Courier New", 7))
@@ -6147,6 +6164,41 @@ class MainWindow(QMainWindow):
                 }}
                 QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
             """)
+
+    def _refresh_startup_video_btn(self):
+        if not hasattr(self, "_startup_video_btn"):
+            return
+        from memory.config_manager import get_startup_video_enabled
+        enabled = get_startup_video_enabled()
+        self._startup_video_btn.setText(
+            f"▶  STARTUP INTRO VIDEO: {'ON' if enabled else 'OFF'}"
+        )
+        if enabled:
+            self._startup_video_btn.setStyleSheet(f"""
+                QPushButton {{ background: #001a08; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
+                    text-align: left; padding: 0 8px; }}
+                QPushButton:hover {{ background: #002010; }}
+            """)
+        else:
+            self._startup_video_btn.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px;
+                    text-align: left; padding: 0 8px; }}
+                QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+            """)
+
+    def _toggle_startup_video(self):
+        from memory.config_manager import (
+            get_startup_video_enabled, save_startup_video_enabled,
+        )
+        enabled = not get_startup_video_enabled()
+        save_startup_video_enabled(enabled)
+        self._refresh_startup_video_btn()
+        self._log.append_log(
+            f"SYS: Startup intro video {'enabled' if enabled else 'disabled'}; "
+            "the change applies next launch."
+        )
 
     def _toggle_brief(self):
         from memory.config_manager import get_brief_enabled, save_brief_enabled
@@ -7136,6 +7188,12 @@ class JarvisUI:
     def pause_video(self):
         self._show_workspace_view("video_pause", {})
 
+    def seek_video(self, seconds: int = 10):
+        self._show_workspace_view("video_seek", {"seconds": int(seconds)})
+
+    def stop_video(self):
+        self._show_workspace_view("video_stop", {})
+
     def set_video_muted(self, muted: bool):
         self._show_workspace_view("video_mute", {"muted": bool(muted)})
 
@@ -7173,8 +7231,8 @@ class JarvisUI:
     def show_market_chart(self, symbol: str):
         self._show_workspace_view("market", {"symbol": str(symbol or "")})
 
-    def show_live_panel(self, name: str):
-        self._show_workspace_view(str(name or "system"), {})
+    def show_live_panel(self, name: str, focus: str | None = None):
+        self._show_workspace_view(str(name or "system"), {"focus": str(focus or "")})
 
     def show_earth(self, destination: str = "", origin: str = "", mode: str = "show") -> None:
         """Thread-safe: show the in-window globe, locate a place, or plot a route."""
