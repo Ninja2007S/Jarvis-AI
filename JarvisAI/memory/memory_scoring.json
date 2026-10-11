@@ -1,0 +1,12 @@
+{
+  "weights": {
+    "importance": 0.25,
+    "relevance": 0.2,
+    "frequency": 0.2,
+    "future_relevance": 0.2,
+    "confidence": 0.15
+  },
+  "decay_half_life_days": 180,
+  "default_top_k": 5,
+  "maximum_hops": 2
+}

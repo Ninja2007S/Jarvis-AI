@@ -993,13 +993,121 @@ memory/long_term.json
 
 Instead of loading the entire memory database into every prompt, Jarvis maintains a compact memory core and retrieves additional information when necessary.
 
+### Adaptive, associative, episodic memory
+
+Session summaries are saved as bounded episodes instead of retaining the raw
+transcript. An episode can capture the objective, actions, decisions, outcome,
+open next steps, project name, and related files. Episodes link to the same
+project and to earlier episodes with overlapping context. JARVIS uses those
+links and the project state to recall relevant decisions, previous errors and
+resolutions, and unfinished work together.
+
+Repeated episodes with the same project and objective are consolidated. Project
+decisions are labelled **confirmed**, **tentative**, or **superseded**. JARVIS
+only supersedes an earlier decision when the user explicitly revises it; older
+decisions remain visible as history so they are not mistaken for the current
+choice.
+
+When a meaningful project session ends, JARVIS updates a project snapshot with
+its current state, latest outcome, decisions, files, and remaining steps. Ask
+“continue where we left off” or name a project to retrieve the latest state and
+related episodes. The proactive check-in may mention one clearly unfinished
+project task after its normal silence and cooldown checks; it does not perform
+the work for you.
+
+Project recall distinguishes **remembered unfinished** steps from **verified
+unfinished** steps. When the project root is available, JARVIS checks referenced
+files, the current Git working tree, and paths touched in the five most recent
+commits. It only marks a step verified unfinished when direct evidence supports
+that exact step, such as an explicitly named required file being absent. A file
+existing, a clean working tree, or recent edits alone do not prove completion or
+non-completion. If the project files or Git data are unavailable or inconclusive,
+JARVIS says the status is unverified.
+
+These summaries and project snapshots are stored locally in
+`memory/long_term.json`; the original JSON key/value memories remain readable.
+The Memory panel lets you inspect and delete facts, project snapshots, and
+episodes. **AI-provider memory access is off by default.** With it off, stored
+memory is omitted from automatic prompts, contextual recall results are withheld
+from the provider, and episode summaries are produced locally. Turn on **Allow
+AI-provider access to redacted memory** in the Memory panel to allow relevant
+memory context and up to 40 recent in-memory conversation lines to be sent for
+answers and structured episode summaries. Before those requests, JARVIS filters
+common credential patterns, email addresses, and phone-like numbers. This is a
+pattern-based filter, not a guarantee that every sensitive detail is detected;
+review the data before enabling provider access. Memory content is reference
+data, never instructions.
+
 ### Memory management
 
 The HUD provides a memory panel where stored information can be:
 
 * Viewed
 * Inspected
-* Deleted
+* Deleted or pinned to protect it from routine retention limits
+* Reviewed with its source, confidence, verification state, timestamps, and links
+
+#### Memory record types and evidence
+
+The versioned memory schema keeps the legacy categories readable while adding
+structured records for:
+
+* **Semantic facts**: preferences and facts with their source and verification
+  state. A user-stated fact is marked user-confirmed; an AI-generated summary
+  remains an inference and is never promoted just because it appears repeatedly.
+* **Episodes**: local summaries of significant sessions, including goals,
+  actions, decisions, outcomes, and next steps. They link to related projects
+  and episodes without retaining a full transcript by default.
+* **Procedures**: reusable steps are recorded only after an explicit successful
+  verification and a success check; each later verified run updates its usage
+  count and success rate.
+* **Intentions**: user-requested follow-ups can be triggered by a time, project,
+  or named event. They expire and can be completed or dismissed.
+* **Autobiographical timeline**: a chronological view of meaningful episodes
+  and explicitly superseded decisions.
+
+Every record carries provenance, confidence, verification status, privacy
+classification, and lifecycle metadata. Retrieval ranks by relevance, recency,
+confidence, usage, and source reliability, then follows a bounded number of
+explicit links. Decay affects ranking only; it does not reduce the truth status
+of a fact. Conflicting or superseded records remain inspectable and are labelled
+instead of being silently overwritten.
+
+#### Privacy, consolidation, and deletion
+
+Provider access remains controlled by the Memory panel privacy setting. Before
+memory or conversation text is sent to an enabled AI provider, JARVIS removes
+records classified as local-only, sensitive, secret, or restricted and applies
+the existing credential redaction. Local-only mode continues to keep these
+memory operations on-device. Redaction is pattern-based and cannot guarantee
+detection of every private detail, so review provider access before enabling it.
+
+Consolidation merges only conservative exact duplicates and maintains source
+history. Distinct episodes stay separate. Expiration marks a record expired;
+permanent deletion removes its linked copies, legacy mirrors, and retrieval
+references, then records an anonymous deletion event. Migration from the older
+JSON layout creates a timestamped backup before writing the new schema. If that
+backup or write fails, migration is postponed and the original file is retained.
+
+The **Memory** panel exposes the record metadata and lets you pin or delete
+entries. You can also say “remember that …” to save a user-stated fact, “remind
+me …” to create an intention, or “continue where we left off” to retrieve
+project context. Proactive suggestions are opt-in through the existing
+proactive settings and are suggestions only; JARVIS does not execute the
+unfinished task without a separate request and any required action confirmation.
+
+The main implementation is in `memory/memory_manager.py`, with focused modules
+for scoring, linked retrieval, audit/explanation, semantic facts, episodes,
+procedures, intentions, timeline, consolidation, reflection, and lifecycle.
+The scoring weights are user-editable in `memory/memory_scoring.json`; proactive
+cooldown, quiet hours, and suggestion limits are in
+`memory/planner_config.json`.
+
+Run the focused regression tests from `JarvisAI/` with:
+
+```powershell
+python -m unittest discover -s tests -p "test_cognitive_memory.py" -v
+```
 
 ---
 
@@ -1778,6 +1886,9 @@ JarvisAI/
 │   ├── screen_processor.py
 │   ├── background_monitor.py
 │   ├── proactive.py
+│   ├── proactive_planner.py
+│   ├── proactive_feedback.py
+│   ├── remember_intention.py
 │   ├── reminder.py
 │   ├── system_monitor.py
 │   ├── battery_status.py
@@ -1821,6 +1932,21 @@ JarvisAI/
 │   ├── memory_manager.py
 │   ├── config_manager.py
 │   ├── voice_personality.py
+│   ├── memory_controller.py
+│   ├── semantic_memory.py
+│   ├── episodic_memory.py
+│   ├── procedural_memory.py
+│   ├── prospective_memory.py
+│   ├── autobiographical_memory.py
+│   ├── associative_memory.py
+│   ├── retrieval_engine.py
+│   ├── memory_scoring.py
+│   ├── consolidation.py
+│   ├── memory_reflection.py
+│   ├── memory_lifecycle.py
+│   ├── memory_audit.py
+│   ├── memory_scoring.json
+│   ├── planner_config.json
 │   └── long_term.json          # generated local memory; do not commit
 │
 ├── core/
@@ -1861,11 +1987,14 @@ JarvisAI/
 ├── dashboard/
 │   └── server.py
 
-└── config/
+├── config/
     ├── api_keys.json
     ├── google_credentials.json
     ├── google_token.json
     └── certs/
+
+└── tests/
+    └── test_cognitive_memory.py
 ```
 
 ---

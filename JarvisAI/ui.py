@@ -28,7 +28,7 @@ from PyQt6.QtGui import (
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
@@ -3052,6 +3052,7 @@ class MemoryOverlay(_HudOverlay):
         self._clear_layout()
 
         from memory.memory_manager import all_entries_for_ui
+        from html import escape
 
         hdr = QLabel("🧠  WHAT JARVIS REMEMBERS")
         hdr.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
@@ -3064,13 +3065,44 @@ class MemoryOverlay(_HudOverlay):
 
         rows = all_entries_for_ui()
 
-        cap = QLabel(f"{len(rows)} stored facts — newest first. "
-                     f"Nothing here is sent anywhere; it lives in "
-                     f"memory/long_term.json on this machine.")
+        from memory.config_manager import get_memory_provider_access_enabled
+        provider_memory_enabled = get_memory_provider_access_enabled()
+        privacy_note = (
+            "AI-provider memory access is ON: redacted memory and recent turns may be sent."
+            if provider_memory_enabled else
+            "AI-provider memory access is OFF: stored memory stays out of automatic requests."
+        )
+        cap = QLabel(f"{len(rows)} memories — newest first. Stored in "
+                     f"memory/long_term.json on this machine. {privacy_note} "
+                     f"When enabled, common credentials and contact identifiers are "
+                     f"redacted before memory requests are sent.")
         cap.setWordWrap(True)
         cap.setFont(QFont("Courier New", 7))
         cap.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         self._lay.addWidget(cap)
+
+        from memory.config_manager import (
+            get_memory_provider_access_enabled, save_memory_provider_access_enabled,
+        )
+        self._memory_provider_checkbox = QCheckBox(
+            "Allow AI-provider access to redacted memory"
+        )
+        self._memory_provider_checkbox.setChecked(get_memory_provider_access_enabled())
+        self._memory_provider_checkbox.setToolTip(
+            "Off (default): memory is omitted from automatic AI prompts, contextual "
+            "recall results are withheld, and episode summaries are created locally. "
+            "On: JARVIS redacts common credentials and contact identifiers before "
+            "including relevant memory or up to 40 recent conversation lines in AI requests. "
+            "Redaction uses patterns and may miss unusual sensitive data; review before enabling."
+        )
+        self._memory_provider_checkbox.setStyleSheet(
+            f"QCheckBox {{ color: {C.TEXT_MED}; background: transparent; spacing: 6px; }}"
+            f"QCheckBox::indicator {{ width: 14px; height: 14px; }}"
+            f"QCheckBox::indicator:unchecked {{ border: 1px solid {C.BORDER_B}; background: {C.PANEL2}; }}"
+            f"QCheckBox::indicator:checked {{ border: 1px solid {C.PRI}; background: {C.PRI_DIM}; }}"
+        )
+        self._memory_provider_checkbox.toggled.connect(save_memory_provider_access_enabled)
+        self._lay.addWidget(self._memory_provider_checkbox)
 
         if not rows:
             empty = QLabel("Nothing stored yet.")
@@ -3092,31 +3124,68 @@ class MemoryOverlay(_HudOverlay):
 
             for r in rows:
                 line = QHBoxLayout(); line.setSpacing(6)
-                txt = QLabel(f"<b>{r['key'].replace('_', ' ')}</b> "
-                             f"<span style='color:{C.TEXT_MED}'>— {r['value']}</span>")
+                meta_parts = [r.get("category", "memory")]
+                if r.get("memory_record"):
+                    meta_parts.extend((r.get("type", "semantic"), r.get("source", "unknown"),
+                                       f"claim {round(float(r.get('confidence', 0)) * 100)}%",
+                                       r.get("verification_status", "unverified"),
+                                       f"privacy {r.get('privacy_class', 'personal')}"))
+                    if r.get("summary_confidence") is not None:
+                        meta_parts.append(f"summary {round(float(r['summary_confidence']) * 100)}%")
+                    if r.get("last_verified_at"):
+                        meta_parts.append(f"verified {str(r['last_verified_at'])[:10]}")
+                    if r.get("source_history"):
+                        origin = r["source_history"][0]
+                        meta_parts.append(f"origin {origin.get('source', 'unknown')} · {origin.get('why', '')[:55]}")
+                    if r.get("change_history"):
+                        change = r["change_history"][-1]
+                        meta_parts.append(f"last change {change.get('action', '')} · {change.get('why', '')[:55]}")
+                    if r.get("supporting_episode_ids"):
+                        meta_parts.append("supports " + ",".join(r["supporting_episode_ids"][:2]))
+                    if r.get("related_memory_ids"):
+                        meta_parts.append("links " + ",".join(r["related_memory_ids"][:2]))
+                    if r.get("conflicts", 0):
+                        meta_parts.append(f"possible conflicts {r['conflicts']}")
+                elif r.get("category") == "response_usage":
+                    meta_parts.append(f"context {r.get('source', 'response')}")
+                meta = QLabel(" · ".join(escape(str(part)) for part in meta_parts)
+                              + f" · {escape(str(r.get('updated') or '—'))}")
+                meta.setWordWrap(True)
+                meta.setFont(QFont("Courier New", 7))
+                meta.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+                txt = QLabel(f"<b>{escape(str(r['key']).replace('_', ' '))}</b> "
+                             f"<span style='color:{C.TEXT_MED}'>— {escape(str(r['value']))}</span>")
                 txt.setWordWrap(True)
                 txt.setFont(QFont("Courier New", 8))
                 txt.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
                 line.addWidget(txt, 1)
 
-                meta = QLabel(f"{r['category'][:4]} · {r['updated'] or '—'}")
-                meta.setFont(QFont("Courier New", 7))
-                meta.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
                 line.addWidget(meta)
 
-                rm = QPushButton("✕")
-                rm.setFixedSize(20, 20)
-                rm.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-                rm.setCursor(Qt.CursorShape.PointingHandCursor)
-                rm.setToolTip("Forget this")
-                rm.setStyleSheet(f"""
-                    QPushButton {{ background: transparent; color: {C.TEXT_DIM};
-                        border: 1px solid {C.BORDER}; border-radius: 3px; }}
-                    QPushButton:hover {{ color: {C.RED}; border-color: {C.RED}; }}
-                """)
-                rm.clicked.connect(
-                    lambda _=False, c=r["category"], k=r["key"]: self._forget(c, k))
-                line.addWidget(rm)
+                if r.get("memory_record"):
+                    pin = QPushButton("PIN" if r.get("pinned") else "○")
+                    pin.setFixedSize(30, 22)
+                    pin.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+                    pin.setCursor(Qt.CursorShape.PointingHandCursor)
+                    pin.setToolTip("Unpin retention" if r.get("pinned") else "Pin this memory")
+                    pin.setStyleSheet(f"QPushButton {{ background: transparent; color: {C.PRI}; border: 1px solid {C.BORDER}; }}")
+                    pin.clicked.connect(lambda _=False, mid=r.get("id", ""), value=not r.get("pinned", False): self._pin(mid, value))
+                    line.addWidget(pin)
+
+                rm = QPushButton("✕") if r.get("category") != "response_usage" else None
+                if rm is not None:
+                    rm.setFixedSize(20, 20)
+                    rm.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+                    rm.setCursor(Qt.CursorShape.PointingHandCursor)
+                    rm.setToolTip("Permanently delete this memory and linked copies")
+                    rm.setStyleSheet(f"""
+                        QPushButton {{ background: transparent; color: {C.TEXT_DIM};
+                            border: 1px solid {C.BORDER}; border-radius: 3px; }}
+                        QPushButton:hover {{ color: {C.RED}; border-color: {C.RED}; }}
+                    """)
+                    rm.clicked.connect(
+                        lambda _=False, c=r["category"], k=r.get("id", r["key"]): self._forget(c, k))
+                    line.addWidget(rm)
 
                 holder = QWidget()
                 holder.setLayout(line)
@@ -3151,6 +3220,11 @@ class MemoryOverlay(_HudOverlay):
         # The rebuild destroys the very ✕ button that emitted this signal, and
         # Qt is entitled to touch the sender after a slot returns; tearing it
         # down mid-emission is how a widget ends up half-alive on screen.
+        QTimer.singleShot(0, self._rebuild)
+
+    def _pin(self, memory_id: str, pinned: bool):
+        from memory.memory_lifecycle import pin_memory
+        pin_memory(memory_id, pinned)
         QTimer.singleShot(0, self._rebuild)
 
 

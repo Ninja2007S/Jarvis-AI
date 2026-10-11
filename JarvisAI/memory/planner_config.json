@@ -1,0 +1,5 @@
+{
+  "cooldown_seconds": 1200,
+  "quiet_hours": [22, 7],
+  "max_suggestions": 3
+}

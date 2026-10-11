@@ -139,6 +139,8 @@ _TIERS: dict[str, str] = {
 
     # state-changing but reversible / low blast-radius
     "save_memory":      TIER_SENSITIVE,
+    "remember_intention": TIER_SENSITIVE,
+    "proactive_feedback": TIER_SENSITIVE,
     "reminder":         TIER_SENSITIVE,
     "open_app":         TIER_DANGEROUS,
     "spotify_control":  TIER_SENSITIVE,
@@ -193,6 +195,8 @@ _CONFIRMATION_LABELS = {
     "phone_call": "Place a phone call",
     "shutdown_jarvis": "Close Jarvis",
     "self_heal": "JARVIS self-repair",
+    "remember_intention": "Save a future intention",
+    "proactive_feedback": "Update suggestion feedback",
 }
 
 _CONFIRMATION_PARAM_LABELS = {

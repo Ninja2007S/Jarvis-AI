@@ -271,6 +271,19 @@ def save_proactive_audio_enabled(enabled: bool) -> None:
     _save_flag("proactive_audio", enabled)
 
 
+def get_memory_provider_access_enabled() -> bool:
+    """Whether stored memory may be included in AI-provider requests.
+
+    Defaults off. This gates prompt memory, contextual recall results,
+    proactive memory context, and provider-generated episode summaries.
+    """
+    return bool(load_api_keys().get("memory_provider_access", False))
+
+
+def save_memory_provider_access_enabled(enabled: bool) -> None:
+    _save_flag("memory_provider_access", bool(enabled))
+
+
 MEDIA_RESOLUTIONS = ("default", "low", "medium", "high")
 
 
