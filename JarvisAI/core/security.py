@@ -183,6 +183,7 @@ _CONFIRMATION_LABELS = {
     "email_gmail": "Email access",
     "instagram_account": "Instagram account access",
     "browser_control": "Browser access",
+    "youtube_video": "YouTube playback control",
     "desktop": "Desktop control",
     "code_helper": "Code execution or changes",
     "file_controller": "File access or changes",
@@ -251,6 +252,8 @@ def _confirmation_detail(params: dict) -> str:
         return "  ·  ".join(parts)[:4500]
     items = []
     for key, value in params.items():
+        if str(key).startswith("_jarvis_"):
+            continue
         label = _CONFIRMATION_PARAM_LABELS.get(
             str(key), str(key).replace("_", " ").capitalize()
         )
@@ -367,12 +370,17 @@ def tier_for(name: str, params: dict | None = None) -> str:
         action = str((params or {}).get("action", "show")).strip().lower()
         return TIER_SAFE if action in {"close", "stop", "hide"} else TIER_DANGEROUS
     if name == "youtube_video":
-        # These controls only affect the embedded HUD player. External browser
-        # control remains a separate browser_control tool and requires approval.
+        # The internal target is set by main.py after checking live player state;
+        # model-supplied target values are removed before this function is called.
         action = str((params or {}).get("action", "")).strip().lower()
         if action in {"pause", "play_pause", "fast_forward", "seek", "stop",
                       "sound_on", "unmute", "sound_off", "mute"}:
-            return TIER_SAFE
+            target = str((params or {}).get("_jarvis_playback_target", "")).lower()
+            if target in {"hud", "none"}:
+                return TIER_SAFE
+            if target == "browser":
+                return TIER_DANGEROUS
+            return TIER_DANGEROUS  # fail closed when the target cannot be verified
     base = _TIERS.get(name, TIER_SENSITIVE)
     if base == TIER_DANGEROUS:
         return base
@@ -650,6 +658,7 @@ def guard(name: str, params: dict, run: Callable[[], str]) -> str:
     # traceable to a fresh user request so untrusted page/email content cannot
     # silently stop playback or enable audio.
     if (name == "youtube_video"
+            and str((params or {}).get("_jarvis_playback_target", "")).lower() == "hud"
             and str((params or {}).get("action", "")).strip().lower()
             in {"pause", "play_pause", "fast_forward", "seek", "stop",
                 "sound_on", "unmute", "sound_off", "mute"}

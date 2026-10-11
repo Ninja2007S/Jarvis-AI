@@ -1905,11 +1905,41 @@ class JarvisLive:
                 # file_processor: fall back to the currently-uploaded file when none is given
                 if name == "file_processor" and not args.get("file_path") and self.ui.current_file:
                     args["file_path"] = self.ui.current_file
+                if name == "youtube_video" and str(args.get("action", "")).lower().strip() in {
+                    "pause", "play_pause", "fast_forward", "seek", "stop",
+                    "sound_on", "unmute", "sound_off", "mute",
+                }:
+                    # Never trust a model-supplied routing marker. Resolve the
+                    # actual current target: HUD controls are immediate; a
+                    # JARVIS-controlled browser video is confirmation-gated.
+                    args.pop("_jarvis_playback_target", None)
+                    args.pop("_jarvis_playback_browser", None)
+                def _guard_action():
+                    if name == "youtube_video" and str(args.get("action", "")).lower().strip() in {
+                        "pause", "play_pause", "fast_forward", "seek", "stop",
+                        "sound_on", "unmute", "sound_off", "mute",
+                    }:
+                        if self.ui.hud_video_is_active():
+                            args["_jarvis_playback_target"] = "hud"
+                        else:
+                            try:
+                                from actions.browser_control import youtube_playback_target
+                                browser_name = youtube_playback_target()
+                            except Exception:
+                                browser_name = ""
+                            if browser_name:
+                                args["_jarvis_playback_target"] = "browser"
+                                args["_jarvis_playback_browser"] = browser_name
+                            else:
+                                args["_jarvis_playback_target"] = "none"
+                    return security.guard(
+                        name, args,
+                        lambda: self._action_registry.run(name, args, _ctx),
+                    )
                 _ctx = {"player": self.ui, "speak": self.speak,
                         "response": None, "session_memory": None}
                 r = await loop.run_in_executor(
-                    None,
-                    lambda: security.guard(name, args, lambda: self._action_registry.run(name, args, _ctx))
+                    None, _guard_action
                 )
                 result = r or "Done."
                 # web_search: mirror results to the on-screen content panel

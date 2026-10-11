@@ -1339,6 +1339,12 @@ class HudWorkspace(QWidget):
           const f=document.querySelector('iframe');
           if(f)f.contentWindow.postMessage(JSON.stringify({event:'command',func:'stopVideo',args:[]}), '*');
         })()""")
+        self._video_view.page().setAudioMuted(True)
+        self._video_active = False
+        self._video_muted = True
+        self._video_view.setHtml(
+            "<!doctype html><html><body style='margin:0;background:#05090b'></body></html>"
+        )
         self._video_label.setText("VIDEO STOPPED")
         self._video_sound.setText("ENABLE SOUND  ◌")
 

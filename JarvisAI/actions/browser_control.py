@@ -11,6 +11,7 @@ import threading
 import webbrowser
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from playwright.async_api import (
     async_playwright,
@@ -487,6 +488,57 @@ class _BrowserSession:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=timeout)
 
+    async def _youtube_video_present(self) -> bool:
+        """Return true only for a YouTube page with a media element."""
+        page = self._page
+        if page is None or page.is_closed():
+            return False
+        host = (urlsplit(page.url).hostname or "").lower()
+        if host not in {"youtube.com", "www.youtube.com", "m.youtube.com",
+                        "music.youtube.com", "youtube-nocookie.com",
+                        "www.youtube-nocookie.com"}:
+            return False
+        try:
+            return bool(await page.locator("video").count())
+        except Exception:
+            return False
+
+    async def control_youtube_media(self, operation: str, seconds: int = 10) -> str:
+        """Control the current YouTube HTML5 player after the caller's approval."""
+        if not await self._youtube_video_present():
+            return "No YouTube video is open in the JARVIS-controlled browser."
+        script = """({action, seconds}) => {
+          const video = document.querySelector('video');
+          if (!video) return 'The YouTube video player is not ready.';
+          if (action === 'pause') {
+            video.pause(); return 'Paused YouTube in the browser.';
+          }
+          if (action === 'fast_forward') {
+            const end = Number.isFinite(video.duration) ? video.duration : Infinity;
+            video.currentTime = Math.min(end, Math.max(0, video.currentTime + seconds));
+            return `Skipped ahead ${seconds} seconds in browser YouTube.`;
+          }
+          if (action === 'stop') {
+            video.pause(); video.currentTime = 0;
+            return 'Stopped browser YouTube playback.';
+          }
+          if (action === 'unmute') {
+            video.muted = false; video.volume = 1;
+            return 'Enabled sound for browser YouTube.';
+          }
+          if (action === 'mute') {
+            video.muted = true;
+            return 'Muted browser YouTube.';
+          }
+          return 'Unsupported YouTube playback control.';
+        }"""
+        try:
+            return str(await self._page.evaluate(
+                script, {"action": operation, "seconds": max(5, min(120, int(seconds)))}
+            ))
+        except Exception as exc:
+            return f"Browser YouTube control failed: {exc}"
+
     def close(self):
         if self._loop:
             asyncio.run_coroutine_threadsafe(self._async_close(), self._loop).result(10)
@@ -921,8 +973,43 @@ class _SessionRegistry:
                 lines.append(f"  • {name}{marker}")
             return "Open browsers:\n" + "\n".join(lines)
 
+    def get_existing(self, browser_name: str) -> _BrowserSession | None:
+        name = _ALIASES.get(browser_name.lower().strip(), browser_name.lower().strip())
+        with self._lock:
+            return self._sessions.get(name)
+
+    def youtube_playback_target(self) -> str:
+        """Active controlled browser name when its current page is YouTube video."""
+        with self._lock:
+            name = self._active_browser
+            session = self._sessions.get(name) if name else None
+        if session is None or not session._loop or not session._loop.is_running():
+            return ""
+        try:
+            return name if session.run(session._youtube_video_present(), timeout=4) else ""
+        except Exception:
+            return ""
+
 
 _registry = _SessionRegistry()
+
+
+def youtube_playback_target() -> str:
+    """Return the active JARVIS-controlled browser if it is showing YouTube video."""
+    return _registry.youtube_playback_target()
+
+
+def control_youtube_media(browser_name: str, operation: str, seconds: int = 10) -> str:
+    """Operate only a YouTube video in the named, already-open browser session."""
+    session = _registry.get_existing(str(browser_name or ""))
+    if session is None:
+        return "The YouTube browser session is no longer available."
+    try:
+        return session.run(
+            session.control_youtube_media(operation, seconds), timeout=8
+        )
+    except Exception as exc:
+        return f"Browser YouTube control failed: {exc}"
 
 def browser_control(
     parameters:    dict = None,

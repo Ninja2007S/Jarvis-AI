@@ -7194,6 +7194,13 @@ class JarvisUI:
     def stop_video(self):
         self._show_workspace_view("video_stop", {})
 
+    def hud_video_is_active(self) -> bool:
+        """Lightweight state query used by playback routing before dispatch."""
+        try:
+            return bool(self._win._workspace._video_active)
+        except (AttributeError, RuntimeError):
+            return False
+
     def set_video_muted(self, muted: bool):
         self._show_workspace_view("video_mute", {"muted": bool(muted)})
 

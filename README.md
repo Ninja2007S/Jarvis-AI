@@ -1535,7 +1535,10 @@ an action by itself.
   video”** to silence it again. Say **“fast forward 10 seconds”** to skip ahead,
   **“pause the video”** to pause, or **“stop the video”** to stop HUD playback.
   These voice controls act on the embedded HUD player and do not ask for
-  confirmation. Browser playback remains behind the browser confirmation gate.
+  confirmation. If a YouTube video is playing in a JARVIS-controlled browser
+  session, the same commands act there after the confirmation prompt. Open the
+  site through JARVIS **Browser Control** first; JARVIS cannot attach to an
+  unrelated browser window it did not open/control.
 * If YouTube blocks embedding (errors 101/150) or refuses the player identity
   (153), JARVIS attempts to open the regular YouTube watch page **inside the
   HUD**. Unavailable/private videos can still fail. If an error banner remains,

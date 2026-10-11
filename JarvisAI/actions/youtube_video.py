@@ -338,34 +338,61 @@ def _handle_play(parameters: dict, player) -> str:
 
 
 def _handle_pause(parameters: dict, player=None, speak=None) -> str:
-    """Pause playback in the embedded HUD only."""
+    """Pause playback in the HUD or a confirmation-gated browser session."""
+    routed = _browser_media_control(parameters, "pause")
+    if routed is not None:
+        return routed
     if player and hasattr(player, "pause_video"):
         player.pause_video()
         return "Paused the video in the JARVIS HUD."
-    return "The JARVIS HUD video player is not available."
+    return "No YouTube video is active in the JARVIS HUD."
+
+
+def _browser_media_control(parameters: dict, operation: str, seconds: int = 10):
+    """Route only to the already-verified browser target from main.py."""
+    target = str(parameters.get("_jarvis_playback_target", "hud")).lower()
+    if target == "none":
+        return "I don't see an active YouTube video in the HUD or JARVIS-controlled browser."
+    if target != "browser":
+        return None
+    browser = str(parameters.get("_jarvis_playback_browser", ""))
+    try:
+        from actions.browser_control import control_youtube_media
+        return control_youtube_media(browser, operation, seconds)
+    except Exception as exc:
+        return f"Could not control browser YouTube playback: {exc}"
 
 
 def _handle_fast_forward(parameters: dict, player=None, speak=None) -> str:
-    if not player or not hasattr(player, "seek_video"):
-        return "The JARVIS HUD video player is not available."
     try:
         seconds = max(5, min(120, int(parameters.get("seconds", 10))))
     except (TypeError, ValueError):
         seconds = 10
+    routed = _browser_media_control(parameters, "fast_forward", seconds)
+    if routed is not None:
+        return routed
+    if not player or not hasattr(player, "seek_video"):
+        return "No YouTube video is active in the JARVIS HUD."
     player.seek_video(seconds)
     return f"Skipped ahead {seconds} seconds in the JARVIS HUD video."
 
 
 def _handle_stop(parameters: dict, player=None, speak=None) -> str:
+    routed = _browser_media_control(parameters, "stop")
+    if routed is not None:
+        return routed
     if not player or not hasattr(player, "stop_video"):
-        return "The JARVIS HUD video player is not available."
+        return "No YouTube video is active in the JARVIS HUD."
     player.stop_video()
     return "Stopped the video in the JARVIS HUD."
 
 
 def _handle_sound(parameters: dict, player, muted: bool) -> str:
+    routed = _browser_media_control(parameters, "mute" if muted else "unmute")
+    if routed is not None:
+        return routed
     if not player or not hasattr(player, "set_video_muted"):
-        return "The HUD video player is not available."
+        return "No YouTube video is active in the JARVIS HUD."
     player.set_video_muted(muted)
     return "Video sound enabled in the HUD." if not muted else "Video sound muted in the HUD."
 
