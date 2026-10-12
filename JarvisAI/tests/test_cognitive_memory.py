@@ -24,11 +24,12 @@ class CognitiveMemoryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent)
         self.path = Path(self.temp.name) / "long_term.json"
-        self.old_path = mm.MEMORY_PATH
+        self.old_path, self.old_base = mm.MEMORY_PATH, mm.BASE_DIR
         mm.MEMORY_PATH = self.path
+        mm.BASE_DIR = Path(self.temp.name)
 
     def tearDown(self):
-        mm.MEMORY_PATH = self.old_path
+        mm.MEMORY_PATH, mm.BASE_DIR = self.old_path, self.old_base
         self.temp.cleanup()
 
     def test_schema_migration_keeps_legacy_data_and_backs_up_first(self):

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from typing import Any
+import hashlib
+import re
 
 
 def encode_user_fact(key: str, value: str, *, category: str = "notes", privacy_class: str = "personal") -> dict:
@@ -37,3 +39,30 @@ def should_encode(*, explicit_user_fact: bool = False, meaningful_episode: bool 
     if meaningful_episode:
         return "episodic"
     return None
+
+
+def should_summarize_locally(text: str, memory: dict | None = None) -> bool:
+    """Cheap session-end gate: skip greetings, tiny turns, and repeats."""
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip().casefold()
+    words = re.findall(r"[\w]+", normalized)
+    if len(words) < 12 or len(normalized) < 80:
+        return False
+    if re.fullmatch(r"(?:hi|hello|hey|thanks|thank you|ok|okay|bye|goodbye)[.! ]*", normalized):
+        return False
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    for episode in (memory or {}).get("episodes", [])[-20:]:
+        if not isinstance(episode, dict):
+            continue
+        if episode.get("evidence_hash") == digest:
+            return False
+        summary = re.sub(r"\s+", " ", str(episode.get("summary", ""))).strip().casefold()
+        other = set(re.findall(r"[\w]+", summary))
+        current = set(words)
+        if current and len(current & other) / max(1, len(current | other)) >= .94:
+            return False
+    return True
+
+
+def evidence_hash(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip().casefold()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()

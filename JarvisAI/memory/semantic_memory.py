@@ -34,7 +34,6 @@ def remember_fact(key: str, content: str, *, category: str = "notes", project: s
         from memory.memory_manager import _append_audit, save_memory
         _append_audit(previous_store, snapshot["id"], "supersede", "user", "user stated a revised fact")
         save_memory(previous_store)
-    update_memory({category: {key: {"value": value}}}, source=source)
     now = datetime.now().isoformat(timespec="seconds")
     record = add_memory_record({
         "id": record_id, "type": "semantic", "project": project,
@@ -46,6 +45,8 @@ def remember_fact(key: str, content: str, *, category: str = "notes", project: s
         "privacy_class": privacy_class, "legacy_category": category,
         "legacy_key": key,
     }, actor="user" if verified else "system", reason="semantic fact encoded")
+    if verified:
+        update_memory({category: {key: {"value": value}}}, source=source)
     if verified and previous and str(previous.get("content", "")) != f"{key}: {value}":
         from memory.associative_memory import link_memories
         link_memories(snapshot["id"], record_id, "supersedes", actor="user")

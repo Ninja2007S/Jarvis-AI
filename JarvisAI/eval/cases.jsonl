@@ -1,0 +1,40 @@
+{"id":"direct-01","query":"jarvis eval marker 01 cobalt wallet zirconalpha01","expected":["synthetic memory marker 01"],"type":"direct_recall"}
+{"id":"direct-02","query":"jarvis eval marker 02 violet wallet zirconalpha02","expected":["synthetic memory marker 02"],"type":"direct_recall"}
+{"id":"direct-03","query":"jarvis eval marker 03 saffron wallet zirconalpha03","expected":["synthetic memory marker 03"],"type":"direct_recall"}
+{"id":"direct-04","query":"jarvis eval marker 04 cedar wallet zirconalpha04","expected":["synthetic memory marker 04"],"type":"direct_recall"}
+{"id":"direct-05","query":"jarvis eval marker 05 orbit wallet zirconalpha05","expected":["synthetic memory marker 05"],"type":"direct_recall"}
+{"id":"direct-06","query":"jarvis eval marker 06 cobalt signal zirconalpha06","expected":["synthetic memory marker 06"],"type":"direct_recall"}
+{"id":"direct-07","query":"jarvis eval marker 07 violet signal zirconalpha07","expected":["synthetic memory marker 07"],"type":"direct_recall"}
+{"id":"direct-08","query":"jarvis eval marker 08 saffron signal zirconalpha08","expected":["synthetic memory marker 08"],"type":"direct_recall"}
+{"id":"direct-09","query":"jarvis eval marker 09 cedar signal zirconalpha09","expected":["synthetic memory marker 09"],"type":"direct_recall"}
+{"id":"direct-10","query":"jarvis eval marker 10 orbit signal zirconalpha10","expected":["synthetic memory marker 10"],"type":"direct_recall"}
+{"id":"direct-11","query":"jarvis eval marker 11 cobalt routine zirconalpha11","expected":["synthetic memory marker 11"],"type":"direct_recall"}
+{"id":"direct-12","query":"jarvis eval marker 12 violet routine zirconalpha12","expected":["synthetic memory marker 12"],"type":"direct_recall"}
+{"id":"direct-13","query":"jarvis eval marker 13 saffron routine zirconalpha13","expected":["synthetic memory marker 13"],"type":"direct_recall"}
+{"id":"direct-14","query":"jarvis eval marker 14 cedar routine zirconalpha14","expected":["synthetic memory marker 14"],"type":"direct_recall"}
+{"id":"direct-15","query":"jarvis eval marker 15 orbit routine zirconalpha15","expected":["synthetic memory marker 15"],"type":"direct_recall"}
+{"id":"direct-16","query":"jarvis eval marker 16 cobalt project zirconalpha16","expected":["synthetic memory marker 16"],"type":"direct_recall"}
+{"id":"direct-17","query":"jarvis eval marker 17 violet project zirconalpha17","expected":["synthetic memory marker 17"],"type":"direct_recall"}
+{"id":"direct-18","query":"jarvis eval marker 18 saffron project zirconalpha18","expected":["synthetic memory marker 18"],"type":"direct_recall"}
+{"id":"direct-19","query":"jarvis eval marker 19 cedar project zirconalpha19","expected":["synthetic memory marker 19"],"type":"direct_recall"}
+{"id":"direct-20","query":"jarvis eval marker 20 orbit project zirconalpha20","expected":["synthetic memory marker 20"],"type":"direct_recall"}
+{"id":"assoc-audio-1","query":"microphone input audio failure after reconnect","expected":["audio bug fixed 2026-09-20","microphone input silent after restart"],"type":"associative_recall"}
+{"id":"assoc-audio-2","query":"mic input audio still silent after restart","expected":["audio bug fixed 2026-09-20","microphone input silent after restart"],"type":"associative_recall"}
+{"id":"assoc-audio-3","query":"microphone input reconnect resolved","expected":["audio bug fixed","microphone input silent after restart"],"type":"associative_recall"}
+{"id":"assoc-audio-4","query":"what fixed the microphone audio input issue","expected":["audio bug fixed 2026-09-20","microphone input silent after restart"],"type":"associative_recall"}
+{"id":"assoc-audio-5","query":"microphone input still silent restart","expected":["audio bug fixed 2026-09-20","microphone input silent after restart"],"type":"associative_recall"}
+{"id":"superseded-1","query":"currentdecisionone","expected":["decision revision 1"],"type":"superseded_fact"}
+{"id":"superseded-2","query":"currentdecisiontwo","expected":["decision revision 2"],"type":"superseded_fact"}
+{"id":"superseded-3","query":"currentdecisionthree","expected":["decision revision 3"],"type":"superseded_fact"}
+{"id":"superseded-4","query":"currentdecisionfour","expected":["decision revision 4"],"type":"superseded_fact"}
+{"id":"superseded-5","query":"currentdecisionfive","expected":["decision revision 5"],"type":"superseded_fact"}
+{"id":"project-similar-alpha","query":"config alpha_config_path","project":"Project Alpha","expected":["alpha project config.py"],"type":"direct_recall"}
+{"id":"project-similar-beta","query":"config beta_config_path","project":"Project Beta","expected":["beta project config.py"],"type":"direct_recall"}
+{"id":"project-similar-alpha-tests","query":"settings alpha_settings_suite","project":"Project Alpha","expected":["alpha project settings"],"type":"direct_recall"}
+{"id":"conflict-1","query":"disputed preference color 1","expected":[],"type":"conflicting_facts"}
+{"id":"conflict-2","query":"disputed preference color 2","expected":[],"type":"conflicting_facts"}
+{"id":"conflict-3","query":"disputed preference color 3","expected":[],"type":"conflicting_facts"}
+{"id":"empty-1","query":"unique absent starship gemstone xylophone token 1","expected":[],"type":"should_return_nothing"}
+{"id":"empty-2","query":"unique absent starship gemstone quartz token 2","expected":[],"type":"should_return_nothing"}
+{"id":"empty-3","query":"unique absent starship gemstone nebula token 3","expected":[],"type":"should_return_nothing"}
+{"id":"empty-4","query":"unique absent starship gemstone fennel token 4","expected":[],"type":"should_return_nothing"}

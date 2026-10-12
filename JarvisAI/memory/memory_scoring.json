@@ -1,12 +1,24 @@
 {
   "weights": {
     "importance": 0.25,
-    "relevance": 0.2,
-    "frequency": 0.2,
-    "future_relevance": 0.2,
-    "confidence": 0.15
+    "frequency": 0.20,
+    "goal_relevance": 0.20,
+    "confidence": 0.15,
+    "recency": 0.20
   },
-  "decay_half_life_days": 180,
+  "half_life_days": {
+    "semantic": 180,
+    "episodic": 90,
+    "prospective": 30,
+    "procedural": 3650,
+    "autobiographical": 3650,
+    "pinned": 36500
+  },
   "default_top_k": 5,
-  "maximum_hops": 2
+  "maximum_hops": 2,
+  "minimum_relevance": 0.60,
+  "token_budget": 1500,
+  "relevance_weight": 0.78,
+  "priority_weight": 0.22,
+  "baseline_regression_margin": 0.02
 }

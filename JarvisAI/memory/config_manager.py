@@ -1,6 +1,8 @@
 import json
 import os
 import sys
+import threading
+from datetime import date
 from pathlib import Path
 
 def get_base_dir() -> Path:
@@ -11,6 +13,7 @@ def get_base_dir() -> Path:
 BASE_DIR    = get_base_dir()
 CONFIG_DIR  = BASE_DIR / "config"
 CONFIG_FILE = CONFIG_DIR / "api_keys.json"
+_MEMORY_CONFIG_LOCK = threading.Lock()
 
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -282,6 +285,38 @@ def get_memory_provider_access_enabled() -> bool:
 
 def save_memory_provider_access_enabled(enabled: bool) -> None:
     _save_flag("memory_provider_access", bool(enabled))
+
+
+def get_memory_encryption_enabled() -> bool:
+    return bool(load_api_keys().get("memory_encryption_enabled", False))
+
+
+def save_memory_encryption(enabled: bool, key_path: str = "") -> None:
+    """Enable optional Fernet encryption for sensitive memory rows."""
+    ensure_config_dir()
+    data = load_api_keys()
+    data["memory_encryption_enabled"] = bool(enabled)
+    if key_path.strip():
+        data["memory_encryption_key_path"] = key_path.strip()
+    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+
+
+def reserve_memory_llm_call() -> bool:
+    """Atomically reserve one optional provider call under the daily cap."""
+    with _MEMORY_CONFIG_LOCK:
+        data = load_api_keys()
+        cap = max(0, min(1000, int(data.get("memory_daily_llm_call_cap", 20) or 0)))
+        today = date.today().isoformat()
+        usage = data.get("_memory_llm_daily_usage", {})
+        if not isinstance(usage, dict) or usage.get("date") != today:
+            usage = {"date": today, "count": 0}
+        if int(usage.get("count", 0) or 0) >= cap:
+            return False
+        usage["count"] = int(usage.get("count", 0) or 0) + 1
+        data["_memory_llm_daily_usage"] = usage
+        ensure_config_dir()
+        CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        return True
 
 
 MEDIA_RESOLUTIONS = ("default", "low", "medium", "high")

@@ -26,7 +26,12 @@ config/earth_map_cache/
 
 # Personal data and runtime state
 memory/long_term.json
+memory/long_term.json*
 memory/*.db
+memory/*.sqlite3
+memory/*.sqlite3.bak
+memory/*.rolling-*.bak
+memory/backups/
 memory/call_state.json
 *.db
 *.sqlite
@@ -34,6 +39,11 @@ memory/call_state.json
 security/audit_log.jsonl
 sandbox_runs/
 dashboard/uploads/
+eval/results/latest.json
+config/memory_audit.key
+config/memory_audit.anchor
+config/memory_encryption.key
+config/memory_settings.json
 
 # Python build output
 __pycache__/

@@ -537,13 +537,13 @@ security.verify_log()
 ```
 
 The log uses an HMAC-authenticated hash chain. Its random key and an
-HMAC-authenticated latest-head checkpoint live in the current user's local
-application-data directory, outside the repository. Verification detects
+HMAC-authenticated latest-head checkpoint are stored under the local
+`config/` directory and excluded by `.gitignore`. Verification detects
 ordinary edits and deletion of the latest entries relative to that checkpoint.
-Existing SHA-only logs are anchored on first upgrade; deletions that happened
-before that first anchor cannot be detected retroactively. A process running as
-your account can still access or replace both the key and checkpoint, so this
-does not protect against malware or an attacker controlling your account.
+Legacy unsigned audit rows remain as history; changes made before the first
+signed checkpoint cannot be detected retroactively. A process running as your
+account can still access or replace both the key and checkpoint, so this does
+not protect against malware or an attacker controlling your account.
 
 ---
 
@@ -974,143 +974,146 @@ This allows Jarvis to produce more expressive mouth movement than a simple volum
 
 # 🧠 Persistent Memory
 
-Jarvis maintains a local long-term memory system.
+JARVIS stores long-term memory on this computer in SQLite. The app keeps a
+compact identity/preference core and retrieves additional records only when a
+request needs them.
 
-It can remember:
+The active database is `memory/long_term.db` (SQLite WAL mode). On first
+startup after this update, existing `memory/long_term.json` data is imported
+without dropping legacy categories or extension fields. JARVIS first creates a
+timestamped `.pre-v...` backup; the JSON file is retained for rollback. Once
+the database exists, SQLite is authoritative. The database, WAL files, rolling
+backups, legacy memory JSON, and local audit/encryption keys are ignored by
+`.gitignore`.
 
-* Projects
-* Preferences
-* Important facts
-* Previous conversations
-* Personal context
-* User configuration
+### What is stored
 
-Memory is stored locally in:
+The schema includes:
+
+* `memories`: typed records with source, trust, verification, status, privacy
+  class, expiry, entity, confidence, and stored priority.
+* `links`: `caused_by`, `resolved_by`, `related_to`, and `supersedes`
+  relationships between memory IDs.
+* `memory_fts5`: local full-text search index.
+* `entities`: project/file/tool/person/concept names and aliases.
+* `conflicts`: unresolved or resolved competing claims.
+* `audit_log`: signed memory-change history.
+* `response_memory_usage`: memory IDs supplied to a response and per-result
+  score components.
+* `schema_version` and `app_state`: forward migration marker and lossless
+  compatibility state for existing project/session data.
+
+SQLite transactions are serialized across threads, use WAL, and create a
+rolling local backup at most daily (last three kept). A database schema
+migration makes a backup first. JSON export/import includes memory records,
+links, and audit history.
+
+### Retrieval and ranking
+
+Recall combines SQLite FTS5 keyword candidates with local vector similarity.
+If a local Sentence Transformers model is installed at
+`memory/models/all-MiniLM-L6-v2`, JARVIS uses it without downloading anything.
+Otherwise it uses a deterministic offline hashed-token vector. The embedding
+function can be replaced with another local callable; local-only memory work
+never makes an embedding or retrieval network request.
+
+Retrieval filters inactive, expired, secret/restricted, and wrong-project
+records; expands relevant links by at most two hops; and stops at a
+configurable token budget (1,500 by default). The budget uses UTF-8 byte counts
+as a conservative upper bound. If no result reaches the relevance threshold,
+JARVIS returns no memory and should say it does not know instead of padding
+with a weak match.
+
+Query relevance and stored priority stay separate. Priority uses the
+configurable weights in `memory/memory_scoring.json`:
 
 ```text
-memory/long_term.json
+priority = 0.25*importance + 0.20*frequency + 0.20*goal_relevance
+         + 0.15*confidence + 0.20*recency
+recency = exp(-age_days / type_half_life_days)
 ```
 
-Instead of loading the entire memory database into every prompt, Jarvis maintains a compact memory core and retrieves additional information when necessary.
+Pinned/procedural types decay slowly. Retrieval records the relevance, priority,
+each priority component, final score, and memory IDs in local
+`response_memory_usage`.
 
-### Adaptive, associative, episodic memory
+### Provenance and injection defense
 
-Session summaries are saved as bounded episodes instead of retaining the raw
-transcript. An episode can capture the objective, actions, decisions, outcome,
-open next steps, project name, and related files. Episodes link to the same
-project and to earlier episodes with overlapping context. JARVIS uses those
-links and the project state to recall relevant decisions, previous errors and
-resolutions, and unfinished work together.
+Trust order is **user-stated > verified outcome > observed locally > session
+summary > model-inferred > external content**. Each result includes its type,
+source, confidence, verification state, and last verified date and is labelled
+fact, inference, or unverified. Lower-trust records cannot silently supersede
+higher-trust facts. Conflicts are kept for review; user-confirmed changes can
+retain the old claim as superseded history.
 
-Repeated episodes with the same project and objective are consolidated. Project
-decisions are labelled **confirmed**, **tentative**, or **superseded**. JARVIS
-only supersedes an earlier decision when the user explicitly revises it; older
-decisions remain visible as history so they are not mistaken for the current
-choice.
+Web pages, files, emails, and tool output can be stored only as sourced
+evidence. They cannot grant permissions or define JARVIS instructions,
+preferences, procedures, or action rules. Recalled records are wrapped in a
+delimited untrusted data block; common instruction-like phrases in low-trust
+records are neutralized before being placed in an AI prompt. This filtering is
+defense in depth, not a guarantee against every injection phrasing.
 
-When a meaningful project session ends, JARVIS updates a project snapshot with
-its current state, latest outcome, decisions, files, and remaining steps. Ask
-“continue where we left off” or name a project to retrieve the latest state and
-related episodes. The proactive check-in may mention one clearly unfinished
-project task after its normal silence and cooldown checks; it does not perform
-the work for you.
+Session encoding has a local heuristic gate for short/greeting/duplicate
+sessions, batches work at session end, redacts before optional provider
+summarization, stores a bounded evidence excerpt, and leaves model-generated
+claims unverified until the user confirms them or an outcome verifies them. The
+provider call cap is configurable as `memory_daily_llm_call_cap` in
+`config/api_keys.json` (default 20/day). The existing Memory panel option
+**Allow AI-provider access to redacted memory** remains off by default; with it
+off, extraction and recall stay local and use rule-based summaries.
 
-Project recall distinguishes **remembered unfinished** steps from **verified
-unfinished** steps. When the project root is available, JARVIS checks referenced
-files, the current Git working tree, and paths touched in the five most recent
-commits. It only marks a step verified unfinished when direct evidence supports
-that exact step, such as an explicitly named required file being absent. A file
-existing, a clean working tree, or recent edits alone do not prove completion or
-non-completion. If the project files or Git data are unavailable or inconclusive,
-JARVIS says the status is unverified.
+### Memory questions and controls
 
-These summaries and project snapshots are stored locally in
-`memory/long_term.json`; the original JSON key/value memories remain readable.
-The Memory panel lets you inspect and delete facts, project snapshots, and
-episodes. **AI-provider memory access is off by default.** With it off, stored
-memory is omitted from automatic prompts, contextual recall results are withheld
-from the provider, and episode summaries are produced locally. Turn on **Allow
-AI-provider access to redacted memory** in the Memory panel to allow relevant
-memory context and up to 40 recent in-memory conversation lines to be sent for
-answers and structured episode summaries. Before those requests, JARVIS filters
-common credential patterns, email addresses, and phone-like numbers. This is a
-pattern-based filter, not a guarantee that every sensitive detail is detected;
-review the data before enabling provider access. Memory content is reference
-data, never instructions.
+With AI-provider memory access enabled, ask JARVIS:
 
-### Memory management
+* “Why do you believe [claim]?” — show relevant source, confidence, verification
+  date, and supporting memory records.
+* “What do you remember about [project]?”
+* “What are you unsure about?”
+* “Which memories did you use for your last answer?”
+* “Show conflicts.”
 
-The HUD provides a memory panel where stored information can be:
+Other memory tools:
 
-* Viewed
-* Inspected
-* Deleted or pinned to protect it from routine retention limits
-* Reviewed with its source, confidence, verification state, timestamps, and links
+* “Show memory health” reports counts by type/status/trust, stale rows,
+  unresolved conflicts, orphan links, and database size.
+* “Purge all memories about [project]” opens the existing JARVIS confirmation
+  flow, removes linked/derived records and search entries, and records only a
+  minimal deletion receipt without the deleted project name or content.
+* “Export memory to [path]” and “Import memory from [path]” require desktop
+  confirmation because the export contains personal data and import replaces
+  the local snapshot.
 
-#### Memory record types and evidence
+Optional sensitive-record encryption is **off by default**. Set
+`memory_encryption_enabled` to `true` in `config/api_keys.json` to encrypt the
+content and serialized record for `sensitive`, `secret`, and `restricted`
+records; those records are also excluded from full-text search. SQLite still
+keeps their IDs and normalized indexing/audit metadata in the local database,
+so this protects record payloads rather than the entire database. The default
+key is `config/memory_encryption.key`; set `memory_encryption_key_path` to a
+protected path outside the repository if preferred. Keep the key backed up
+securely: losing it makes encrypted records unreadable. Encryption needs the
+existing `cryptography` dependency. Database and configuration files remain
+local and ignored by Git; provider access is controlled separately.
 
-The versioned memory schema keeps the legacy categories readable while adding
-structured records for:
+### Evaluation and tests
 
-* **Semantic facts**: preferences and facts with their source and verification
-  state. A user-stated fact is marked user-confirmed; an AI-generated summary
-  remains an inference and is never promoted just because it appears repeatedly.
-* **Episodes**: local summaries of significant sessions, including goals,
-  actions, decisions, outcomes, and next steps. They link to related projects
-  and episodes without retaining a full transcript by default.
-* **Procedures**: reusable steps are recorded only after an explicit successful
-  verification and a success check; each later verified run updates its usage
-  count and success rate.
-* **Intentions**: user-requested follow-ups can be triggered by a time, project,
-  or named event. They expire and can be completed or dismissed.
-* **Autobiographical timeline**: a chronological view of meaningful episodes
-  and explicitly superseded decisions.
+The offline evaluation corpus contains 40 synthetic cases for direct and
+associative recall, superseded decisions, project-name/file ambiguity,
+conflicts, injection, and abstention. It reports recall@5, MRR, wrong-recall
+rate, correct-abstention rate, conservative token use, and latency. The saved
+baseline is in `eval/results/baseline.json`; a later run fails if recall@5
+regresses beyond the configured margin.
 
-Every record carries provenance, confidence, verification status, privacy
-classification, and lifecycle metadata. Retrieval ranks by relevance, recency,
-confidence, usage, and source reliability, then follows a bounded number of
-explicit links. Decay affects ranking only; it does not reduce the truth status
-of a fact. Conflicting or superseded records remain inspectable and are labelled
-instead of being silently overwritten.
-
-#### Privacy, consolidation, and deletion
-
-Provider access remains controlled by the Memory panel privacy setting. Before
-memory or conversation text is sent to an enabled AI provider, JARVIS removes
-records classified as local-only, sensitive, secret, or restricted and applies
-the existing credential redaction. Local-only mode continues to keep these
-memory operations on-device. Redaction is pattern-based and cannot guarantee
-detection of every private detail, so review provider access before enabling it.
-
-Consolidation merges only conservative exact duplicates and maintains source
-history. Distinct episodes stay separate. Expiration marks a record expired;
-permanent deletion removes its linked copies, legacy mirrors, and retrieval
-references, then records an anonymous deletion event. Migration from the older
-JSON layout creates a timestamped backup before writing the new schema. If that
-backup or write fails, migration is postponed and the original file is retained.
-
-The **Memory** panel exposes the record metadata and lets you pin or delete
-entries. You can also say “remember that …” to save a user-stated fact, “remind
-me …” to create an intention, or “continue where we left off” to retrieve
-project context. Proactive suggestions are opt-in through the existing
-proactive settings and are suggestions only; JARVIS does not execute the
-unfinished task without a separate request and any required action confirmation.
-
-The main implementation is in `memory/memory_manager.py`, with focused modules
-for scoring, linked retrieval, audit/explanation, semantic facts, episodes,
-procedures, intentions, timeline, consolidation, reflection, and lifecycle.
-The scoring weights are user-editable in `memory/memory_scoring.json`; proactive
-cooldown, quiet hours, and suggestion limits are in
-`memory/planner_config.json`.
-
-Run the focused regression tests from `JarvisAI/` with:
+From `JarvisAI/` run:
 
 ```powershell
-python -m unittest discover -s tests -p "test_cognitive_memory.py" -v
+python -m unittest discover -s tests -v
+python eval/run_eval.py
 ```
 
----
-
+The evaluation uses synthetic fixtures only and does not read your personal
+memory database.
 # ↩️ Undo System
 
 Jarvis can reverse supported actions.
@@ -2366,8 +2369,8 @@ Local data is stored on your computer.
 | Data                         | Location                         |
 | ---------------------------- | -------------------------------- |
 | API keys & configuration     | `config/api_keys.json`, `.env`    |
-| Persistent memory             | `memory/long_term.json`, `memory/call_state.json` |
-| Security audit ledger        | `security/audit_log.jsonl`       |
+| Persistent memory             | `memory/long_term.db` plus WAL/SHM files, rolling backups, legacy `memory/long_term.json` |
+| Security and memory audit files | `security/audit_log.jsonl`, `config/memory_audit.key`, and `config/memory_audit.anchor` |
 | TLS private key and certificate | `config/certs/`                |
 | Google OAuth client secret   | `config/google_credentials.json` |
 | Google OAuth refresh token   | `config/google_token.json`       |

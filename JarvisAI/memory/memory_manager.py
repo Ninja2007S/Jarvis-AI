@@ -2,6 +2,7 @@ import json
 import re
 import subprocess
 import hashlib
+import hmac
 import os
 import shutil
 from datetime import datetime
@@ -72,24 +73,32 @@ def _empty_memory() -> dict:
     }
 
 def load_memory() -> dict:
-    if not MEMORY_PATH.exists():
-        return _empty_memory()
     with _lock:
         try:
+            from memory.memory_store import load_snapshot, save_snapshot
+            stored = load_snapshot(MEMORY_PATH)
+            if stored is not None:
+                return _migrate_memory_data(stored)
+            if not MEMORY_PATH.exists():
+                return _empty_memory()
             data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                original_version = int(data.get("schema_version", 0) or 0)
-                migrated = _migrate_memory_data(data)
-                if original_version < MEMORY_SCHEMA_VERSION:
-                    try:
-                        backup = _create_migration_backup(MEMORY_PATH)
-                        _write_memory_atomic(MEMORY_PATH, migrated)
-                        print(f"[Memory] Schema {original_version} -> {MEMORY_SCHEMA_VERSION}; backup: {backup.name}")
-                    except OSError as backup_error:
-                        print(f"[Memory] Migration postponed; backup/write failed: {backup_error}")
-                        return data
-                return migrated
-            return _empty_memory()
+            if not isinstance(data, dict):
+                return _empty_memory()
+            original_version = int(data.get("schema_version", 0) or 0)
+            migrated = _migrate_memory_data(data)
+            if original_version < MEMORY_SCHEMA_VERSION:
+                try:
+                    backup = _create_migration_backup(MEMORY_PATH)
+                    _write_memory_atomic(MEMORY_PATH, migrated)
+                    print(f"[Memory] JSON schema {original_version} -> {MEMORY_SCHEMA_VERSION}; backup: {backup.name}")
+                except OSError as backup_error:
+                    print(f"[Memory] JSON migration backup/write failed: {backup_error}")
+                    return data
+            # One-time, lossless import: legacy categories and extension fields
+            # stay in SQLite app_state while normalized memory rows are indexed.
+            save_snapshot(MEMORY_PATH, migrated)
+            print("[Memory] Imported local long_term.json into SQLite.")
+            return migrated
         except Exception as e:
             print(f"[Memory] Load error: {e}")
             return _empty_memory()
@@ -159,9 +168,9 @@ def save_memory(memory: dict) -> None:
     if not isinstance(memory, dict):
         return
     memory = _trim_to_limit(memory)
-    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
-        _write_memory_atomic(MEMORY_PATH, memory)
+        from memory.memory_store import save_snapshot
+        save_snapshot(MEMORY_PATH, memory)
 
 
 def _create_migration_backup(path: Path) -> Path:
@@ -260,6 +269,15 @@ def _migrate_memory_data(data: dict) -> dict:
         for key, entry in entries.items():
             value = _entry_value(entry)
             created = entry.get("updated", "") if isinstance(entry, dict) else ""
+            already_indexed = any(
+                isinstance(row, dict) and (
+                    (str(row.get("legacy_category", "")) == category and str(row.get("legacy_key", "")) == str(key))
+                    or any(isinstance(alias, dict) and str(alias.get("category", "")) == category
+                           and str(alias.get("key", "")) == str(key) for alias in row.get("legacy_aliases", []))
+                ) for row in records
+            )
+            if already_indexed:
+                continue
             add_legacy("semantic", "", f"{key}: {value}", f"{category}/{key}",
                        str(created), legacy_category=category, legacy_key=str(key))
 
@@ -332,6 +350,8 @@ def add_memory_record(record: dict, *, actor: str = "system", reason: str = "enc
     item.setdefault("project", "")
     item["content"] = redact_sensitive_content(str(item.get("content", "")))[:2000]
     item.setdefault("source", "observed")
+    from memory.memory_safety import trust_for, can_supersede
+    item["trust_level"] = trust_for(str(item["source"]), str(item.get("verification_status", "")))
     item.setdefault("created_at", now)
     item.setdefault("last_verified_at", None)
     item.setdefault("confidence", 0.5)
@@ -361,11 +381,56 @@ def add_memory_record(record: dict, *, actor: str = "system", reason: str = "enc
     memory = load_memory()
     records = [row for row in memory.get("memories", []) if isinstance(row, dict)]
     previous = next((row for row in records if str(row.get("id")) == str(item["id"])), None)
+    if previous and not can_supersede(item, previous):
+        original_id = str(item["id"])
+        item["id"] = f"{original_id}:disputed:{hashlib.sha256(item['content'].encode('utf-8')).hexdigest()[:10]}"
+        item["status"] = "disputed"
+        previous = None
     if previous:
         old_history = list(previous.get("source_history", []))
         item = {**previous, **item}
         item["source_history"] = (old_history + [new_history])[-40:]
     else:
+        # Resolve project aliases to a stable local entity id.
+        project = str(item.get("project", "")).strip()
+        if project:
+            entities = memory.setdefault("entities", [])
+            norm = re.sub(r"[^a-z0-9]+", " ", project.casefold()).strip()
+            entity = next((e for e in entities if isinstance(e, dict) and e.get("kind") == "project"
+                           and (norm == re.sub(r"[^a-z0-9]+", " ", str(e.get("canonical_name", "")).casefold()).strip()
+                                or norm in {str(alias).casefold() for alias in e.get("aliases", [])})), None)
+            if not entity:
+                aliases = [project]
+                if "jarvis" in norm or "jarvis" in norm.split():
+                    aliases = list(dict.fromkeys([project, "Jarvis", "Jarvis Desktop", "the app"]))
+                entity = {"id": f"project-{hashlib.sha256(norm.encode()).hexdigest()[:16]}",
+                          "kind": "project", "canonical_name": project, "aliases": aliases}
+                entities.append(entity)
+            item["entity_id"] = entity["id"]
+
+        # Conflicting statements are retained and queued for review; lower
+        # trust can never silently supersede a stronger stored claim.
+        if item.get("type") == "semantic" and ":" in str(item.get("content", "")):
+            claim_key = str(item["content"]).split(":", 1)[0].casefold().strip()
+            for old in records:
+                old_key = str(old.get("content", "")).split(":", 1)[0].casefold().strip()
+                if old.get("type") != "semantic" or old.get("status") not in {"active", "disputed"}:
+                    continue
+                if old_key != claim_key or str(old.get("content", "")) == str(item.get("content", "")):
+                    continue
+                if old.get("project") != item.get("project"):
+                    continue
+                conflict_id = hashlib.sha256(f"{old.get('id')}|{item.get('id')}".encode()).hexdigest()[:24]
+                memory.setdefault("conflicts", []).append({"id": conflict_id,
+                    "memory_a": str(old.get("id")), "memory_b": str(item.get("id")),
+                    "status": "unresolved", "created_at": now})
+                old["status"] = "disputed"
+                item["status"] = "disputed"
+                _append_audit(memory, str(old.get("id")), "conflict_opened", actor,
+                              f"conflicts with memory {item['id']}")
+                _append_audit(memory, str(item["id"]), "conflict_opened", actor,
+                              f"conflicts with memory {old.get('id')}")
+                break
         records.append(item)
     memory["memories"] = records[-2000:]
     _append_audit(memory, str(item["id"]), "create" if previous is None else "update", actor, reason)
@@ -377,11 +442,39 @@ def _append_audit(memory: dict, memory_id: str, action: str, actor: str, reason:
     events = memory.get("memory_audit", [])
     if not isinstance(events, list):
         events = []
-    events.append({"id": str(uuid.uuid4()), "memory_id": memory_id,
-                   "action": action, "actor": str(actor)[:40],
-                   "at": datetime.now().isoformat(timespec="seconds"),
-                   "why": str(reason)[:180]})
+    event = {"id": str(uuid.uuid4()), "memory_id": memory_id,
+             "action": action, "actor": str(actor)[:40],
+             "at": datetime.now().isoformat(timespec="seconds"),
+             "why": str(reason)[:180]}
+    event["previous_hash"] = str(events[-1].get("hmac", "")) if events and isinstance(events[-1], dict) else ""
+    try:
+        event["hmac"] = _audit_signature(event)
+    except OSError as exc:
+        print(f"[Memory] Audit signature unavailable: {exc}")
+    events.append(event)
     memory["memory_audit"] = events[-5000:]
+
+
+def _audit_signature(event: dict) -> str:
+    key_path = BASE_DIR / "config" / "memory_audit.key"
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    if not key_path.exists():
+        key_path.write_bytes(os.urandom(32))
+    key = key_path.read_bytes()
+    payload = {key: value for key, value in event.items() if key != "hmac"}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hmac.new(key, canonical, hashlib.sha256).hexdigest()
+
+
+def _resign_audit(memory: dict) -> None:
+    """Rechain retained events after privacy purges remove their old entries."""
+    previous = ""
+    for event in memory.get("memory_audit", []):
+        if not isinstance(event, dict):
+            continue
+        event["previous_hash"] = previous
+        event["hmac"] = _audit_signature(event)
+        previous = event["hmac"]
 
 
 def set_memory_pinned(memory_id: str, pinned: bool, actor: str = "user") -> bool:
@@ -397,7 +490,7 @@ def set_memory_pinned(memory_id: str, pinned: bool, actor: str = "user") -> bool
 
 
 def record_memory_usage(memory_ids: list[str], response_id: str = "", context: str = "recall",
-                        *, allow_empty: bool = False) -> None:
+                        *, allow_empty: bool = False, score_components: list[dict] | None = None) -> None:
     """Record memory IDs supplied to a response; this records influence, not proof of use."""
     ids = list(dict.fromkeys(str(value) for value in memory_ids if str(value)))[:20]
     if not ids and not allow_empty:
@@ -411,7 +504,8 @@ def record_memory_usage(memory_ids: list[str], response_id: str = "", context: s
     if not isinstance(usage, list):
         usage = []
     usage.append({"response_id": response_id or str(uuid.uuid4()), "memory_ids": ids,
-                  "context": str(context)[:40], "at": datetime.now().isoformat(timespec="seconds")})
+                  "context": str(context)[:40], "at": datetime.now().isoformat(timespec="seconds"),
+                  "score_components": list(score_components or [])[:20]})
     memory["memory_usage"] = usage[-500:]
     save_memory(memory)
 
@@ -1037,7 +1131,15 @@ def redact_sensitive_content(text: str) -> str:
     value = str(text or "")
     value = _LABELED_SENSITIVE_RE.sub(lambda m: m.group(1) + ": [REDACTED]", value)
     value = _EMAIL_RE.sub("[REDACTED_EMAIL]", value)
-    value = _PHONE_RE.sub("[REDACTED_NUMBER]", value)
+    # Preserve ISO/calendar dates. They are common in project histories and
+    # incident records, and the phone-number pattern otherwise mistakes
+    # YYYY-MM-DD for personal contact data.
+    value = _PHONE_RE.sub(
+        lambda match: match.group(0)
+        if re.fullmatch(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}", match.group(0).strip())
+        else "[REDACTED_NUMBER]",
+        value,
+    )
     for pattern in _SENSITIVE_TOKEN_RES:
         value = pattern.sub("[REDACTED_CREDENTIAL]", value)
     return value
@@ -1440,6 +1542,7 @@ def save_episode(data: dict) -> dict | None:
     created = datetime.now().isoformat(timespec="seconds")
     episode = {
         "id": str(uuid.uuid4()), "created": created,
+        "evidence_hash": str(data.get("evidence_hash", ""))[:64],
         "project": project, "project_id": _slug(project) if project else "",
         "objective": redact_sensitive_content(str(data.get("objective", "") or data.get("summary", "") or "").strip())[:240],
         "actions": _as_text_list(data.get("actions", []), 8),
@@ -1572,6 +1675,7 @@ def save_episode(data: dict) -> dict | None:
     cognitive_record = {
         "id": episode["id"], "type": "episodic", "project": project, "content": content,
         "objective": episode["objective"], "context": str(data.get("context", ""))[:600],
+        "evidence_excerpt": redact_sensitive_content(str(data.get("evidence_excerpt", "")))[:1200],
         "events": _as_text_list(data.get("events", []), 12),
         "attempts": _as_text_list(data.get("actions", []), 8),
         "decision": episode["decisions"], "outcome": episode["outcome"],

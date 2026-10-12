@@ -1,0 +1,621 @@
+{
+  "cases": 40,
+  "positive_cases": 33,
+  "recall_at_5": 1.0,
+  "mrr": 0.9696969696969697,
+  "wrong_recall_rate": 0.05714285714285714,
+  "correct_abstention_rate": 1.0,
+  "average_tokens": 436.3030303030303,
+  "average_latency_ms": 15.479869692529919,
+  "details": [
+    {
+      "id": "direct-01",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 01"
+      ],
+      "returned_ids": [
+        "direct-01"
+      ],
+      "returned_content": [
+        "synthetic memory marker 01; jarvis eval marker 01 cobalt wallet zirconalpha01"
+      ],
+      "tokens": 405,
+      "latency_ms": 14.024
+    },
+    {
+      "id": "direct-02",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 02"
+      ],
+      "returned_ids": [
+        "direct-02"
+      ],
+      "returned_content": [
+        "synthetic memory marker 02; jarvis eval marker 02 violet wallet zirconalpha02"
+      ],
+      "tokens": 405,
+      "latency_ms": 12.03
+    },
+    {
+      "id": "direct-03",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 03"
+      ],
+      "returned_ids": [
+        "direct-03"
+      ],
+      "returned_content": [
+        "synthetic memory marker 03; jarvis eval marker 03 saffron wallet zirconalpha03"
+      ],
+      "tokens": 406,
+      "latency_ms": 11.602
+    },
+    {
+      "id": "direct-04",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 04"
+      ],
+      "returned_ids": [
+        "direct-04"
+      ],
+      "returned_content": [
+        "synthetic memory marker 04; jarvis eval marker 04 cedar wallet zirconalpha04"
+      ],
+      "tokens": 404,
+      "latency_ms": 11.512
+    },
+    {
+      "id": "direct-05",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 05"
+      ],
+      "returned_ids": [
+        "direct-05"
+      ],
+      "returned_content": [
+        "synthetic memory marker 05; jarvis eval marker 05 orbit wallet zirconalpha05"
+      ],
+      "tokens": 404,
+      "latency_ms": 11.685
+    },
+    {
+      "id": "direct-06",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 06"
+      ],
+      "returned_ids": [
+        "direct-06"
+      ],
+      "returned_content": [
+        "synthetic memory marker 06; jarvis eval marker 06 cobalt signal zirconalpha06"
+      ],
+      "tokens": 405,
+      "latency_ms": 12.083
+    },
+    {
+      "id": "direct-07",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 07"
+      ],
+      "returned_ids": [
+        "direct-07"
+      ],
+      "returned_content": [
+        "synthetic memory marker 07; jarvis eval marker 07 violet signal zirconalpha07"
+      ],
+      "tokens": 405,
+      "latency_ms": 11.938
+    },
+    {
+      "id": "direct-08",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 08"
+      ],
+      "returned_ids": [
+        "direct-08"
+      ],
+      "returned_content": [
+        "synthetic memory marker 08; jarvis eval marker 08 saffron signal zirconalpha08"
+      ],
+      "tokens": 406,
+      "latency_ms": 13.532
+    },
+    {
+      "id": "direct-09",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 09"
+      ],
+      "returned_ids": [
+        "direct-09"
+      ],
+      "returned_content": [
+        "synthetic memory marker 09; jarvis eval marker 09 cedar signal zirconalpha09"
+      ],
+      "tokens": 404,
+      "latency_ms": 12.796
+    },
+    {
+      "id": "direct-10",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 10"
+      ],
+      "returned_ids": [
+        "direct-10"
+      ],
+      "returned_content": [
+        "synthetic memory marker 10; jarvis eval marker 10 orbit signal zirconalpha10"
+      ],
+      "tokens": 404,
+      "latency_ms": 12.443
+    },
+    {
+      "id": "direct-11",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 11"
+      ],
+      "returned_ids": [
+        "direct-11"
+      ],
+      "returned_content": [
+        "synthetic memory marker 11; jarvis eval marker 11 cobalt routine zirconalpha11"
+      ],
+      "tokens": 406,
+      "latency_ms": 12.524
+    },
+    {
+      "id": "direct-12",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 12"
+      ],
+      "returned_ids": [
+        "direct-12"
+      ],
+      "returned_content": [
+        "synthetic memory marker 12; jarvis eval marker 12 violet routine zirconalpha12"
+      ],
+      "tokens": 406,
+      "latency_ms": 12.729
+    },
+    {
+      "id": "direct-13",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 13"
+      ],
+      "returned_ids": [
+        "direct-13"
+      ],
+      "returned_content": [
+        "synthetic memory marker 13; jarvis eval marker 13 saffron routine zirconalpha13"
+      ],
+      "tokens": 407,
+      "latency_ms": 12.782
+    },
+    {
+      "id": "direct-14",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 14"
+      ],
+      "returned_ids": [
+        "direct-14"
+      ],
+      "returned_content": [
+        "synthetic memory marker 14; jarvis eval marker 14 cedar routine zirconalpha14"
+      ],
+      "tokens": 405,
+      "latency_ms": 13.605
+    },
+    {
+      "id": "direct-15",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 15"
+      ],
+      "returned_ids": [
+        "direct-15"
+      ],
+      "returned_content": [
+        "synthetic memory marker 15; jarvis eval marker 15 orbit routine zirconalpha15"
+      ],
+      "tokens": 405,
+      "latency_ms": 13.074
+    },
+    {
+      "id": "direct-16",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 16"
+      ],
+      "returned_ids": [
+        "direct-16"
+      ],
+      "returned_content": [
+        "synthetic memory marker 16; jarvis eval marker 16 cobalt project zirconalpha16"
+      ],
+      "tokens": 406,
+      "latency_ms": 14.678
+    },
+    {
+      "id": "direct-17",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 17"
+      ],
+      "returned_ids": [
+        "direct-17"
+      ],
+      "returned_content": [
+        "synthetic memory marker 17; jarvis eval marker 17 violet project zirconalpha17"
+      ],
+      "tokens": 406,
+      "latency_ms": 12.9
+    },
+    {
+      "id": "direct-18",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 18"
+      ],
+      "returned_ids": [
+        "direct-18"
+      ],
+      "returned_content": [
+        "synthetic memory marker 18; jarvis eval marker 18 saffron project zirconalpha18"
+      ],
+      "tokens": 407,
+      "latency_ms": 13.672
+    },
+    {
+      "id": "direct-19",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 19"
+      ],
+      "returned_ids": [
+        "direct-19"
+      ],
+      "returned_content": [
+        "synthetic memory marker 19; jarvis eval marker 19 cedar project zirconalpha19"
+      ],
+      "tokens": 405,
+      "latency_ms": 14.642
+    },
+    {
+      "id": "direct-20",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "synthetic memory marker 20"
+      ],
+      "returned_ids": [
+        "direct-20"
+      ],
+      "returned_content": [
+        "synthetic memory marker 20; jarvis eval marker 20 orbit project zirconalpha20"
+      ],
+      "tokens": 405,
+      "latency_ms": 13.178
+    },
+    {
+      "id": "assoc-audio-1",
+      "hit": true,
+      "returned": 2,
+      "expected": [
+        "audio bug fixed 2026-09-20",
+        "microphone input silent after restart"
+      ],
+      "returned_ids": [
+        "audio-fix-10d",
+        "audio-symptom-today"
+      ],
+      "returned_content": [
+        "audio bug fixed [REDACTED_NUMBER]: microphone input reopened after reconnect; output device stream was reset",
+        "microphone input silent after restart; investigating similar audio failure"
+      ],
+      "tokens": 877,
+      "latency_ms": 13.203
+    },
+    {
+      "id": "assoc-audio-2",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "audio bug fixed 2026-09-20",
+        "microphone input silent after restart"
+      ],
+      "returned_ids": [
+        "audio-symptom-today"
+      ],
+      "returned_content": [
+        "microphone input silent after restart; investigating similar audio failure"
+      ],
+      "tokens": 420,
+      "latency_ms": 13.71
+    },
+    {
+      "id": "assoc-audio-3",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "audio bug fixed",
+        "microphone input silent after restart"
+      ],
+      "returned_ids": [
+        "audio-fix-10d"
+      ],
+      "returned_content": [
+        "audio bug fixed [REDACTED_NUMBER]: microphone input reopened after reconnect; output device stream was reset"
+      ],
+      "tokens": 457,
+      "latency_ms": 12.688
+    },
+    {
+      "id": "assoc-audio-4",
+      "hit": true,
+      "returned": 2,
+      "expected": [
+        "audio bug fixed 2026-09-20",
+        "microphone input silent after restart"
+      ],
+      "returned_ids": [
+        "audio-fix-10d",
+        "audio-symptom-today"
+      ],
+      "returned_content": [
+        "audio bug fixed [REDACTED_NUMBER]: microphone input reopened after reconnect; output device stream was reset",
+        "microphone input silent after restart; investigating similar audio failure"
+      ],
+      "tokens": 877,
+      "latency_ms": 13.513
+    },
+    {
+      "id": "assoc-audio-5",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "audio bug fixed 2026-09-20",
+        "microphone input silent after restart"
+      ],
+      "returned_ids": [
+        "audio-symptom-today"
+      ],
+      "returned_content": [
+        "microphone input silent after restart; investigating similar audio failure"
+      ],
+      "tokens": 420,
+      "latency_ms": 13.161
+    },
+    {
+      "id": "superseded-1",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "decision revision 1"
+      ],
+      "returned_ids": [
+        "new-decision-1"
+      ],
+      "returned_content": [
+        "current device model decision revision 1 one currentdecisionone: use revised board"
+      ],
+      "tokens": 415,
+      "latency_ms": 11.314
+    },
+    {
+      "id": "superseded-2",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "decision revision 2"
+      ],
+      "returned_ids": [
+        "new-decision-2"
+      ],
+      "returned_content": [
+        "current device model decision revision 2 two currentdecisiontwo: use revised board"
+      ],
+      "tokens": 415,
+      "latency_ms": 12.289
+    },
+    {
+      "id": "superseded-3",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "decision revision 3"
+      ],
+      "returned_ids": [
+        "new-decision-3"
+      ],
+      "returned_content": [
+        "current device model decision revision 3 three currentdecisionthree: use revised board"
+      ],
+      "tokens": 419,
+      "latency_ms": 17.231
+    },
+    {
+      "id": "superseded-4",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "decision revision 4"
+      ],
+      "returned_ids": [
+        "new-decision-4"
+      ],
+      "returned_content": [
+        "current device model decision revision 4 four currentdecisionfour: use revised board"
+      ],
+      "tokens": 417,
+      "latency_ms": 11.46
+    },
+    {
+      "id": "superseded-5",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "decision revision 5"
+      ],
+      "returned_ids": [
+        "new-decision-5"
+      ],
+      "returned_content": [
+        "current device model decision revision 5 five currentdecisionfive: use revised board"
+      ],
+      "tokens": 417,
+      "latency_ms": 12.292
+    },
+    {
+      "id": "project-similar-alpha",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "alpha project config.py"
+      ],
+      "returned_ids": [
+        "alpha-config"
+      ],
+      "returned_content": [
+        "alpha project config.py loader settings alpha_config_path"
+      ],
+      "tokens": 387,
+      "latency_ms": 10.228
+    },
+    {
+      "id": "project-similar-beta",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "beta project config.py"
+      ],
+      "returned_ids": [
+        "beta-config"
+      ],
+      "returned_content": [
+        "beta project config.py loader settings beta_config_path"
+      ],
+      "tokens": 384,
+      "latency_ms": 9.633
+    },
+    {
+      "id": "project-similar-alpha-tests",
+      "hit": true,
+      "returned": 1,
+      "expected": [
+        "alpha project settings"
+      ],
+      "returned_ids": [
+        "alpha-settings"
+      ],
+      "returned_content": [
+        "alpha project settings test loader alpha_settings_suite"
+      ],
+      "tokens": 387,
+      "latency_ms": 10.794
+    },
+    {
+      "id": "conflict-1",
+      "hit": false,
+      "returned": 0,
+      "expected": [],
+      "returned_ids": [],
+      "returned_content": [],
+      "tokens": 0,
+      "latency_ms": 11.128
+    },
+    {
+      "id": "conflict-2",
+      "hit": false,
+      "returned": 0,
+      "expected": [],
+      "returned_ids": [],
+      "returned_content": [],
+      "tokens": 0,
+      "latency_ms": 12.284
+    },
+    {
+      "id": "conflict-3",
+      "hit": false,
+      "returned": 0,
+      "expected": [],
+      "returned_ids": [],
+      "returned_content": [],
+      "tokens": 0,
+      "latency_ms": 12.434
+    },
+    {
+      "id": "empty-1",
+      "hit": false,
+      "returned": 0,
+      "expected": [],
+      "returned_ids": [],
+      "returned_content": [],
+      "tokens": 0,
+      "latency_ms": 12.116
+    },
+    {
+      "id": "empty-2",
+      "hit": false,
+      "returned": 0,
+      "expected": [],
+      "returned_ids": [],
+      "returned_content": [],
+      "tokens": 0,
+      "latency_ms": 12.131
+    },
+    {
+      "id": "empty-3",
+      "hit": false,
+      "returned": 0,
+      "expected": [],
+      "returned_ids": [],
+      "returned_content": [],
+      "tokens": 0,
+      "latency_ms": 12.059
+    },
+    {
+      "id": "empty-4",
+      "hit": false,
+      "returned": 0,
+      "expected": [],
+      "returned_ids": [],
+      "returned_content": [],
+      "tokens": 0,
+      "latency_ms": 19.739
+    }
+  ],
+  "created_at": "2026-10-11T23:39:31",
+  "embedder": "offline blake2b hashed-token vector (pluggable; local-only)"
+}

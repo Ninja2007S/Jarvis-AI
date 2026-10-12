@@ -564,6 +564,9 @@ TOOL_DECLARATIONS = [
             "when the user asks what you remember about them (leave query empty "
             "for everything). "
             "This is a local file search: it is instant and costs nothing."
+            " For metacognition, use it for questions like 'why do you believe X?', "
+            "'what do you remember about project X?', 'what are you unsure about?', "
+            "'which memories did you use for your last answer?', or 'show conflicts'."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -579,6 +582,32 @@ TOOL_DECLARATIONS = [
             },
             "required": [],
         },
+    },
+    {
+        "name": "memory_health",
+        "description": "Show local memory health: counts by type/status/trust, stale records, unresolved conflicts, orphan links, and database size. This operation stays local.",
+        "parameters": {"type": "OBJECT", "properties": {}},
+    },
+    {
+        "name": "purge_memory",
+        "description": "Permanently purge every stored memory and derived local project data for a named project/entity. Use only when explicitly requested; the desktop confirmation must be approved.",
+        "parameters": {"type": "OBJECT", "properties": {
+            "entity": {"type": "STRING", "description": "Exact project or entity name to purge"}},
+            "required": ["entity"]},
+    },
+    {
+        "name": "memory_export",
+        "description": "Export local memory, links, and audit history to a JSON file. The path will be confirmed on the desktop.",
+        "parameters": {"type": "OBJECT", "properties": {
+            "export_path": {"type": "STRING", "description": "Destination JSON path"}},
+            "required": ["export_path"]},
+    },
+    {
+        "name": "memory_import",
+        "description": "Replace the current local memory database from a JSON export. This is destructive and requires desktop confirmation.",
+        "parameters": {"type": "OBJECT", "properties": {
+            "import_path": {"type": "STRING", "description": "Source JSON path"}},
+            "required": ["import_path"]},
     },
     {
         "name": "undo",
@@ -1741,15 +1770,14 @@ class JarvisLive:
 
     def _recall_memory_context(self, query: str) -> str:
         """Build compact recall context with provenance labels and privacy filtering."""
-        from memory.memory_controller import retrieve_context
-        from memory.retrieval_engine import format_results
-        legacy = search_memory(query, limit=8, provider_safe=True)
-        rows = retrieve_context(query, top_k=5, provider_safe=True, log_usage=False)
+        from memory.retrieval_engine import metacognitive_context, retrieve
+        rows = retrieve(query, top_k=5, provider_safe=True, log_usage=True)
         self._pending_response_memory_ids = list(dict.fromkeys(
             self._pending_response_memory_ids + [row["memory_id"] for row in rows]))[-20:]
-        structured = format_results(rows)
-        combined = "\n\nCognitive memory (labels describe evidence, not certainty):\n" + structured if structured else ""
-        return redact_sensitive_content((legacy + combined).strip())
+        # The inspection path covers conflicts, uncertainty, provenance, and
+        # which stored IDs were supplied to the previous response.
+        context = metacognitive_context(query, provider_safe=True)
+        return redact_sensitive_content(context.strip())
 
     async def _execute_tool(self, fc) -> types.FunctionResponse:
         name = fc.name
@@ -1781,6 +1809,27 @@ class JarvisLive:
                 id=fc.id, name=name,
                 response={"result": result, "silent": True}
             )
+
+        if name in {"memory_health", "purge_memory", "memory_export", "memory_import"}:
+            def _memory_operation():
+                if name == "memory_health":
+                    from memory.memory_lifecycle import health_report
+                    return json.dumps(health_report(), ensure_ascii=False)
+                if name == "purge_memory":
+                    from memory.memory_lifecycle import purge_entity
+                    return json.dumps(purge_entity(args.get("entity", "")), ensure_ascii=False)
+                if name == "memory_export":
+                    from memory.memory_lifecycle import export_memory_json
+                    count = export_memory_json(args.get("export_path", ""))
+                    return f"Exported {count} memory records with links and audit history."
+                from memory.memory_lifecycle import import_memory_json
+                count = import_memory_json(args.get("import_path", ""))
+                return f"Imported {count} memory records and replaced the local snapshot."
+
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, lambda: security.guard(name, args, _memory_operation))
+            return types.FunctionResponse(id=fc.id, name=name, response={"result": result})
 
         if name == "recall_memory" and not get_memory_provider_access_enabled():
             result = (
@@ -2936,17 +2985,23 @@ class JarvisLive:
         self._session_log = []    # reset immediately so the next session starts clean
 
         memory = load_memory()
+        from memory.memory_controller import should_summarize_locally, evidence_hash
+        if not should_summarize_locally("\n".join(log[-40:]), memory):
+            print("[Memory] Session encoding gate skipped a short or duplicate session.")
+            return
         lang_entry = memory.get("identity", {}).get("language", {})
         lang = (lang_entry.get("value", "") if isinstance(lang_entry, dict) else str(lang_entry)).strip()
         lang = lang or "English"
 
         convo = "\n".join(log[-40:])   # cap at last 40 turns to stay within token budget
+        transcript_hash = evidence_hash(convo)
         try:
             if not get_memory_provider_access_enabled():
                 # Default is local-only. Keep a small, redacted episode without
                 # sending any transcript to an external summarization provider.
                 episode = build_local_episode(log[-40:], memory)
                 if episode:
+                    episode["evidence_hash"] = transcript_hash
                     episode["source"] = "session_summary"
                     episode["summary_confidence"] = 0.4
                     from memory.memory_controller import encode_episode
@@ -3000,6 +3055,9 @@ class JarvisLive:
                 f"Recent conversation (redacted):\n{safe_convo}"
             )
             prompt = redact_sensitive_content(prompt)
+            from memory.config_manager import reserve_memory_llm_call
+            if not reserve_memory_llm_call():
+                raise RuntimeError("memory summarization daily provider-call cap reached; using local extraction")
             from core import gemini
             result = await asyncio.to_thread(gemini.text, prompt, gemini.SMART, None, 30_000)
             raw = str(result or "").strip()
@@ -3016,6 +3074,8 @@ class JarvisLive:
             if summary:
                 episode["source"] = "model_inferred"
                 episode["summary_confidence"] = 0.55
+                episode["evidence_excerpt"] = safe_convo[-1200:]
+                episode["evidence_hash"] = transcript_hash
                 from memory.memory_controller import encode_episode
                 saved_episode = encode_episode(
                     episode, source=episode.get("source", "model_inferred"),

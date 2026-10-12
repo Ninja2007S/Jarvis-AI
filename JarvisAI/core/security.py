@@ -130,6 +130,10 @@ _TIERS: dict[str, str] = {
     "system_status":    TIER_SAFE,
     "system_monitor":   TIER_SAFE,
     "recall_memory":    TIER_SAFE,
+    "memory_health":    TIER_SAFE,
+    "purge_memory":     TIER_DANGEROUS,
+    "memory_export":    TIER_DANGEROUS,
+    "memory_import":    TIER_DANGEROUS,
     # Captures disclose private data to the model, so they remain sensitive,
     # audited and Voice-ID gated when enabled; they are not irreversible.
     "screen_process":   TIER_SENSITIVE,
@@ -197,6 +201,9 @@ _CONFIRMATION_LABELS = {
     "self_heal": "JARVIS self-repair",
     "remember_intention": "Save a future intention",
     "proactive_feedback": "Update suggestion feedback",
+    "purge_memory": "Purge stored project memories",
+    "memory_export": "Export local memory data",
+    "memory_import": "Replace local memory data",
 }
 
 _CONFIRMATION_PARAM_LABELS = {
@@ -223,6 +230,9 @@ _CONFIRMATION_PARAM_LABELS = {
     "scheduled_for": "Publish time",
     "schedule_id": "Scheduled post",
     "limit": "Message count",
+    "entity": "Project or entity",
+    "export_path": "Export file",
+    "import_path": "Import file",
 }
 
 
