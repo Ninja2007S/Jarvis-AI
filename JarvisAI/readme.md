@@ -51,6 +51,27 @@ The goal is simple:
 
 > **Build a personal AI that lives on your computer instead of inside a browser tab.**
 
+## 🖥️ Desktop HUD Preview
+
+The native desktop HUD combines the live neural visualization, system telemetry,
+mission transcript, and voice controls in one PyQt window.
+
+### Live neural workspace
+
+![JARVIS desktop HUD with live neural visualization and system telemetry](docs/images/jarvis-hud-telemetry.png)
+
+### Settings and controls
+
+![JARVIS desktop HUD with the Settings and Controls panel open](docs/images/jarvis-hud-settings.png)
+
+### Optional startup intro
+
+The startup intro plays inside the native application and can be skipped.
+
+![JARVIS startup intro showing its animated logo](docs/images/jarvis-startup-intro-logo.png)
+
+![JARVIS startup intro showing the system initialization progress animation](docs/images/jarvis-startup-intro-progress.png)
+
 ## Feature guide at a glance
 
 JARVIS is operated from the native desktop window. Speak naturally, type into
