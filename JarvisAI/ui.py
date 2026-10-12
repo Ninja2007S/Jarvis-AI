@@ -19,7 +19,7 @@ else:
     _WIN_HIDE: dict = {}
 
 from PyQt6.QtCore import (
-    QEasingCurve, QLineF, QMimeData, QObject, QParallelAnimationGroup, QPointF,
+    QEvent, QEasingCurve, QLineF, QMimeData, QObject, QParallelAnimationGroup, QPointF,
     QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
@@ -48,6 +48,7 @@ except Exception:
 from core.earth_globe import EarthGlobePanel
 from core.neural_viz import NeuralVizMixin
 from core.hud_workspace import HudWorkspace
+from core.jarvis_logo_overlay import JarvisLogoOverlay
 
 try:
     from core.avatar import HoloAvatar
@@ -535,6 +536,12 @@ class HudCanvas(NeuralVizMixin, QOpenGLWidget):
                 self._avatar.glance(dx, dy, hold)
         except Exception:
             pass
+
+    def react_avatar_text(self, text: str) -> None:
+        """Drive facial acting from the latest assistant speech transcription."""
+        if self._avatar is not None and self.hud_style == "face":
+            self._avatar.react_to_text(text)
+            self.update()
 
     def push_visemes(self, frames, hop: float, at: float) -> None:
         """Thread-safe: hand over a schedule of (level, openness, width) frames.
@@ -3932,6 +3939,8 @@ class MainWindow(QMainWindow):
     _close_sig       = pyqtSignal()
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
+    _logo_level_sig = pyqtSignal(object)  # audio amplitude, queued from audio workers
+    _avatar_cue_sig = pyqtSignal(str)
     _hud_pulse_sig  = pyqtSignal(str)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
     _workspace_sig  = pyqtSignal(str, object) # (view type, payload) — thread-safe HUD viewer
@@ -4117,6 +4126,8 @@ class MainWindow(QMainWindow):
         self._close_sig.connect(self.close)
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
+        self._logo_level_sig.connect(self._set_logo_audio_level)
+        self._avatar_cue_sig.connect(self.hud.react_avatar_text)
         self._hud_pulse_sig.connect(self._on_hud_activity)
         self._content_sig.connect(self._show_content)
         self._workspace_sig.connect(self._show_workspace)
@@ -4134,6 +4145,15 @@ class MainWindow(QMainWindow):
         self._quiz_hide_sig.connect(self._hide_quiz)
         self._review_sig.connect(self._show_review)
         self._cam_stop = threading.Event()
+
+        # The supplied JARVIS mark runs as a small, draggable desktop overlay.
+        # Its position persists across launches; state and audio are driven by
+        # the same UI signals as the rest of the HUD.
+        # Keep the logo as an independent top-level window: an owned Qt.Tool
+        # window is hidden by Windows when its owner is minimized.
+        self._jarvis_logo_overlay = JarvisLogoOverlay()
+        self._jarvis_logo_overlay.set_state("INITIALISING")
+        self._jarvis_logo_overlay.hide()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
         self._cam_preview = _CameraPreview(self.centralWidget())
@@ -6936,6 +6956,8 @@ class MainWindow(QMainWindow):
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
+        if hasattr(self, "_jarvis_logo_overlay"):
+            self._jarvis_logo_overlay.set_state(state)
         if hasattr(self, "_immersive_overlay"):
             self._immersive_overlay.set_state(state)
         if hasattr(self, "_core_status_lbl"):
@@ -6948,6 +6970,15 @@ class MainWindow(QMainWindow):
                 f"color: {color}; background: {C.PANEL2};"
                 f"border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 4px;"
             )
+
+    def _set_logo_audio_level(self, level) -> None:
+        """Update the logo's voice bars on the Qt thread."""
+        overlay = getattr(self, "_jarvis_logo_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.set_audio_level(level)
+            except (TypeError, ValueError):
+                overlay.set_audio_level(None)
 
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False
@@ -7004,6 +7035,10 @@ class MainWindow(QMainWindow):
         if getattr(self, "_neural_hand_active", False):
             self._stop_neural_hand_control()
         try:
+            self._jarvis_logo_overlay.close()
+        except Exception:
+            pass
+        try:
             self._workspace.shutdown_holo()
         except Exception:
             pass
@@ -7012,6 +7047,18 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         super().closeEvent(event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            overlay = getattr(self, "_jarvis_logo_overlay", None)
+            if overlay is None:
+                return
+            if self.isMinimized():
+                overlay.show()
+                overlay.raise_()
+            else:
+                overlay.hide()
 
 
 class _RootShim:
@@ -7161,6 +7208,7 @@ class JarvisUI:
         try:
             self._win.hud.set_audio_level(level)
             self._win._immersive_overlay.hud.set_audio_level(level)
+            self._win._logo_level_sig.emit(float(level))
         except Exception:
             pass
 
@@ -7170,6 +7218,13 @@ class JarvisUI:
             if self._avatar is not None:
                 self._avatar.glance(dx, dy, hold)
         except Exception:
+            pass
+
+    def react_avatar_text(self, text: str) -> None:
+        """Queue spoken-text facial cues safely onto the Qt UI thread."""
+        try:
+            self._win._avatar_cue_sig.emit(str(text or "")[:500])
+        except RuntimeError:
             pass
 
     @property

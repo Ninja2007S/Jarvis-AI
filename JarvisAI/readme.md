@@ -974,6 +974,7 @@ The avatar provides visual feedback while Jarvis works.
 * 🤨 Animate its eyebrows
 * 🗣️ Synchronize its mouth with speech
 * 🙂 React to speech emphasis
+* 😊 Smile and nod for greetings or acknowledgments; use a focused look for urgent replies and a gentle head tilt for apologies or questions
 * 🧠 Look away while thinking
 * 🎧 Look toward the user while listening
 * 📑 Look toward newly displayed content

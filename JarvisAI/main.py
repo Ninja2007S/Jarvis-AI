@@ -2410,6 +2410,10 @@ class JarvisLive:
                                 # alone cannot show. Pure string work — it adds
                                 # nothing measurable to the response path.
                                 self._visemes.feed_text(txt)
+                                try:
+                                    self.ui.react_avatar_text(txt)
+                                except Exception:
+                                    pass
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)

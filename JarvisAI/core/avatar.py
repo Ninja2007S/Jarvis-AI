@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 
 import numpy as np
 from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt
@@ -161,7 +162,9 @@ class HoloAvatar:
         self._sway = 0.0           # integrated sway phase — see step()
         self._yaw = 0.0
         self._pitch = 0.0
+        self._roll = 0.0
         self._mouth = 0.0          # 0..1 smoothed jaw opening
+        self._smile = 0.0          # 0..1 cheek/lip-corner lift
         self._glow = 0.0           # 0..1 smoothed overall energy
         self._scan = -1.6          # vertical position of the energy sweep
         self._blink = 0.0          # 0 = open, 1 = shut
@@ -204,6 +207,64 @@ class HoloAvatar:
         self._v_wide = 0.0
         self._wide = 0.0           # smoothed lip spread, -1 round .. +1 spread
         self._v_peak = 0.18        # running estimate of this voice's loud level
+        self._smile_w = self._lips_w * np.clip(
+            (np.abs(self._v0[:, 0]) - 0.035) / 0.20, 0.0, 1.0
+        )
+        self._smile_tgt = 0.0
+        self._smile_until = 0.0
+        self._gesture = ""
+        self._gesture_at = 0.0
+        self._gesture_strength = 0.0
+
+    def react_to_text(self, text: str) -> None:
+        """Choose a brief facial expression and head gesture from spoken words."""
+        raw = str(text or "").casefold().replace("’", "'")
+        question = "?" in raw
+        words = " " + re.sub(r"[^\w\s']", " ", raw).strip() + " "
+        if len(words) < 3:
+            return
+        greeting = any(term in words for term in (
+            " hello ", " hi ", " hey ", " good morning ", " good afternoon ",
+            " good evening ", " ayubowan ", " ආයුබෝවන් ", " welcome ",
+        ))
+        apology = any(term in words for term in (
+            " sorry ", " apologize ", " apologies ", " my mistake ", " couldn't ",
+            " could not ", " unable to ", " failed to ",
+        ))
+        serious = any(term in words for term in (
+            " emergency ", " critical ", " dangerous ", " security alert ",
+            " warning ", " urgent ",
+        ))
+        acknowledgement = any(term in words for term in (
+            " certainly ", " of course ", " done ", " completed ", " successfully ",
+            " glad to help ", " happy to help ", " you're welcome ", " you are welcome ",
+            " thank you ", " thanks ",
+        ))
+        if greeting:
+            self._smile_tgt, self._gesture = 0.92, "nod"
+            self._gesture_strength = 1.0
+            hold = 3.0
+        elif serious:
+            self._smile_tgt, self._gesture = 0.0, "focus"
+            self._gesture_strength = 0.75
+            hold = 2.4
+        elif apology:
+            self._smile_tgt, self._gesture = 0.0, "tilt"
+            self._gesture_strength = 0.70
+            hold = 2.5
+        elif acknowledgement:
+            self._smile_tgt, self._gesture = 0.72, "nod"
+            self._gesture_strength = 0.72
+            hold = 2.5
+        elif question:
+            self._smile_tgt, self._gesture = 0.12, "tilt"
+            self._gesture_strength = 0.48
+            hold = 1.6
+        else:
+            return
+
+        self._smile_until = self._t + hold
+        self._gesture_at = self._t
 
     # ── animation ───────────────────────────────────────────────────────────
 
@@ -343,6 +404,27 @@ class HoloAvatar:
         thinking = st in ("THINKING", "PROCESSING")
         asleep = st in ("SLEEPING", "STANDBY", "OFFLINE")
 
+        smile_default = 0.08 if live else (0.035 if st == "LISTENING" else 0.0)
+        smile_target = self._smile_tgt if t < self._smile_until else smile_default
+        self._smile += (smile_target - self._smile) * _rate(
+            dt, 0.22 if smile_target > self._smile else 0.42
+        )
+
+        # Brief head gestures accompany meaningful phrases, then settle back to
+        # the normal idle sway instead of holding a pose.
+        gesture_age = t - self._gesture_at
+        self._roll = 0.0
+        if 0.0 <= gesture_age < 0.90:
+            envelope = math.sin(math.pi * gesture_age / 0.90)
+            if self._gesture == "nod":
+                self._pitch += (math.sin(gesture_age * 10.0) * 0.050
+                                * envelope * self._gesture_strength)
+            elif self._gesture == "tilt":
+                self._roll = 0.105 * envelope * self._gesture_strength
+                self._yaw += 0.035 * envelope * self._gesture_strength
+            elif self._gesture == "focus":
+                self._pitch -= 0.028 * envelope * self._gesture_strength
+
         if thinking:
             # People look away to think, and hold it. The direction re-rolls
             # slowly so it reads as thought rather than as scanning.
@@ -442,6 +524,13 @@ class HoloAvatar:
             # head, which is to say invisible.
             v[:, 1] += self._brow_w * (self._brow * _BROW_LIFT)
 
+        if self._smile > 0.01:
+            # Lift and gently widen the canonical lip corners instead of
+            # painting a detached smile over the face.
+            side = np.sign(self._v0[:, 0])
+            v[:, 1] += self._smile_w * (0.038 * self._smile)
+            v[:, 0] += side * self._smile_w * (0.010 * self._smile)
+
         if abs(self._wide) > 0.01 and self._mouth > 0.0:
             # Spread pulls the corners out and flattens the lips back; rounding
             # draws them in and pushes them forward into a purse.
@@ -466,6 +555,10 @@ class HoloAvatar:
             [sp * sy, cp, -sp * cy],
             [-cp * sy, sp, cp * cy],
         ], dtype=np.float32)
+        cr, sr = math.cos(self._roll), math.sin(self._roll)
+        roll = np.array([[cr, -sr, 0.0], [sr, cr, 0.0], [0.0, 0.0, 1.0]],
+                        dtype=np.float32)
+        m = roll @ m
 
         return v @ m.T, self._n0 @ m.T
 
