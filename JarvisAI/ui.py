@@ -31,7 +31,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSplitter,
-    QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
+    QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSlider,
 )
 try:
     from PyQt6.QtOpenGLWidgets import QOpenGLWidget
@@ -2593,6 +2593,7 @@ class VoicePersonalityOverlay(QWidget):
     """Editor for response style profiles stored in local long-term memory."""
 
     saved = pyqtSignal(object)
+    preview_requested = pyqtSignal(object)
     _OW = 460
 
     def __init__(self, settings: dict, parent=None):
@@ -2602,11 +2603,24 @@ class VoicePersonalityOverlay(QWidget):
         self._modes = MODE_DEFINITIONS
         self._settings = dict(settings or {})
         self._settings["tuning"] = dict(self._settings.get("tuning") or {})
+        self._settings["vocal"] = dict(self._settings.get("vocal") or {})
         self._editing_mode = str(self._settings.get("mode", "conversational"))
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setFixedWidth(self._OW)
+        parent_height = parent.height() if parent is not None else 760
+        self.setMaximumHeight(max(480, min(820, parent_height - 24)))
         self.setStyleSheet(f"VoicePersonalityOverlay {{ background: rgba(7, 13, 16, 248); border: 1px solid {C.BORDER_B}; border-radius: 6px; }}")
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea{background:transparent;} QWidget#VoicePersonalityContent{background:transparent;}")
+        content = QWidget()
+        content.setObjectName("VoicePersonalityContent")
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(22, 17, 22, 17)
         lay.setSpacing(8)
 
@@ -2656,9 +2670,67 @@ class VoicePersonalityOverlay(QWidget):
         self._text.setPlaceholderText("How should JARVIS phrase replies? Keep instructions focused on tone, length, or format.")
         self._text.setStyleSheet(f"QTextEdit {{ background: #081216; color: {C.TEXT}; border: 1px solid {C.BORDER}; padding: 6px; }}")
         lay.addWidget(self._text)
-        lay.addWidget(label("Saved to this device's memory · style only · 1,200 character limit", C.TEXT_DIM, 7))
+        lay.addWidget(label("Response and vocal controls stay in local memory · custom instructions max 1,200 characters", C.TEXT_DIM, 7))
+
+        rule = QFrame(); rule.setFrameShape(QFrame.Shape.HLine)
+        rule.setStyleSheet(f"color:{C.BORDER}; margin:3px 0;")
+        lay.addWidget(rule)
+        lay.addWidget(label("VOCAL BEHAVIOR ENGINE", C.PRI, 9, True))
+        lay.addWidget(label("Gemini streams the speech; optional breath texture is generated locally.", C.TEXT_DIM, 7))
+
+        from core.vocal_behavior import DEFAULT_SETTINGS, VOCAL_PROFILES, normalize_settings
+        vocal = normalize_settings(self._settings.get("vocal"))
+        self._vocal_checks = {}
+        check_row = QHBoxLayout()
+        for key, text in (("enabled", "ENGINE"), ("breathing", "BREATH"),
+                          ("sighs", "SIGHS"), ("laughter", "REACTIONS")):
+            check = QCheckBox(text)
+            check.setChecked(vocal[key])
+            check.setStyleSheet(f"QCheckBox{{color:{C.TEXT_MED};font:7pt 'Courier New';spacing:4px;}} QCheckBox::indicator{{width:12px;height:12px;}}")
+            self._vocal_checks[key] = check
+            check_row.addWidget(check)
+        lay.addLayout(check_row)
+
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(label("VOCAL PROFILE", C.TEXT_DIM, 7))
+        self._vocal_profile = QComboBox()
+        self._vocal_profile.setStyleSheet(f"QComboBox{{background:#081216;color:{C.TEXT};border:1px solid {C.BORDER};padding:3px;}} QComboBox QAbstractItemView{{background:#0b1519;color:{C.TEXT};}}")
+        for profile_id, title in (("professional", "Professional Jarvis"), ("natural", "Natural Companion"),
+                                  ("expressive", "Expressive"), ("minimal", "Minimal")):
+            self._vocal_profile.addItem(title, profile_id)
+        self._vocal_profile.setCurrentIndex(max(0, self._vocal_profile.findData(vocal["profile"])))
+        profile_row.addWidget(self._vocal_profile, 1)
+        lay.addLayout(profile_row)
+
+        self._vocal_sliders = {}
+        for key, title in (("expressiveness", "Expressiveness"), ("pause_naturalness", "Pause naturalness"),
+                           ("breath_volume", "Breath volume"), ("event_frequency", "Event frequency")):
+            row = QHBoxLayout()
+            row.addWidget(label(title.upper(), C.TEXT_DIM, 7))
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, 100)
+            slider.setValue(vocal[key])
+            slider.setStyleSheet(f"QSlider::groove:horizontal{{height:4px;background:{C.BORDER};}} QSlider::handle:horizontal{{width:12px;margin:-5px 0;background:{C.PRI};border-radius:6px;}} QSlider::sub-page:horizontal{{background:{C.PRI_DIM};}}")
+            value_label = label(str(vocal[key]), C.TEXT_MED, 7)
+            slider.valueChanged.connect(lambda value, target=value_label: target.setText(str(value)))
+            self._vocal_sliders[key] = slider
+            row.addWidget(slider, 1)
+            row.addWidget(value_label)
+            lay.addLayout(row)
 
         buttons = QHBoxLayout()
+        preview = QPushButton("PREVIEW BREATH")
+        preview.setFixedHeight(32)
+        preview.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        preview.setStyleSheet(f"QPushButton{{color:{C.ACC2};background:transparent;border:1px solid {C.BORDER};border-radius:3px;}} QPushButton:hover{{border-color:{C.ACC2};}}")
+        preview.clicked.connect(lambda: self.preview_requested.emit(self._collect_vocal_settings()))
+        buttons.addWidget(preview)
+        reset = QPushButton("RESET")
+        reset.setFixedHeight(32)
+        reset.setFont(QFont("Courier New", 7))
+        reset.setStyleSheet(f"QPushButton{{color:{C.TEXT_MED};background:transparent;border:1px solid {C.BORDER};border-radius:3px;}}")
+        reset.clicked.connect(self._reset_vocal_settings)
+        buttons.addWidget(reset)
         save = QPushButton("▸  SAVE PROFILE")
         save.setFixedHeight(32)
         save.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
@@ -2703,8 +2775,24 @@ class VoicePersonalityOverlay(QWidget):
         self._store_current()
         self._settings["mode"] = str(self._mode.currentData() or "conversational")
         self._settings["custom_name"] = self._name.text().strip() or "My profile"
+        self._settings["vocal"] = self._collect_vocal_settings()
         self.saved.emit(self._settings)
         self.hide()
+
+    def _collect_vocal_settings(self) -> dict:
+        from core.vocal_behavior import normalize_settings
+        result = {key: check.isChecked() for key, check in self._vocal_checks.items()}
+        result["profile"] = str(self._vocal_profile.currentData() or "professional")
+        result.update({key: slider.value() for key, slider in self._vocal_sliders.items()})
+        return normalize_settings(result)
+
+    def _reset_vocal_settings(self) -> None:
+        from core.vocal_behavior import DEFAULT_SETTINGS
+        for key, check in self._vocal_checks.items():
+            check.setChecked(bool(DEFAULT_SETTINGS[key]))
+        self._vocal_profile.setCurrentIndex(max(0, self._vocal_profile.findData(DEFAULT_SETTINGS["profile"])))
+        for key, slider in self._vocal_sliders.items():
+            slider.setValue(int(DEFAULT_SETTINGS[key]))
 
 
 class PluginManagerOverlay(QWidget):
@@ -4334,6 +4422,7 @@ class MainWindow(QMainWindow):
         self.on_voice_change   = None   # callable: () -> None — rebuild session with new voice
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
         self.on_voice_personality_change = None  # callable: () -> None — apply saved response style
+        self.on_voice_preview = None   # callable: (vocal settings) -> bool
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
         self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
@@ -7097,8 +7186,15 @@ class MainWindow(QMainWindow):
             self._personality_overlay.hide()
         ov = VoicePersonalityOverlay(get_voice_personality(), parent=self.centralWidget())
         ov.saved.connect(self._apply_voice_personality)
+        ov.preview_requested.connect(self._preview_voice_behavior)
         self._centre_overlay(ov)
         self._personality_overlay = ov
+
+    def _preview_voice_behavior(self, settings: dict) -> None:
+        if self.on_voice_preview and self.on_voice_preview(settings):
+            self._log.append_log("SYS: Playing a local breath preview through the JARVIS audio stream.")
+        else:
+            self._log.append_log("SYS: Breath preview is unavailable while audio is busy or disconnected.")
 
     def _apply_voice_personality(self, settings: dict):
         from memory.voice_personality import MODE_DEFINITIONS, save_voice_personality
@@ -7535,6 +7631,14 @@ class JarvisUI:
     @on_voice_personality_change.setter
     def on_voice_personality_change(self, cb):
         self._win.on_voice_personality_change = cb
+
+    @property
+    def on_voice_preview(self):
+        return self._win.on_voice_preview
+
+    @on_voice_preview.setter
+    def on_voice_preview(self, cb):
+        self._win.on_voice_preview = cb
 
     def show_confirm(self, title: str, detail: str) -> None:
         """Thread-safe: raise the irreversible-action gate. Called from action

@@ -1591,6 +1591,21 @@ The voice selector offers the Gemini Live presets **Charon**, **Puck**, **Kore**
 are provider voice names, and availability depends on the active Gemini Live
 model. One-shot OpenAI/Claude/Gemini selection is separate from the Live voice.
 
+The same **RESPONSE PERSONALITY** panel contains **VOCAL BEHAVIOR ENGINE**
+controls: Professional Jarvis, Natural Companion, Expressive, and Minimal
+profiles; engine, breathing, sigh, and reaction toggles; and sliders for
+expressiveness, pause naturalness, breath volume, and event frequency. **PREVIEW
+BREATH** plays one local sample through the normal JARVIS output queue; **RESET**
+restores the defaults. Settings are stored with the existing local voice profile.
+Gemini Live still generates all words and speech audio. The current
+`gemini-3.1-flash-live-preview` path does not expose a control that guarantees
+breaths, sighs, or laughter. JARVIS uses its system instruction for cadence and
+prosody, and a small locally synthesized, quiet breath texture for occasional
+eligible long responses. That fallback is an airy noise approximation, not a
+recorded human breath. Sigh/reaction toggles are contextual delivery guidance;
+the model may not emit those sounds. Pauses and breaths are sparse, and queued
+events are discarded on interruption. See `core/vocal_behavior.py`.
+
 ### HUD visualizations
 
 The saved HUD selector contains four views. **Visualization 1** (the default)

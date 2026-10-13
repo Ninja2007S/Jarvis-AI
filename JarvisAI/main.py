@@ -70,7 +70,7 @@ from memory.memory_manager import (
     search_memory, set_trim_notifier, build_local_episode,
     redact_sensitive_content, provider_safe_memory, provider_safe_text, record_memory_usage,
 )
-from memory.voice_personality import voice_personality_prompt
+from memory.voice_personality import get_voice_personality, voice_personality_prompt
 
 # The file-backed tools (open_app, web_search, browser_control, …) are no longer
 # imported or declared here — they self-describe via a TOOL dict in their own
@@ -102,6 +102,7 @@ from core                      import injection_guard
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
+from core.vocal_behavior      import VocalBehaviorEngine, VocalEvent, VocalPlan, normalize_settings
 from core.wake_word            import (
     WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
 )
@@ -744,6 +745,11 @@ class JarvisLive:
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
         self._visemes              = VisemeStream()
+        self._vocal_engine         = VocalBehaviorEngine()
+        self._vocal_settings       = get_voice_personality().get("vocal", {})
+        self._vocal_plan           = VocalPlan()
+        self._vocal_plan_ready     = False
+        self._vocal_audio_started  = False
         self._last_out_logged      = ""      # de-dupes a re-sent transcript tail
         # Push-to-talk
         self._ptt_enabled          = False
@@ -771,6 +777,7 @@ class JarvisLive:
         self.ui.on_voice_change   = self._on_voice_change     # voice picker → rebuild session
         self.ui.on_audio_device_change = self._on_audio_device_change
         self.ui.on_voice_personality_change = self._on_voice_personality_change
+        self.ui.on_voice_preview = self.preview_vocal_behavior
         self.ui.on_voice_id_action = self._voice_id_action
         self.ui.set_voice_id_enabled(self._voice_id_enabled)
         self._reconnect_event: asyncio.Event | None = None
@@ -1115,7 +1122,41 @@ class JarvisLive:
 
     def _on_voice_personality_change(self):
         """Apply the saved response profile on the next resumed Live session."""
+        self._vocal_settings = get_voice_personality().get("vocal", {})
         self.request_reconnect(keep_context=True, reason="response personality")
+
+    def preview_vocal_behavior(self, settings: dict) -> bool:
+        """Queue one locally generated breath through the existing output stream."""
+        loop = self._loop
+        if (loop is None or not loop.is_running() or self.audio_in_queue is None
+                or self._is_speaking or self._assistant_turn_pending):
+            return False
+        cfg = normalize_settings(settings)
+        event = VocalEvent("BREATH_IN", 310, cfg["breath_volume"] / 100.0, "preview")
+        loop.call_soon_threadsafe(self._enqueue_vocal_event, event)
+        return True
+
+    def _enqueue_vocal_event(self, event: VocalEvent) -> None:
+        """Queue event PCM on the asyncio owner thread; interruption drains it."""
+        queue = self.audio_in_queue
+        if queue is None or self._interrupted:
+            return
+        try:
+            pcm = self._vocal_engine.render_event(event, RECEIVE_SAMPLE_RATE)
+            for start in range(0, len(pcm), 2400):
+                queue.put_nowait(pcm[start:start + 2400])
+        except Exception as exc:
+            print(f"[Vocal] Could not queue {event.kind}: {exc}")
+
+    def _plan_vocal_response(self, text: str) -> None:
+        if self._vocal_plan_ready:
+            return
+        if len(" ".join(str(text or "").split())) < 110:
+            return  # wait for more streamed transcript before deciding
+        self._vocal_plan = self._vocal_engine.plan_response(
+            text, self._vocal_settings, interrupted=self._interrupted,
+        )
+        self._vocal_plan_ready = True
 
     async def _watch_reconnect(self):
         """Session-scoped task: when a voluntary reconnect is requested, raise a
@@ -1578,6 +1619,9 @@ class JarvisLive:
                     break
             if drained:
                 print(f"[JARVIS] ✋ Interrupted — {drained} audio chunks discarded")
+        self._vocal_plan = VocalPlan()
+        self._vocal_plan_ready = False
+        self._vocal_audio_started = False
         self.set_speaking(False)
         # The words we were about to mouth are never going to be spoken now.
         self._visemes.reset()
@@ -2383,11 +2427,24 @@ class JarvisLive:
                                 print("[JARVIS] 🔗 Session resumption armed")
                             self._resume_handle = _sru.new_handle
 
+                    sc = response.server_content
+                    _early_transcript = getattr(
+                        getattr(sc, "output_transcription", None), "text", ""
+                    ) if sc else ""
+                    if _early_transcript:
+                        self._plan_vocal_response(" ".join(
+                            [*out_buf, _clean_transcript(_early_transcript)]
+                        ))
+
                     _audio_chunks = _live_audio_chunks(response)
                     if _audio_chunks:
                         if self._interrupted:
                             pass  # discard: interrupted
                         else:
+                            if not self._vocal_audio_started:
+                                for event in self._vocal_plan.before:
+                                    self._enqueue_vocal_event(event)
+                            self._vocal_audio_started = True
                             self._assistant_turn_pending = True
                             if self._turn_done_event and self._turn_done_event.is_set():
                                 self._turn_done_event.clear()
@@ -2401,8 +2458,7 @@ class JarvisLive:
                                         _audio_data[_i : _i + _SLICE]
                                     )
 
-                    if response.server_content:
-                        sc = response.server_content
+                    if sc:
 
                         # Gemini reports barge-in separately from turn_complete.
                         # Stop any audio already queued for the speakers at once;
@@ -2424,6 +2480,9 @@ class JarvisLive:
                             # retained even if the server sends no turn_complete
                             # for the cancelled audio.
                             self._interrupted = False
+                            self._vocal_plan = VocalPlan()
+                            self._vocal_plan_ready = False
+                            self._vocal_audio_started = False
                             out_buf = []
                             print("[JARVIS] ✋ Live session reported user interruption.")
 
@@ -2437,8 +2496,10 @@ class JarvisLive:
                             # sailed straight back in, which logged the answer
                             # twice AND made the avatar mouth it twice.
                             if txt and not _is_repeat_chunk(txt, out_buf):
+                                self._plan_vocal_response(txt)
                                 self._assistant_turn_pending = True
                                 out_buf.append(txt)
+                                self._plan_vocal_response(" ".join(out_buf))
                                 # Hand the words to the mouth as they arrive, so
                                 # the avatar can form the consonants the audio
                                 # alone cannot show. Pure string work — it adds
@@ -2499,6 +2560,10 @@ class JarvisLive:
                                         self._inflight_user_tool_started = False
 
                         if sc.turn_complete:
+                            if (not self._interrupted and self._vocal_audio_started
+                                    and self._vocal_plan.after):
+                                for event in self._vocal_plan.after:
+                                    self._enqueue_vocal_event(event)
                             self._assistant_turn_pending = False
                             with self._voice_id_audio_lock:
                                 self._voice_id_audio_turn_active = False
@@ -2511,6 +2576,9 @@ class JarvisLive:
                                 self._interrupted = False
                                 out_buf = []
                                 self._visemes.reset()
+                                self._vocal_plan = VocalPlan()
+                                self._vocal_plan_ready = False
+                                self._vocal_audio_started = False
                                 continue
                             if self._interrupted:
                                 self._interrupted = False
@@ -2559,6 +2627,9 @@ class JarvisLive:
                                         "ts": datetime.now().isoformat(),
                                     }))
                             out_buf = []
+                            self._vocal_plan = VocalPlan()
+                            self._vocal_plan_ready = False
+                            self._vocal_audio_started = False
 
                             if self._vision_close_pending:
                                 # This turn_complete IS the vision answer — close camera + release busy flag
