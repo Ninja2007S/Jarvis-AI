@@ -9,14 +9,17 @@ def earth_globe(parameters: dict, player=None) -> str:
     action = str(parameters.get("action", "show")).strip().lower()
     destination = str(parameters.get("destination", "") or "").strip()
     origin = str(parameters.get("origin", "") or "").strip()
-    if action not in {"show", "locate", "route", "distance"}:
-        return "Choose show, locate, route, or distance."
+    if action not in {"show", "locate", "route", "distance", "flights"}:
+        return "Choose show, locate, route, distance, or flights."
     if action == "locate" and not destination:
         return "Give me a city, landmark, or country to locate."
     if action in {"route", "distance"} and not destination:
         return "Give me a route destination."
 
     show(destination, origin, action)
+    if action == "flights":
+        return ("Opening the live flight radar. JARVIS will ask for location access, then show "
+                "aircraft currently reported near you.")
     if action in {"route", "distance"} and not origin:
         return f"Where should I measure the route to {destination} from? The map is open with the start field ready."
     if action == "route":
@@ -36,7 +39,10 @@ TOOL = {
         "Use action='show' for 'show me the Earth'. Use action='locate' and destination for 'take me to Kandy' "
         "or 'show Tokyo on the map'. Use action='route' with origin and destination for a driving route, "
         "or action='distance' when asked how far apart two places are; it displays road distance and estimated "
-        "driving time. For example, 'distance from Colombo to Galle'. A route needs a start and an end. If the user asks for a "
+        "driving time. Use action='flights' when asked to show nearby or overhead flights; it requests device "
+        "location permission and displays aircraft positions, callsigns, altitude, speed, heading, and report age "
+        "from OpenSky Network. For example, 'show flights over me'. If location is unavailable, ask for a city "
+        "and enter it in the map's FROM field. A route needs a start and an end. If the user asks for a "
         "route without a start, leave origin empty and ask which place to start from; do not assume device location."
     ),
     "parameters": {
@@ -45,7 +51,7 @@ TOOL = {
             "action": {
                 "type": "STRING",
                 "description": "show the rotating globe, zoom to a place, calculate a driving route, or measure road distance and estimated drive time",
-                "enum": ["show", "locate", "route", "distance"],
+                "enum": ["show", "locate", "route", "distance", "flights"],
             },
             "destination": {
                 "type": "STRING",

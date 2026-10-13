@@ -427,7 +427,7 @@ def flight_finder(parameters: dict, player=None, speak=None) -> str:
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "flight_finder",
-    "description": "Searches Google Flights and speaks the best options.",
+    "description": "Searches Google Flights for future/dated itineraries between an origin and destination. This is not a live aircraft tracker; for aircraft currently flying near or overhead the user, use earth_globe with action='flights'.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

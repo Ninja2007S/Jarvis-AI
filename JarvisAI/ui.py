@@ -4076,6 +4076,10 @@ class MainWindow(QMainWindow):
         self._workspace.neural_hand_update.connect(self._on_neural_hand_update)
         self._holo_news_sig.connect(self._open_holo_news_voice)
         self._workspace.route_requested.connect(lambda destination, origin: self._show_earth(destination, origin, "flight_route"))
+        self._workspace.flight_radar_requested.connect(self._start_flight_radar_from_tab)
+        self._workspace.flight_radar_location_requested.connect(self._start_flight_radar_from_tab)
+        self._workspace.flight_radar_map_requested.connect(lambda: self._show_earth("", "", "flights"))
+        self._earth_panel.flight_radar_updated.connect(self._workspace.show_live_flights)
         self._holo_stop_sig.connect(self._workspace.stop_holo_camera)
         self._hud_cam_stack.addWidget(self._workspace)
         self._earth_open = False
@@ -4250,10 +4254,20 @@ class MainWindow(QMainWindow):
         self._hud_cam_stack.setCurrentWidget(self._earth_panel)
 
     def _close_earth(self) -> None:
+        self._earth_panel.stop_flight_radar()
         self._earth_open = False
         self._hud_cam_stack.setCurrentIndex(1 if self._cam_active else 0)
 
+    def _start_flight_radar_from_tab(self, manual_place: str = "") -> None:
+        """Start the shared Earth radar feed while keeping the Flights tab visible."""
+        if not manual_place:
+            self._workspace.set_live_flights_status("REQUESTING SYSTEM LOCATION  ·  JARVIS will ask before using it")
+        if self._cam_active:
+            self.stop_camera_stream()
+        self._earth_panel.start_flight_radar_in_background(manual_place)
+
     def _show_workspace(self, kind: str, payload) -> None:
+        self._earth_panel.stop_flight_radar()
         data = payload if isinstance(payload, dict) else {"value": payload}
         if kind == "news" and self._workspace._is_fullscreen:
             # Keep the Holo stage active during a briefing. The image server is

@@ -321,6 +321,9 @@ class HudWorkspace(QWidget):
     close_requested = pyqtSignal()
     interrupt_requested = pyqtSignal()
     route_requested = pyqtSignal(str, str)
+    flight_radar_requested = pyqtSignal()
+    flight_radar_location_requested = pyqtSignal(str)
+    flight_radar_map_requested = pyqtSignal()
     market_loaded = pyqtSignal(object)
     system_metrics_loaded = pyqtSignal(object)
     thumbnail_loaded = pyqtSignal(int, bytes)
@@ -987,6 +990,16 @@ class HudWorkspace(QWidget):
         status_row.addWidget(status, 1)
         if key == "flights":
             self._flight_route = ("", "")
+            start_radar = QPushButton("START LIVE RADAR")
+            start_radar.setStyleSheet(self._button_style())
+            start_radar.setToolTip("Request your approved system location and list nearby reported aircraft here")
+            start_radar.clicked.connect(self._request_flight_radar)
+            status_row.addWidget(start_radar)
+            open_map = QPushButton("OPEN RADAR MAP")
+            open_map.setStyleSheet(self._button_style())
+            open_map.setToolTip("Show the same live aircraft on the Earth map")
+            open_map.clicked.connect(lambda _checked=False: self.flight_radar_map_requested.emit())
+            status_row.addWidget(open_map)
             route = QPushButton("PLOT AIR PATH ON GLOBE")
             route.setStyleSheet(self._button_style())
             route.clicked.connect(lambda: self.route_requested.emit(*self._flight_route))
@@ -1001,10 +1014,147 @@ class HudWorkspace(QWidget):
         cards.setSpacing(7)
         cards.addStretch(1)
         scroll.setWidget(host)
-        lay.addWidget(scroll, 1)
+        if key == "flights":
+            self._flight_subtabs = QTabWidget()
+            self._flight_subtabs.setDocumentMode(True)
+            self._flight_subtabs.setStyleSheet(f"""
+                QTabWidget::pane {{ border:1px solid {_BORDER}; background:{_BG}; }}
+                QTabBar::tab {{ background:{_PANEL}; color:{_DIM}; padding:7px 13px;
+                    border:1px solid {_BORDER}; margin-right:3px; font:8pt 'Courier New'; }}
+                QTabBar::tab:selected {{ color:{_TEAL}; border-bottom:2px solid {_TEAL}; }}
+            """)
+            scheduled_page = QWidget()
+            scheduled_layout = QVBoxLayout(scheduled_page)
+            scheduled_layout.setContentsMargins(0, 0, 0, 0)
+            scheduled_layout.addWidget(scroll)
+            self._flight_subtabs.addTab(scheduled_page, "SCHEDULED")
+
+            live_page = QWidget()
+            live_layout = QVBoxLayout(live_page)
+            live_layout.setContentsMargins(0, 0, 0, 0)
+            live_layout.setSpacing(5)
+            self._flight_live_status = QLabel("LIVE RADAR IDLE  ·  Start radar to request your location and fetch aircraft")
+            self._flight_live_status.setWordWrap(True)
+            self._flight_live_status.setStyleSheet(f"color:{_DIM};font:8pt 'Courier New';padding:6px;")
+            live_layout.addWidget(self._flight_live_status)
+            location_row = QHBoxLayout()
+            self._flight_location_input = QLineEdit()
+            self._flight_location_input.setPlaceholderText("Optional fallback area, e.g. Colombo")
+            self._flight_location_input.setStyleSheet(f"background:{_PANEL};color:{_TEXT};border:1px solid {_BORDER};padding:6px;font:8pt 'Courier New';")
+            use_area = QPushButton("USE AREA")
+            use_area.setStyleSheet(self._button_style())
+            use_area.setToolTip("Use this place as the radar center if system location is unavailable")
+            use_area.clicked.connect(self._request_flight_radar_for_area)
+            location_row.addWidget(self._flight_location_input, 1)
+            location_row.addWidget(use_area)
+            live_layout.addLayout(location_row)
+            live_scroll = QScrollArea()
+            live_scroll.setWidgetResizable(True)
+            live_scroll.setStyleSheet(f"QScrollArea{{border:0;background:{_BG};}}")
+            live_host = QWidget()
+            live_cards = QVBoxLayout(live_host)
+            live_cards.setContentsMargins(2, 2, 6, 2)
+            live_cards.setSpacing(7)
+            live_cards.addStretch(1)
+            live_scroll.setWidget(live_host)
+            live_layout.addWidget(live_scroll, 1)
+            self._flight_live_host = live_host
+            self._flight_live_cards = live_cards
+            self._flight_subtabs.addTab(live_page, "LIVE RADAR")
+            lay.addWidget(self._flight_subtabs, 1)
+        else:
+            lay.addWidget(scroll, 1)
         self._card_hosts = getattr(self, "_card_hosts", {})
         self._card_hosts[key] = (host, cards)
         return page
+
+    def _request_flight_radar(self):
+        self._flight_subtabs.setCurrentIndex(1)
+        self.set_live_flights_status("REQUESTING SYSTEM LOCATION  ·  JARVIS will ask before using it")
+        self.flight_radar_requested.emit()
+
+    def _request_flight_radar_for_area(self):
+        area = self._flight_location_input.text().strip()
+        if not area:
+            self.set_live_flights_status("ENTER AN AREA FIRST  ·  This is used only as the radar center")
+            self._flight_location_input.setFocus()
+            return
+        self._flight_subtabs.setCurrentIndex(1)
+        self.set_live_flights_status(f"LOCATING RADAR CENTER  ·  {area[:75]}")
+        self.flight_radar_location_requested.emit(area)
+
+    def set_live_flights_status(self, message: str):
+        if hasattr(self, "_flight_live_status"):
+            self._flight_live_status.setText(str(message)[:500])
+
+    def show_live_flights(self, result):
+        """Render nearby live aircraft without replacing scheduled flight cards."""
+        if not hasattr(self, "_flight_live_cards"):
+            return
+        layout = self._flight_live_cards
+        while layout.count():
+            child = layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        if not isinstance(result, dict):
+            result = {"error": "Flight radar returned an invalid response."}
+        if result.get("error"):
+            self.set_live_flights_status(f"RADAR UNAVAILABLE  ·  {result['error']}")
+            layout.addStretch(1)
+            return
+
+        aircraft = list(result.get("aircraft") or [])
+        updated = datetime.fromtimestamp(float(result.get("updated") or time.time())).strftime("%H:%M:%S")
+        radius = result.get("radius_km", 50)
+        cadence = max(1, int(result.get("refresh_seconds", 300)) // 60)
+        source = str(result.get("source") or "Live flight feed")
+        self.set_live_flights_status(
+            f"{source.upper()}  ·  {len(aircraft)} AIRCRAFT WITHIN {radius} KM  ·  "
+            f"UPDATED {updated}  ·  REFRESH {cadence} MIN"
+        )
+        if not aircraft:
+            empty = QLabel("NO AIRCRAFT REPORTED IN THIS RADAR AREA\nCoverage depends on receiver visibility and live feed availability.")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setWordWrap(True)
+            empty.setStyleSheet(f"color:{_DIM};font:9pt 'Courier New';padding:30px;")
+            layout.addWidget(empty)
+            layout.addStretch(1)
+            return
+
+        def value(item, key, suffix="", scale=1.0, digits=0):
+            raw = item.get(key)
+            if raw is None or raw == "":
+                return "—"
+            try:
+                return f"{float(raw) * scale:.{digits}f}{suffix}"
+            except (TypeError, ValueError):
+                return f"{raw}{suffix}"
+
+        for item in aircraft[:40]:
+            if not isinstance(item, dict):
+                continue
+            card = QFrame()
+            card.setStyleSheet(f"QFrame{{background:{_PANEL};border:1px solid {_BORDER};}}")
+            row = QVBoxLayout(card)
+            row.setContentsMargins(10, 8, 10, 8)
+            callsign = str(item.get("callsign") or "UNKNOWN CALLSIGN").strip() or "UNKNOWN CALLSIGN"
+            heading = QLabel(f"{callsign}  ·  {str(item.get('icao24') or 'NO ICAO').upper()}")
+            heading.setWordWrap(True)
+            heading.setStyleSheet(f"color:{_WHITE};font:bold 9pt 'Courier New';border:0;")
+            row.addWidget(heading)
+            details = (
+                f"Origin: {item.get('country') or 'Unknown'}    Distance: {value(item, 'distance_km', ' km', digits=1)}    "
+                f"Reported: {value(item, 'age_s', ' s')} ago\n"
+                f"Altitude: {value(item, 'altitude_m', ' m')} / {value(item, 'altitude_m', ' ft', 3.28084)}    "
+                f"Speed: {value(item, 'velocity_mps', ' km/h', 3.6)}    Heading: {value(item, 'heading', '°')}\n"
+                f"Vertical rate: {value(item, 'vertical_rate_mps', ' ft/min', 196.8504)}    Squawk: {item.get('squawk') or '—'}"
+            )
+            label = QLabel(details)
+            label.setWordWrap(True)
+            label.setStyleSheet(f"color:{_TEXT};font:8pt 'Courier New';border:0;line-height:1.35;")
+            row.addWidget(label)
+            layout.addWidget(card)
+        layout.addStretch(1)
 
     def _make_system_page(self) -> QWidget:
         page = QWidget()
@@ -1613,6 +1763,7 @@ class HudWorkspace(QWidget):
         self._set_cards("weather", report.get("days", []), f"WEATHER / {report.get('location','FORECAST')}", field_map=("day", "summary", "detail"))
 
     def show_flights(self, flights, origin: str, destination: str, date: str):
+        self._flight_subtabs.setCurrentIndex(0)
         self._flight_route = (destination, origin)
         items = []
         for flight in flights or []:

@@ -109,6 +109,32 @@ route; it shows great-circle distance and does not estimate travel time. JARVIS
 does not use or infer the PC's location. If you ask for a route without a
 start, it asks you; the **FROM** field is cleared after each completed route.
 
+### Live nearby flight radar
+
+Say **“show flights over me”** or click **NEARBY FLIGHTS** in the Earth HUD.
+JARVIS asks before using system location. If system location is unavailable,
+enter a town or city in **FROM** and click **NEARBY FLIGHTS**. JARVIS plots
+aircraft positions inside an approximately 50 km radar ring and shows each
+reported callsign, ICAO address, origin country, altitude, ground speed,
+heading, vertical rate, squawk code, distance, and report age. The feed refreshes
+every five minutes (longer in broad high-latitude queries) to respect the public
+service quota. It stops polling when you close the Earth view.
+
+The native **FLIGHTS** workspace tab also has **SCHEDULED** and **LIVE RADAR**
+views. Choose **START LIVE RADAR** to request system location and list aircraft
+details in the tab without leaving it; if location is unavailable, enter a town
+or city in the fallback field and choose **USE AREA**. **OPEN RADAR MAP** shows
+the radar on the Earth globe, and **PLOT AIR PATH ON GLOBE** remains available
+for a selected scheduled flight route.
+
+Positions come from the [OpenSky Network live state-vector API](https://openskynetwork.github.io/opensky-api/rest.html).
+The location coordinates are sent to OpenSky only after you approve the JARVIS
+location prompt. On Windows, system location services and desktop-app location
+access must be enabled. OpenSky reports aircraft it can currently receive;
+coverage can be incomplete, callsigns may be missing, and this feed does not
+provide a guaranteed airline/airport itinerary or aircraft identity. The radar
+shows reported positions, not guaranteed complete air traffic.
+
 The Earth panel is rendered inside the PyQt application using Qt WebEngine and
 MapLibre GL JS; it does not launch a separate browser. Install its dependency
 with the rest of the project requirements:

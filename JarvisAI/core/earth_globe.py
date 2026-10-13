@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from pathlib import Path
 from urllib.parse import quote
 
-from PyQt6.QtCore import QObject, Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
@@ -37,6 +38,10 @@ class _LookupResult(QObject):
     ready = pyqtSignal(object)
 
 
+class _FlightResult(QObject):
+    ready = pyqtSignal(object)
+
+
 class _JarvisEarthPage(QWebEnginePage if QWebEnginePage else object):
     """Keep map navigation embedded; only explicit external links leave JARVIS."""
 
@@ -52,6 +57,7 @@ class EarthGlobePanel(QWidget):
     """MapLibre 3D globe and detailed maps embedded in the PyQt HUD."""
 
     close_requested = pyqtSignal()
+    flight_radar_updated = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -68,6 +74,18 @@ class EarthGlobePanel(QWidget):
         self._map_ready = False
         self._html_loaded = False
         self._pending_js: list[tuple[str, tuple]] = []
+        self._flight_result = _FlightResult(self)
+        self._flight_result.ready.connect(self._on_flight_result)
+        self._flight_location: tuple[float, float] | None = None
+        self._flight_location_source = ""
+        self._flight_radar_active = False
+        self._last_flight_result: dict | None = None
+        self._flight_fetch_thread: threading.Thread | None = None
+        self._flight_last_fetch = 0.0
+        self._flight_refresh_seconds = 300
+        self._flight_refresh_timer = QTimer(self)
+        self._flight_refresh_timer.setInterval(300_000)  # Stay within OpenSky's public daily credit budget.
+        self._flight_refresh_timer.timeout.connect(self._refresh_flight_radar)
         self._build_ui()
 
     def _build_ui(self):
@@ -107,6 +125,10 @@ class EarthGlobePanel(QWidget):
         satellite = self._button("SATELLITE")
         satellite.clicked.connect(lambda: self._set_map_style("satellite"))
         modes.addWidget(satellite)
+        flights = self._button("NEARBY FLIGHTS")
+        flights.setToolTip("Use system location with permission; show nearby aircraft reported by OpenSky")
+        flights.clicked.connect(self.show_nearby_flights)
+        modes.addWidget(flights)
         root.addLayout(modes)
 
         if QWebEngineView is None:
@@ -132,6 +154,8 @@ class EarthGlobePanel(QWidget):
             # page to the profile gives Qt an explicit safe destruction order.
             self._page = _JarvisEarthPage(self._profile, self._profile)
             self._view.setPage(self._page)
+            if hasattr(self._page, "featurePermissionRequested"):
+                self._page.featurePermissionRequested.connect(self._handle_page_permission)
             self._page.titleChanged.connect(self._on_page_title)
             self._page.loadFinished.connect(self._on_page_loaded)
             root.addWidget(self._view, stretch=1)
@@ -186,6 +210,28 @@ class EarthGlobePanel(QWidget):
             self._status.setText("MAP ENGINE FAILED TO LOAD  ·  Check your internet connection and Qt WebEngine")
 
     def _on_page_title(self, title: str):
+        if title.startswith("JARVIS_LOCATION:"):
+            try:
+                _, lat, lon = title.split(":", 2)
+                latitude, longitude = float(lat), float(lon)
+                if not (math.isfinite(latitude) and math.isfinite(longitude)
+                        and -90 <= latitude <= 90 and -180 <= longitude <= 180):
+                    raise ValueError("coordinates outside valid range")
+                self._flight_location = (latitude, longitude)
+                self._flight_location_source = "system"
+                self._refresh_flight_radar()
+            except (TypeError, ValueError):
+                message = "LOCATION ERROR  ·  Could not read system coordinates"
+                self._status.setText(message)
+                self.flight_radar_updated.emit({"error": message})
+            return
+        if title.startswith("JARVIS_LOCATION_ERROR:"):
+            self._flight_radar_active = False
+            self._flight_refresh_timer.stop()
+            message = "LOCATION UNAVAILABLE  ·  Enter an area in the Flights tab and choose USE AREA"
+            self._status.setText(message)
+            self.flight_radar_updated.emit({"error": message})
+            return
         if title == "JARVIS_EARTH_ERROR":
             self._status.setText("MAP ENGINE ERROR  ·  This computer may not support WebGL")
             return
@@ -210,10 +256,13 @@ class EarthGlobePanel(QWidget):
 
     def open_view(self, destination: str = "", origin: str = "", mode: str = "show"):
         self.show()
+        self.stop_flight_radar()
         self._ensure_map_loaded()
         self._origin.setText(origin.strip())
         self._destination.setText(destination.strip())
-        if mode in {"route", "distance"}:
+        if mode == "flights":
+            self.show_nearby_flights()
+        elif mode in {"route", "distance"}:
             if not origin.strip():
                 prompt = ("START LOCATION NEEDED  ·  Enter where to measure from"
                           if mode == "distance" else
@@ -242,6 +291,7 @@ class EarthGlobePanel(QWidget):
         self._view.setHtml(html_path.read_text(encoding="utf-8"), QUrl("https://jarvis.local/earth"))
 
     def locate_query(self):
+        self.stop_flight_radar()
         if self._page is None:
             self._status.setText("Install the map component with: python -m pip install PyQt6-WebEngine")
             return
@@ -253,6 +303,7 @@ class EarthGlobePanel(QWidget):
         self._start_lookup("locate", "", destination)
 
     def route_query(self):
+        self.stop_flight_radar()
         if self._page is None:
             self._status.setText("Install the map component with: python -m pip install PyQt6-WebEngine")
             return
@@ -267,6 +318,200 @@ class EarthGlobePanel(QWidget):
             self._destination.setFocus()
             return
         self._start_lookup("route", origin, destination)
+
+    def show_nearby_flights(self):
+        """Ask Qt for system location, then load an OpenSky aircraft snapshot."""
+        if self._page is None:
+            message = "Install PyQt6-WebEngine to use the live flight radar."
+            self._status.setText(message)
+            self.flight_radar_updated.emit({"error": message})
+            return
+        if self._flight_location is not None and not self._origin.text().strip():
+            self._flight_radar_active = True
+            if self._last_flight_result:
+                self._js("showFlights", self._last_flight_result)
+                self.flight_radar_updated.emit(self._last_flight_result)
+            self._refresh_flight_radar()
+            return
+        self._flight_refresh_timer.stop()
+        self._flight_radar_active = True
+        manual_place = self._origin.text().strip()
+        if manual_place:
+            self._status.setText(f"LOCATING RADAR CENTER  ·  {manual_place[:75]}")
+            self._start_lookup("flight_origin", "", manual_place)
+            return
+        self._status.setText("REQUESTING SYSTEM LOCATION  ·  JARVIS will ask before using your location")
+        self._js("requestLocation")
+
+    def start_flight_radar_in_background(self, manual_place: str = ""):
+        """Fetch the nearby feed for the Flights tab without switching away from it."""
+        if self._page is None:
+            message = "Install PyQt6-WebEngine to use the live flight radar."
+            self._status.setText(message)
+            self.flight_radar_updated.emit({"error": message})
+            return
+        self._ensure_map_loaded()
+        self._origin.setText(str(manual_place or "").strip())
+        if manual_place:
+            self.show_nearby_flights()
+            return
+        if self._flight_location_source == "manual":
+            self._flight_location = None
+            self._flight_location_source = ""
+            self._last_flight_result = None
+            self._flight_last_fetch = 0.0
+        self.show_nearby_flights()
+
+    def stop_flight_radar(self):
+        self._flight_radar_active = False
+        self._flight_refresh_timer.stop()
+
+    def _handle_page_permission(self, origin, feature):
+        if self._page is None or QWebEnginePage is None:
+            return
+        try:
+            if feature != QWebEnginePage.Feature.Geolocation:
+                self._page.setFeaturePermission(
+                    origin, feature, QWebEnginePage.PermissionPolicy.PermissionDeniedByUser
+                )
+                return
+            from PyQt6.QtWidgets import QMessageBox
+            answer = QMessageBox.question(
+                self,
+                "JARVIS · Location for Flight Radar",
+                "Allow JARVIS to use this device's system location to find aircraft within about 50 km?\n\n"
+                "The coordinates are sent to OpenSky Network to request nearby aircraft. "
+                "The radar refreshes every five minutes.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            policy = QWebEnginePage.PermissionPolicy
+            self._page.setFeaturePermission(
+                origin, feature,
+                policy.PermissionGrantedByUser if answer == QMessageBox.StandardButton.Yes
+                else policy.PermissionDeniedByUser,
+            )
+        except (AttributeError, RuntimeError, TypeError):
+            message = "LOCATION PERMISSION UNAVAILABLE  ·  Enter an area in the Flights tab to continue"
+            self._status.setText(message)
+            self.flight_radar_updated.emit({"error": message})
+
+    def _refresh_flight_radar(self):
+        location = self._flight_location
+        if location is None or not self._flight_radar_active:
+            return
+        if self._flight_fetch_thread and self._flight_fetch_thread.is_alive():
+            return
+        remaining = self._flight_refresh_seconds - (time.monotonic() - self._flight_last_fetch)
+        if self._flight_last_fetch and remaining > 0:
+            self._status.setText(f"FLIGHT RADAR REFRESH IN {int(remaining)} SEC  ·  PUBLIC FEED QUOTA")
+            return
+        self._flight_last_fetch = time.monotonic()
+        self._status.setText("SCANNING ADS-B NETWORK  ·  OPEN SKY / APPROX. 50 KM RADIUS")
+        self._flight_fetch_thread = threading.Thread(
+            target=self._flight_lookup_worker, args=location,
+            daemon=True, name="JarvisNearbyFlights",
+        )
+        self._flight_fetch_thread.start()
+
+    def _flight_lookup_worker(self, latitude: float, longitude: float):
+        try:
+            radius_km = 50.0
+            lat_delta = radius_km / 111.0
+            lat_min, lat_max = max(-90.0, latitude - lat_delta), min(90.0, latitude + lat_delta)
+            if abs(latitude) >= 85:
+                lon_boxes = [(-180.0, 180.0)]
+            else:
+                lon_delta = radius_km / (111.0 * abs(math.cos(math.radians(latitude))))
+                low, high = longitude - lon_delta, longitude + lon_delta
+                lon_boxes = []
+                if low < -180.0:
+                    lon_boxes.extend([(-180.0, high), (low + 360.0, 180.0)])
+                elif high > 180.0:
+                    lon_boxes.extend([(low, 180.0), (-180.0, high - 360.0)])
+                else:
+                    lon_boxes.append((low, high))
+            box_area = (lat_max - lat_min) * sum(max(0.0, right - left) for left, right in lon_boxes)
+            credit_cost = 1 if box_area <= 25 else 2 if box_area <= 100 else 3 if box_area <= 400 else 4
+            refresh_seconds = max(300, int(math.ceil(86400 * credit_cost / 300)))
+            import requests
+            states = []
+            for lon_min, lon_max in lon_boxes:
+                response = requests.get(
+                    "https://opensky-network.org/api/states/all",
+                    params={"lamin": lat_min, "lamax": lat_max, "lomin": lon_min, "lomax": lon_max},
+                    headers={"User-Agent": "JARVIS-AI-Desktop/1.0 (+https://github.com/Ninja2007S/Jarvis-AI)"},
+                    timeout=(5, 15),
+                )
+                if response.status_code == 429:
+                    retry = response.headers.get("X-Rate-Limit-Retry-After-Seconds", "")
+                    raise RuntimeError(f"OpenSky rate limit reached; retry after {retry or 'later'} seconds.")
+                response.raise_for_status()
+                states.extend(response.json().get("states") or [])
+            now = time.time()
+            aircraft = []
+            seen = set()
+            for state in states:
+                if len(state) < 17 or state[5] is None or state[6] is None or state[8]:
+                    continue
+                icao24 = str(state[0] or "").upper()
+                if not icao24 or icao24 in seen:
+                    continue
+                seen.add(icao24)
+                lat, lon = float(state[6]), float(state[5])
+                d_lat = math.radians(lat - latitude)
+                d_lon = math.radians(lon - longitude)
+                a = (math.sin(d_lat / 2) ** 2 + math.cos(math.radians(latitude)) *
+                     math.cos(math.radians(lat)) * math.sin(d_lon / 2) ** 2)
+                distance = 6371.0 * 2 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1 - a)))
+                if distance > radius_km:
+                    continue
+                position_time = int(state[3] or state[4] or now)
+                age = max(0, int(now - position_time))
+                if age > 180:
+                    continue
+                aircraft.append({
+                    "icao24": icao24,
+                    "callsign": str(state[1] or "UNKNOWN").strip() or "UNKNOWN",
+                    "country": str(state[2] or "Unknown"),
+                    "longitude": lon,
+                    "latitude": lat,
+                    "altitude_m": float(state[7]) if state[7] is not None else None,
+                    "velocity_mps": float(state[9]) if state[9] is not None else None,
+                    "heading": float(state[10]) if state[10] is not None else None,
+                    "vertical_rate_mps": float(state[11]) if state[11] is not None else None,
+                    "squawk": str(state[14] or "—"),
+                    "distance_km": distance,
+                    "age_s": age,
+                })
+            aircraft.sort(key=lambda item: item["distance_km"])
+            flight_result = {"aircraft": aircraft[:40], "center": {"latitude": latitude, "longitude": longitude},
+                             "radius_km": radius_km, "updated": now, "source": "OpenSky Network",
+                             "refresh_seconds": refresh_seconds}
+            self._flight_result.ready.emit(flight_result)
+        except Exception as exc:
+            self._flight_result.ready.emit({"error": str(exc)[:240]})
+
+    def _on_flight_result(self, result: dict):
+        if not self._flight_radar_active:
+            return
+        if result.get("error"):
+            self._status.setText(f"FLIGHT RADAR UNAVAILABLE  ·  {result['error']}")
+            self._flight_refresh_timer.start(self._flight_refresh_seconds * 1000)
+            self.flight_radar_updated.emit(result)
+            return
+        self._last_flight_result = result
+        self._flight_refresh_seconds = max(300, int(result.get("refresh_seconds", 300)))
+        self._js("showFlights", result)
+        self._rotation_button.setText("RESUME ROTATION")
+        count = len(result.get("aircraft", []))
+        self._status.setText(
+            f"OPEN SKY NETWORK  ·  {count} AIRCRAFT WITHIN {result.get('radius_km', 50)} KM  ·  "
+            f"UPDATED {time.strftime('%H:%M:%S', time.localtime(result.get('updated', time.time())))}  ·  "
+            f"REFRESH {max(1, self._flight_refresh_seconds // 60)} MIN"
+        )
+        self._flight_refresh_timer.start(self._flight_refresh_seconds * 1000)
+        self.flight_radar_updated.emit(result)
 
     def _start_lookup(self, mode: str, origin: str, destination: str):
         if self._lookup_thread and self._lookup_thread.is_alive():
@@ -392,8 +637,8 @@ class EarthGlobePanel(QWidget):
     def _lookup_worker(self, mode: str, origin: str, destination: str):
         try:
             end = self._geocode(destination)
-            if mode == "locate":
-                self._lookup_signal.ready.emit({"mode": "locate", "destination": end})
+            if mode in {"locate", "flight_origin"}:
+                self._lookup_signal.ready.emit({"mode": mode, "destination": end})
                 return
             start = self._geocode(origin)
             route = (self._flight_route(start, end) if mode == "flight_route"
@@ -404,6 +649,10 @@ class EarthGlobePanel(QWidget):
 
     def _on_lookup_result(self, result: dict):
         if result.get("error"):
+            if result.get("mode") == "flight_origin":
+                self._flight_radar_active = False
+                self._flight_refresh_timer.stop()
+                self.flight_radar_updated.emit({"error": f"Could not resolve the radar area: {result['error']}"})
             self._status.setText(f"MAP REQUEST FAILED  ·  {result['error']}")
             return
         if result["mode"] == "locate":
@@ -417,6 +666,13 @@ class EarthGlobePanel(QWidget):
             self._js("focusPlace", place, zoom)
             self._rotation_button.setText("RESUME ROTATION")
             self._status.setText(f"LOCKED ON  ·  {place['name'][:120]}")
+            return
+        if result["mode"] == "flight_origin":
+            place = result["destination"]
+            self._flight_location = (place["lat"], place["lon"])
+            self._flight_location_source = "manual"
+            self._flight_last_fetch = 0.0
+            self._refresh_flight_radar()
             return
 
         route = result["route"]
