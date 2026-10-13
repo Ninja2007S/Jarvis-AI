@@ -6306,7 +6306,8 @@ class MainWindow(QMainWindow):
                 s = self.wake_get_state()
                 return {"ready": bool(s.get("ready")),
                         "enabled": bool(s.get("enabled")),
-                        "awake": bool(s.get("awake"))}
+                        "awake": bool(s.get("awake")),
+                        "clap_ready": bool(s.get("clap_ready"))}
             except Exception:
                 pass
         # Before JarvisLive has wired its callback (drawer built at startup).
@@ -6317,7 +6318,8 @@ class MainWindow(QMainWindow):
             ready, enabled = is_ready(), get_wake_word_enabled()
         except Exception:
             pass
-        return {"ready": ready, "enabled": enabled, "awake": True}
+        return {"ready": ready, "enabled": enabled, "awake": True,
+                "clap_ready": False}
 
     def _refresh_wake_btns(self):
         if not hasattr(self, '_wake_btn'):
@@ -6337,7 +6339,12 @@ class MainWindow(QMainWindow):
         if not st["ready"]:
             self._wake_btn.setText("⬇  WAKE WORD: DOWNLOAD")
             self._wake_btn.setStyleSheet(_off)
-            self._wake_sleep_btn.hide()
+            if st.get("clap_ready"):
+                self._wake_sleep_btn.show()
+                self._wake_sleep_btn.setText("😴  SLEEP NOW" if st["awake"] else "👏  WAKE NOW")
+                self._wake_sleep_btn.setStyleSheet(_off)
+            else:
+                self._wake_sleep_btn.hide()
         elif st["enabled"]:
             self._wake_btn.setText("🎙  WAKE WORD: ON")
             self._wake_btn.setStyleSheet(_on)
@@ -6347,7 +6354,12 @@ class MainWindow(QMainWindow):
         else:
             self._wake_btn.setText("🎙  WAKE WORD: OFF")
             self._wake_btn.setStyleSheet(_off)
-            self._wake_sleep_btn.hide()
+            if st.get("clap_ready"):
+                self._wake_sleep_btn.show()
+                self._wake_sleep_btn.setText("😴  SLEEP NOW" if st["awake"] else "👏  WAKE NOW")
+                self._wake_sleep_btn.setStyleSheet(_off)
+            else:
+                self._wake_sleep_btn.hide()
 
     def _refresh_talk_btns(self):
         """Repaint the push-to-talk row from the saved setting."""
@@ -6953,6 +6965,7 @@ class MainWindow(QMainWindow):
             self._jarvis_logo_overlay.set_state(state)
         if hasattr(self, "_immersive_overlay"):
             self._immersive_overlay.set_state(state)
+        self._refresh_wake_btns()
         if hasattr(self, "_core_status_lbl"):
             display = state.replace("_", " ").upper()
             self._core_status_lbl.setText(f"JARVIS CORE\n{display}")

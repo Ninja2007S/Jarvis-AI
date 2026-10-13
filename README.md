@@ -101,10 +101,13 @@ inside the existing desktop window. Say **“take me to Kandy, Sri Lanka”** or
 searches switch to a detailed street map; the HUD has **STREETS** and
 **SATELLITE** layers, map zoom/tilt controls, and a destination marker.
 
-Ask **“route from Colombo to Galle”** to draw a driving route and show an
-estimated distance and time. JARVIS does not use or infer the PC's location. If
-you ask for a route without a start, it asks you; the **FROM** field is cleared
-after each completed route.
+Ask **“route from Colombo to Galle”** or **“distance from Colombo to Galle”**
+to draw the road route and show the road distance plus estimated driving time
+on the globe. The estimate comes from the mapped road network and does not
+include live traffic. For direct, as-the-crow-flies distance, ask for an air
+route; it shows great-circle distance and does not estimate travel time. JARVIS
+does not use or infer the PC's location. If you ask for a route without a
+start, it asks you; the **FROM** field is cleared after each completed route.
 
 The Earth panel is rendered inside the PyQt application using Qt WebEngine and
 MapLibre GL JS; it does not launch a separate browser. Install its dependency
@@ -164,10 +167,10 @@ On Windows, the shortcut works globally. On macOS and Linux, it falls back to wi
 
 ### Wake, clap wake, and interruption
 
-Install the local **Hey Jarvis** model from **⚙ → WAKE WORD** if it is not
-already ready. When Wake Word is enabled and JARVIS is asleep, say **“Hey
-Jarvis”** to wake it. If the local clap detector is installed and enabled,
-two claps also wake JARVIS. The wake greeting includes the local date and time;
+JARVIS starts in local wake standby. Clap twice to wake it even when the
+optional **Hey Jarvis** model is off. The **WAKE NOW** HUD button also works
+without that model. To use the voice wake phrase, install the local **Hey
+Jarvis** model from **⚙ → WAKE WORD**, then enable Wake Word. The wake greeting includes the local date and time;
 the wake and Morning Brief news briefing reads the retrieved Newsfirst and Ada
 Derana topics.
 

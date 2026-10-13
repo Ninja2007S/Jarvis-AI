@@ -877,6 +877,12 @@ class HudWorkspace(QWidget):
         self._video_view = QWebEngineView() if QWebEngineView else None
         if self._video_view:
             self._configure_webview(self._video_view)
+            # The HUD player starts muted. Permit muted media autoplay so a
+            # video can begin without a second click after the voice request.
+            self._video_view.settings().setAttribute(
+                QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False
+            )
+            self._video_view.loadFinished.connect(self._on_video_load_finished)
             lay.addWidget(self._video_view, 1)
         else:
             lay.addWidget(self._placeholder("Embedded playback requires PyQt6-WebEngine. Install the project requirements to enable the HUD video player."), 1)
@@ -1254,34 +1260,14 @@ class HudWorkspace(QWidget):
 
         yt = _youtube_id(source_url)
         if yt:
-            # Give YouTube a stable HTTPS app origin. Its current embedded
-            # player rejects clients that provide neither a Referer nor an
-            # equivalent client identity (player error 153).
-            app_origin = "https://jarvis.local"
-            base_url = QUrl(app_origin + "/")
-            watch_url = f"https://www.youtube.com/watch?v={yt}&autoplay=1&mute=1"
-            media_html = """<!doctype html><html><head><meta charset='utf-8'>
-            <style>html,body{margin:0;width:100%;height:100%;background:#05090b;overflow:hidden}
-            #yt{width:100%;height:100%;border:0} #ytError{position:fixed;left:12px;right:12px;bottom:10px;
-            color:#f0c58b;background:#111b20;padding:8px;font:13px 'Courier New';z-index:5}</style></head>
-            <body><iframe id='yt' src='https://www.youtube-nocookie.com/embed/__VIDEO_ID__?autoplay=1&mute=1&controls=1&playsinline=1&enablejsapi=1&origin=https%3A%2F%2Fjarvis.local'
-            allow='autoplay; encrypted-media; picture-in-picture' allowfullscreen></iframe>
-            <div id='ytError' hidden></div><script>
-            const fallbackUrl=__WATCH_URL__;
-            function fallbackToWatch(reason){const box=document.getElementById('ytError');box.hidden=false;box.textContent=reason+' — opening the YouTube watch page inside the HUD…';setTimeout(()=>location.replace(fallbackUrl),900);}
-            let apiReady=false;
-            window.jarvisYtPlayer=null;
-            function onYouTubeIframeAPIReady(){apiReady=true;window.jarvisYtPlayer=new YT.Player('yt',{events:{onError:(event)=>{
-              const messages={2:'Invalid video request',5:'HTML5 playback error',100:'Video unavailable or private',101:'This video blocks embedded playback',150:'This video blocks embedded playback',153:'YouTube did not receive an HTTP Referer/client identity'};
-              const message='YouTube player error '+event.data+': '+(messages[event.data]||'Playback failed');
-              if([101,150,153].includes(event.data))fallbackToWatch(message);else{const box=document.getElementById('ytError');box.hidden=false;box.textContent=message;}
-            }}});}
-            setTimeout(()=>{if(!apiReady)fallbackToWatch('YouTube player did not initialize');},12000);
-            </script><script async src='https://www.youtube.com/iframe_api'></script></body></html>"""
-            media_html = media_html.replace("__VIDEO_ID__", yt).replace(
-                "__WATCH_URL__", json.dumps(watch_url)
+            # Load YouTube's first-party watch page inside the native HUD view.
+            # The custom iframe used a synthetic origin and could be rejected
+            # with player error 153 (missing/invalid client identity).
+            watch_url = QUrl(
+                f"https://www.youtube.com/watch?v={yt}&autoplay=1&mute=1"
             )
             self._video_view.page().setAudioMuted(True)
+            media_html = None
         else:
             if not local and suffix not in _VIDEO_SUFFIXES:
                 self._open_web_url(source)
@@ -1294,8 +1280,22 @@ class HudWorkspace(QWidget):
         self._video_muted = True
         self._video_active = True
         self._video_sound.setText("ENABLE SOUND  ◌")
-        self._video_view.setHtml(media_html, base_url)
+        if yt:
+            self._video_view.setUrl(watch_url)
+        else:
+            self._video_view.setHtml(media_html, base_url)
         self._select("video", title or "VIDEO / MUTED")
+
+    def _on_video_load_finished(self, ok: bool) -> None:
+        if not self._video_active:
+            return
+        if not ok:
+            self._video_label.setText("VIDEO COULD NOT LOAD · CHECK NETWORK / WEBENGINE")
+            return
+        # Reapply the HUD mute after navigation because WebEngine may reset
+        # page audio state when the first-party YouTube page commits.
+        if self._video_muted and self._video_view:
+            self._video_view.page().setAudioMuted(True)
 
     def _toggle_video_sound(self):
         if not self._video_view:

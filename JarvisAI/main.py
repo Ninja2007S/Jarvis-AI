@@ -108,7 +108,7 @@ from core.wake_word            import (
 from core.clap_wake             import DoubleClapDetector
 
 # How long the assistant stays awake with no user speech before it auto-sleeps
-# again (wake-word mode only).
+# again after the configured idle interval.
 WAKE_SLEEP_TIMEOUT = 120.0   # seconds (2 minutes)
 
 def get_base_dir():
@@ -849,10 +849,10 @@ class JarvisLive:
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
 
         # ── Wake word ────────────────────────────────────────────────────────
-        # _awake gates the mic (see _listen_audio) and the background speakers.
-        # It is True whenever wake word is OFF, so default behaviour is unchanged.
+        # Start in local-wake standby: two claps work independently of the
+        # optional Hey Jarvis model, and neither detector streams standby audio.
         self._wake_enabled     = get_wake_word_enabled()
-        self._awake            = not self._wake_enabled
+        self._awake            = False
         self._wake_detector: WakeWordDetector | None = None
         self._clap_detector: DoubleClapDetector | None = None
         self._wake_sleep_timeout = WAKE_SLEEP_TIMEOUT
@@ -878,18 +878,27 @@ class JarvisLive:
         # A loaded, running detector is definitively ready; otherwise fall back
         # to the cheap on-disk model-file check (no Model construction).
         ready = bool(self._wake_detector and self._wake_detector.ready) or wake_is_ready()
-        return {"enabled": self._wake_enabled, "awake": self._awake, "ready": ready}
+        return {
+            "enabled": self._wake_enabled,
+            "awake": self._awake,
+            "ready": ready,
+            "clap_ready": bool(self._clap_detector and self._clap_detector.ready),
+        }
+
+    def _ensure_clap_detector(self) -> bool:
+        """Start the local clap listener independently from Hey Jarvis support."""
+        if self._clap_detector is None:
+            self._clap_detector = DoubleClapDetector(
+                on_detect=self._on_double_clap_detected,
+                logger=lambda m: print(f"[Wake] {m}"),
+            )
+        if not self._clap_detector.ready:
+            return self._clap_detector.start()
+        return True
 
     def _ensure_wake_detector(self) -> bool:
         """Load the detector once (model loads on first start). Idempotent."""
-        if self._wake_enabled:
-            if self._clap_detector is None:
-                self._clap_detector = DoubleClapDetector(
-                    on_detect=self._on_double_clap_detected,
-                    logger=lambda m: print(f"[Wake] {m}"),
-                )
-            if not self._clap_detector.ready:
-                self._clap_detector.start()
+        self._ensure_clap_detector()
         if self._wake_detector is None:
             self._wake_detector = WakeWordDetector(
                 on_detect=self._on_wake_detected,
@@ -925,7 +934,7 @@ class JarvisLive:
         # While awake, the phrase is ordinary user audio and is already being
         # streamed to Live. The detector still needs its quiet frames so it can
         # re-arm after a previous barge-in, but must not start a second briefing.
-        if self._wake_enabled and not self._awake:
+        if not self._awake:
             self.wake(reason="wake word", announce=True)
 
     def _on_double_clap_detected(self) -> None:
@@ -962,16 +971,18 @@ class JarvisLive:
         self._awake = False
         self.set_speaking(False)
         self.ui.set_state("SLEEPING")
+        wake_methods = "clap twice or tap WAKE NOW"
+        if self._wake_enabled:
+            wake_methods = "say 'Hey Jarvis', " + wake_methods
         self.ui.write_log(
-            f"SYS: Sleeping — {reason}. Say 'Hey Jarvis', clap twice, "
-            "or tap WAKE NOW to wake me."
+            f"SYS: Sleeping — {reason}. {wake_methods} to wake me."
         )
 
     async def _run_sleep_watch(self) -> None:
-        """Auto-sleep after the configured silence window (wake-word mode only)."""
+        """Auto-sleep after inactivity; clap wake remains available in standby."""
         while True:
             await asyncio.sleep(5)
-            if not self._wake_enabled or not self._awake:
+            if not self._awake:
                 continue
             with self._speaking_lock:
                 speaking = self._is_speaking
@@ -1002,16 +1013,12 @@ class JarvisLive:
         else:
             self._wake_enabled = False
             save_wake_word_enabled(False)
-            if self._clap_detector is not None:
-                self._clap_detector.stop()
-                self._clap_detector = None
-            self.wake(reason="wake word disabled")
+            # Keep the independent two-clap listener active. If JARVIS was
+            # asleep, it remains asleep and can still be woken by clapping.
             return "disabled"
 
     def _ui_wake_manual(self) -> None:
         """Manual sleep/wake button in the UI."""
-        if not self._wake_enabled:
-            return
         if self._awake:
             self.sleep(reason="you tapped sleep")
         else:
@@ -1344,8 +1351,11 @@ class JarvisLive:
         # Respect wake-word sleep: a typed command must not be answered while
         # asleep either (the sleep gate is not just for the mic). Wake first with
         # "Hey Jarvis" or the WAKE NOW button.
-        if self._wake_enabled and not self._awake:
-            self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
+        if not self._awake:
+            wake_hint = "clap twice or tap WAKE NOW"
+            if self._wake_enabled:
+                wake_hint = "say 'Hey Jarvis', " + wake_hint
+            self.ui.write_log(f"SYS: I'm asleep — {wake_hint} first.")
             return
         security.mark_user_turn_started(voice_verified=True)
         with self._voice_id_audio_lock:
@@ -1489,7 +1499,7 @@ class JarvisLive:
         if held:
             # Holding the key is also a way to wake it, so push-to-talk works
             # without having to say the wake word first.
-            if self._wake_enabled and not self._awake:
+            if not self._awake:
                 self._awake = True
                 self._last_user_speech = time.monotonic()
         try:
@@ -2134,14 +2144,15 @@ class JarvisLive:
             # detector, which runs its model in ITS OWN thread — the cost here is
             # only a queue push, so the audio path is never slowed. When wake word
             # is off (default) or we're awake, this is a single boolean check.
-            if self._wake_enabled and not self._awake:
+            if not self._awake:
                 self._expire_voice_id_audio()
                 clap = self._clap_detector
                 if clap is not None:
                     clap.feed(indata)
-                det = self._wake_detector
-                if det is not None:
-                    det.feed(indata)
+                if self._wake_enabled:
+                    det = self._wake_detector
+                    if det is not None:
+                        det.feed(indata)
                 return
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
@@ -3295,7 +3306,7 @@ class JarvisLive:
                 if self.session:
                     # A remote command is deliberate control and the phone user
                     # has no desktop WAKE button — so it wakes JARVIS if asleep.
-                    if self._wake_enabled and not self._awake:
+                    if not self._awake:
                         self.wake(reason="remote command")
                     security.mark_user_turn_started()
                     await self.session.send_client_content(
@@ -3506,6 +3517,7 @@ class JarvisLive:
                     # rebuild. Only __init__ chooses the initial state; forcing
                     # sleep here loses a live request when Gemini reconnects
                     # during a wake-word interruption or briefing.
+                    self._ensure_clap_detector()
                     if self._wake_enabled:
                         _wake_interrupt_ready = self._ensure_wake_detector()
                         if self._awake:
@@ -3530,9 +3542,17 @@ class JarvisLive:
                                 "SYS: Wake detector failed to start; voice interruption unavailable."
                             )
                     else:
-                        self._awake = True
-                        self.ui.set_state("LISTENING")
-                        self.ui.write_log("SYS: JARVIS online.")
+                        self.ui.set_state("LISTENING" if self._awake else "SLEEPING")
+                        if self._awake:
+                            self.ui.write_log(
+                                "SYS: JARVIS reconnected — awake and listening."
+                            )
+                        else:
+                            self.ui.write_log(
+                                "SYS: JARVIS online — sleeping. Clap twice or tap WAKE NOW to wake me."
+                            )
+                        if self._clap_detector and self._clap_detector.ready:
+                            self.ui.write_log("SYS: Two-clap wake is listening locally.")
                         # Load the local wake model for phrase-only barge-in
                         # when the model was previously installed. Do not
                         # download anything automatically or stream mic audio.
@@ -3583,8 +3603,8 @@ class JarvisLive:
                         )
 
                     # Morning briefing — fires once per process launch (if enabled).
-                    # Skipped in wake-word mode: it comes up asleep, and a briefing
-                    # would mean talking while "asleep".
+                    # Startup briefing waits until awake; two claps trigger the
+                    # normal wake briefing when standby begins asleep.
                     if not self._briefing_sent and get_brief_enabled() and self._awake:
                         self._briefing_sent = True
                         tg.create_task(self._send_startup_briefing())

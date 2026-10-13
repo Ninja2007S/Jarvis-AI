@@ -213,12 +213,15 @@ class EarthGlobePanel(QWidget):
         self._ensure_map_loaded()
         self._origin.setText(origin.strip())
         self._destination.setText(destination.strip())
-        if mode == "route":
+        if mode in {"route", "distance"}:
             if not origin.strip():
-                self._status.setText("ROUTE START NEEDED  ·  Enter a start location, then press ROUTE")
+                prompt = ("START LOCATION NEEDED  ·  Enter where to measure from"
+                          if mode == "distance" else
+                          "ROUTE START NEEDED  ·  Enter a start location, then press ROUTE")
+                self._status.setText(prompt)
                 self._origin.setFocus()
             elif destination.strip():
-                self.route_query()
+                self._start_lookup(mode, origin.strip(), destination.strip())
         elif mode == "flight_route":
             if origin.strip() and destination.strip():
                 self._start_lookup("flight_route", origin.strip(), destination.strip())
@@ -269,9 +272,8 @@ class EarthGlobePanel(QWidget):
         if self._lookup_thread and self._lookup_thread.is_alive():
             self._status.setText("A map lookup is already running.")
             return
-        self._status.setText(
-            f"LOOKING UP {origin[:45] + ' → ' if origin else ''}{destination[:75]}"
-        )
+        task = "MEASURING ROAD DISTANCE" if mode == "distance" else "LOOKING UP"
+        self._status.setText(f"{task}  {origin[:45] + ' → ' if origin else ''}{destination[:75]}")
         self._lookup_thread = threading.Thread(
             target=self._lookup_worker, args=(mode, origin, destination),
             daemon=True, name="EarthMapLookup",
@@ -421,16 +423,28 @@ class EarthGlobePanel(QWidget):
         self._js("showRoute", route)
         self._rotation_button.setText("RESUME ROTATION")
         distance_km = route["distance_m"] / 1000.0
+        duration_s = max(0, int(round(route.get("duration_s", 0))))
+        days, remainder = divmod(duration_s, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes = int(round(remainder / 60.0))
+        if minutes == 60:
+            hours += 1
+            minutes = 0
+        if hours == 24:
+            days += 1
+            hours = 0
+        eta = (f"{days} d {hours} hr {minutes} min" if days else
+               f"{hours} hr {minutes} min" if hours else
+               f"{max(1, minutes)} min")
         if route.get("route_type") == "air":
             self._status.setText(
                 f"GREAT-CIRCLE AIR PATH  ·  {route['start']['name'][:48]} → "
                 f"{route['end']['name'][:48]}  ·  {distance_km:.1f} km  ·  illustrative"
             )
         else:
-            minutes = max(1, round(route["duration_s"] / 60.0))
             self._status.setText(
-                f"DRIVING ROUTE  ·  {route['start']['name'][:48]} → "
-                f"{route['end']['name'][:48]}  ·  {distance_km:.1f} km  ·  ~{minutes} min"
+                f"ROAD ROUTE  ·  {route['start']['name'][:38]} → "
+                f"{route['end']['name'][:38]}  ·  {distance_km:,.1f} km  ·  est. drive {eta}"
             )
         self._origin.clear()  # Each new route requires a fresh starting point.
 
