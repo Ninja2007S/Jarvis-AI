@@ -64,11 +64,15 @@ with restricted files and networking for stronger containment.
 
 ## Voice ID and confirmation
 
-Voice ID uses Windows DPAPI and is disabled on macOS/Linux. Even with Voice ID
-enabled, speech verification is only used where available. Dev Agent and memory
+Voice ID uses Windows DPAPI on Windows, macOS Keychain on macOS, and Linux
+Secret Service (such as GNOME Keyring or KDE Wallet) on Linux. On macOS/Linux,
+the random AES-GCM profile key is kept in that OS credential store; the app
+rejects plaintext or fallback keyring backends. Enrollment and spoken approval
+fail closed when the required model packages or native credential store are
+unavailable. Existing Windows DPAPI profiles cannot be decrypted on another
+device or OS, so enroll again on each new device. Dev Agent and memory
 export/import require a manual HUD confirmation click. Other actions that allow
-spoken confirmation are not speaker-verified on platforms where Voice ID is
-unavailable.
+spoken confirmation are speaker-checked when Voice ID is enabled and available.
 
 ## Before sharing or rebuilding the package
 

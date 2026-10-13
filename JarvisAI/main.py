@@ -1167,7 +1167,9 @@ class JarvisLive:
 
             if action == "enroll":
                 if not voice_id.backend_ready():
-                    return "Voice ID is unavailable. Install requirements-voice-id.txt with Python 3.12, then restart JARVIS."
+                    return ("Voice ID is unavailable. Install requirements-voice-id.txt, "
+                            "and ensure your OS credential store is unlocked and available, "
+                            "then restart JARVIS.")
                 # The challenge is transcribed by the existing Live session.
                 # A deliberate enrollment click may therefore wake a sleeping
                 # session so the already-open mic can validate the sentence.
@@ -1189,7 +1191,8 @@ class JarvisLive:
                 self.ui.show_content(
                     "VOICE ID ENROLLMENT",
                     f"Speak this sentence once, clearly, after starting enrollment:\n\n{challenge}\n\n"
-                    "Keep JARVIS quiet while you speak. Audio is processed locally; only an encrypted voice profile is saved.",
+                    "Keep JARVIS quiet while you speak. Audio is processed locally; only an encrypted voice profile is saved. "
+                    "The encryption key stays in this device's OS credential store.",
                 )
                 threading.Timer(
                     40.0, self._expire_voice_id_enrollment, args=(challenge,),

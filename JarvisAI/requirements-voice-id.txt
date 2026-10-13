@@ -1,7 +1,11 @@
-# Optional Windows speaker-verification feature.
+# Optional cross-platform local speaker-verification feature.
 # Install separately; these ML packages are intentionally excluded from the
 # normal JARVIS requirements. Python 3.12 is recommended for SpeechBrain.
+# macOS uses Keychain; Linux requires an unlocked Secret Service (for example
+# GNOME Keyring or KDE Wallet). Voice ID fails closed if the native vault is
+# unavailable; it never falls back to a plaintext key file.
 torch>=2.0,<3
 torchaudio>=2.0,<3
 speechbrain>=1.0.2,<2
-pywin32>=306
+keyring>=25,<27
+pywin32>=306; sys_platform == "win32"

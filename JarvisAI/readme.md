@@ -429,21 +429,28 @@ confirmation of sensitive actions. The manual **WAKE NOW** control and clicking
 
 The speaker model runs locally and downloads its model files on the first
 enrollment into the standard Hugging Face cache outside the project. JARVIS
-uses that cache directly, so Windows Developer Mode or administrator
-privileges are not needed. The enrollment audio is not saved; only a Windows
-DPAPI-encrypted speaker profile is stored in config/voice_id.dat. The model
-cache is under your user profile's Hugging Face cache and is outside the Git
+uses that cache directly. Enrollment audio is not saved; only an encrypted
+speaker profile is stored in `config/voice_id.dat`. Windows protects it with
+DPAPI. macOS and Linux encrypt it with AES-GCM and keep the random encryption
+key in the native OS credential vault (macOS Keychain or Linux Secret Service,
+such as GNOME Keyring or KDE Wallet). The app refuses plaintext keyring
+backends. On Linux, the desktop Secret Service must be installed, running, and
+unlocked. If the native vault is unavailable, Voice ID enrollment and spoken
+verification fail closed; manual HUD controls remain available. The model
+cache is under your user profile's Hugging Face cache and outside the Git
 repository.
 
-SpeechBrain currently documents support through Python 3.12 and does not list
-Windows among its officially supported operating systems. Voice ID is
-therefore optional and is only validated in a separate Python 3.12 environment;
-the rest of JARVIS supports Python 3.11–3.13.
+Install `requirements-voice-id.txt` separately on Windows, macOS, or Linux.
+Python 3.12 is recommended for the optional SpeechBrain stack. A profile
+encrypted by Windows DPAPI cannot be moved to another device or OS; enroll
+again on every device where you want Voice ID.
 
-Voice ID is a convenience check, not proof against replayed recordings or
-voice-cloning attacks. Keep the manual confirmation path for sensitive actions.
-If Jarvis runs with wake-word mode enabled, the local wake phrase must also pass
-the speaker check before voice unlock.
+Voice ID remains an optional feature because it needs large ML dependencies and
+local audio hardware. The speaker match is a convenience check, not proof
+against replayed recordings or voice-cloning attacks. Keep the manual
+confirmation path for sensitive actions. If Jarvis runs with wake-word mode
+enabled, the local wake phrase must also pass the speaker check before voice
+unlock.
 
 The intended execution flow is:
 
@@ -2242,12 +2249,13 @@ the current OS. To install only Python packages manually, use
 On first launch, enter your Gemini API key and choose the one-shot AI provider; Gemini is required for live voice. Provider keys are stored locally in
 `config/api_keys.json`.
 
-Voice ID enrollment currently uses Windows DPAPI and is disabled on macOS/Linux.
-It does not prevent using the assistant's other security controls. GPU
-utilization is shown only when a supported NVIDIA driver/NVML library is
-available. Computer control, screenshots, camera access, audio devices, and
-system settings depend on the host OS, desktop session, permissions, and
-installed native tools.
+Voice ID supports Windows, macOS, and Linux when its optional model packages
+and the OS credential vault are available. Windows uses DPAPI; macOS uses
+Keychain; Linux uses Secret Service. It does not prevent using the assistant's
+other security controls. GPU utilization is shown only when a supported NVIDIA
+driver/NVML library is available. Computer control, screenshots, camera
+access, audio devices, and system settings depend on the host OS, desktop
+session, permissions, and installed native tools.
 
 ## Configure optional integrations
 

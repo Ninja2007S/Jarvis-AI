@@ -8,7 +8,9 @@ available for irreversible actions.
 from __future__ import annotations
 
 import json
+import base64
 import os
+import secrets
 import sys
 import threading
 from pathlib import Path
@@ -22,6 +24,9 @@ BASE_DIR = (
 )
 CONFIG_FILE = BASE_DIR / "config" / "api_keys.json"
 PROFILE_FILE = BASE_DIR / "config" / "voice_id.dat"
+KEYRING_SERVICE = "JarvisAI Voice ID"
+KEYRING_ACCOUNT = "owner-profile-key-v2"
+_PROFILE_MAGIC = b"JVID2"
 SAMPLE_RATE = 16_000
 MIN_AUDIO_SECONDS = 1.5
 SIMILARITY_THRESHOLD = 0.35
@@ -33,12 +38,23 @@ _inference_lock = threading.Lock()
 
 def backend_ready() -> bool:
     """Whether the optional speaker-verification packages are importable."""
-    if sys.platform != "win32":
-        return False
     try:
         import torch  # noqa: F401
         from speechbrain.inference.speaker import SpeakerRecognition  # noqa: F401
-        import win32crypt  # noqa: F401
+        if sys.platform == "win32":
+            import win32crypt  # noqa: F401
+        elif sys.platform == "darwin":
+            from keyring.backends.macOS import Keyring as _NativeKeyring  # noqa: F401
+            import keyring  # noqa: F401
+            if not isinstance(keyring.get_keyring(), _NativeKeyring):
+                return False
+        elif sys.platform.startswith("linux"):
+            from keyring.backends.SecretService import Keyring as _NativeKeyring  # noqa: F401
+            import keyring  # noqa: F401
+            if not isinstance(keyring.get_keyring(), _NativeKeyring):
+                return False
+        else:
+            return False
         return True
     except Exception:
         return False
@@ -111,6 +127,14 @@ def remove_profile() -> None:
         PROFILE_FILE.unlink()
     except FileNotFoundError:
         pass
+    if sys.platform != "win32":
+        try:
+            import keyring
+            keyring.delete_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        except Exception:
+            # The profile file is removed regardless; a stale random key in
+            # the OS vault cannot decrypt a future enrollment.
+            pass
 
 
 def _get_model():
@@ -159,26 +183,44 @@ def _embedding(audio) -> np.ndarray:
 
 
 def _protect(payload: bytes) -> bytes:
-    if sys.platform != "win32":
-        raise RuntimeError("Voice ID profiles are supported on Windows only.")
-    import win32crypt
+    if sys.platform == "win32":
+        import win32crypt
 
-    protected = win32crypt.CryptProtectData(
-        payload, "JARVIS Voice ID profile", None, None, None, 0
-    )
-    # Normalize both binding return shapes: encrypted bytes directly, or a
-    # (description, encrypted_bytes) tuple. Indexing direct bytes would select
-    # one integer byte and make Path.write_bytes() fail.
-    if isinstance(protected, tuple):
-        protected = protected[-1]
-    if not isinstance(protected, (bytes, bytearray, memoryview)):
-        raise TypeError("Windows DPAPI returned an invalid encrypted profile.")
-    return bytes(protected)
+        protected = win32crypt.CryptProtectData(
+            payload, "JARVIS Voice ID profile", None, None, None, 0
+        )
+        # Normalize both binding return shapes: bytes directly or tuple.
+        if isinstance(protected, tuple):
+            protected = protected[-1]
+        if not isinstance(protected, (bytes, bytearray, memoryview)):
+            raise TypeError("Windows DPAPI returned an invalid encrypted profile.")
+        return bytes(protected)
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    nonce = secrets.token_bytes(12)
+    encrypted = AESGCM(_profile_key()).encrypt(nonce, payload, _PROFILE_MAGIC)
+    return _PROFILE_MAGIC + nonce + encrypted
 
 
 def _unprotect(payload: bytes) -> bytes:
+    if payload.startswith(_PROFILE_MAGIC):
+        if sys.platform == "win32":
+            raise ValueError("This Voice ID profile uses a different platform key store.")
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        nonce_start = len(_PROFILE_MAGIC)
+        nonce = payload[nonce_start:nonce_start + 12]
+        ciphertext = payload[nonce_start + 12:]
+        if len(nonce) != 12 or len(ciphertext) < 16:
+            raise ValueError("The encrypted Voice ID profile is truncated.")
+        return AESGCM(_profile_key(create=False)).decrypt(
+            nonce, ciphertext, _PROFILE_MAGIC
+        )
     if sys.platform != "win32":
-        raise RuntimeError("Voice ID profiles are supported on Windows only.")
+        raise RuntimeError(
+            "This profile was encrypted by Windows DPAPI. Re-enroll Voice ID on this device."
+        )
     import win32crypt
 
     unprotected = win32crypt.CryptUnprotectData(payload, None, None, None, 0)
@@ -187,6 +229,43 @@ def _unprotect(payload: bytes) -> bytes:
     if not isinstance(unprotected, (bytes, bytearray, memoryview)):
         raise TypeError("Windows DPAPI returned an invalid voice profile.")
     return bytes(unprotected)
+
+
+def _profile_key(*, create: bool = True) -> bytes:
+    """Read/create the profile key in macOS Keychain or Linux Secret Service."""
+    import keyring
+
+    # Do not permit keyring's plaintext/file, environment, or fail backends.
+    if sys.platform == "darwin":
+        from keyring.backends.macOS import Keyring as NativeKeyring
+    elif sys.platform.startswith("linux"):
+        from keyring.backends.SecretService import Keyring as NativeKeyring
+    else:
+        raise RuntimeError("No supported Voice ID credential store is available.")
+    if not isinstance(keyring.get_keyring(), NativeKeyring):
+        raise RuntimeError(
+            "Voice ID needs the native OS credential store (macOS Keychain or Linux Secret Service)."
+        )
+
+    encoded = keyring.get_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
+    if encoded:
+        key = base64.urlsafe_b64decode(encoded.encode("ascii"))
+        if len(key) != 32:
+            raise RuntimeError("The Voice ID key in the OS credential store is invalid.")
+        return key
+    if not create:
+        raise RuntimeError("The Voice ID encryption key is missing from the OS credential store.")
+    key = secrets.token_bytes(32)
+    keyring.set_password(
+        KEYRING_SERVICE,
+        KEYRING_ACCOUNT,
+        base64.urlsafe_b64encode(key).decode("ascii"),
+    )
+    # Verify the credential store accepted and persisted the key before using it.
+    saved = keyring.get_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
+    if saved != base64.urlsafe_b64encode(key).decode("ascii"):
+        raise RuntimeError("The OS credential store did not retain the Voice ID key.")
+    return key
 
 
 def _load_profile() -> np.ndarray:
@@ -212,6 +291,12 @@ def enroll(audio) -> None:
     protected = _protect(record)
     temp_path = PROFILE_FILE.with_suffix(".tmp")
     temp_path.write_bytes(protected)
+    if os.name != "nt":
+        try:
+            temp_path.chmod(0o600)
+        except OSError:
+            temp_path.unlink(missing_ok=True)
+            raise RuntimeError("Could not restrict Voice ID profile file permissions.")
     os.replace(temp_path, PROFILE_FILE)
     _set_enabled(True)
 
