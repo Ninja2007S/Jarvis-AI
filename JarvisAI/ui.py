@@ -4928,10 +4928,13 @@ class MainWindow(QMainWindow):
         target = Path(argv[0])
         desktop = self._get_desktop_dir()
 
-        # Arc-reactor icon (.ico — also exported as .png for Linux/macOS)
-        ico_path = Path(work_dir) / "config" / "jarvis.ico"
-        if not ico_path.exists():
-            self._build_jarvis_icon(ico_path)
+        # User-provided JARVIS mark (.ico — the matching .png is used by Linux).
+        # Keep a generated fallback for older/frozen copies without the asset.
+        ico_path = BASE_DIR / "assets" / "branding" / "jarvis_desktop.ico"
+        if not ico_path.is_file():
+            ico_path = Path(work_dir) / "config" / "jarvis.ico"
+            if not ico_path.exists():
+                self._build_jarvis_icon(ico_path)
 
         try:
             _os = platform.system()

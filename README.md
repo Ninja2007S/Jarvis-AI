@@ -218,6 +218,13 @@ and context are translated into that language where needed. Clap detection and
 wake-word recognition run locally; the two-clap sound itself is not forwarded
 to Gemini by the detector.
 
+During a spoken news briefing, a compact animated HUD card cycles through the
+headlines with the publisher image when one is available and a short summary.
+It fades away when the news audio finishes (or when you interrupt the
+briefing). Choose **OPEN ARTICLE** on a card to read its Newsfirst or Ada Derana
+story in your default browser; the card only opens verified HTTPS links from
+those publishers.
+
 ## 🔀 Selectable AI API Providers
 
 Choose Gemini, OpenAI GPT, or Anthropic Claude in the first-launch initialization screen, or later from **⚙ → AI PROVIDER / KEYS**. Gemini is still required for live voice, tool routing, and Google-grounded search. Enter the selected provider's optional key during setup or in the provider panel; JARVIS saves it in the locally ignored `config/api_keys.json`. The fields are masked and existing keys stay in place when left blank. You can edit the fast and reasoning model IDs in the provider panel.
