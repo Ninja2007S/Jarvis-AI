@@ -1956,6 +1956,94 @@ class _CameraPreview(QWidget):
         self._timer.start(6_000)   # auto-dismiss after 6 s
 
 
+class ProviderTile(QPushButton):
+    """Offline-drawn provider mark and label for the first-run selector."""
+
+    def __init__(self, provider: str, title: str, subtitle: str,
+                 accent: str, parent=None):
+        super().__init__(parent)
+        self.provider = provider
+        self.title = title
+        self.subtitle = subtitle
+        self.accent = QColor(accent)
+        self.setCheckable(True)
+        self.setFixedHeight(54)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setToolTip(f"Select {title} as the one-shot AI provider")
+        self.setStyleSheet("ProviderTile { border: none; }")
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bounds = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        selected = self.isChecked()
+        fill = QColor(self.accent)
+        fill.setAlpha(28 if selected else 10)
+        painter.setBrush(fill)
+        border = QColor(self.accent)
+        border.setAlpha(230 if selected else 70)
+        painter.setPen(QPen(border, 1.4 if selected else 1.0))
+        painter.drawRoundedRect(bounds, 4, 4)
+
+        cx, cy = 25.0, self.height() / 2.0
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(self.accent, 2.0, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        if self.provider == "gemini":
+            # Gemini's four-point sparkle in a restrained cyan-to-violet glow.
+            star = QPainterPath()
+            star.moveTo(cx, cy - 15); star.lineTo(cx + 3.5, cy - 3.5)
+            star.lineTo(cx + 15, cy); star.lineTo(cx + 3.5, cy + 3.5)
+            star.lineTo(cx, cy + 15); star.lineTo(cx - 3.5, cy + 3.5)
+            star.lineTo(cx - 15, cy); star.lineTo(cx - 3.5, cy - 3.5)
+            star.closeSubpath()
+            gradient = QLinearGradient(cx - 13, cy - 12, cx + 13, cy + 12)
+            gradient.setColorAt(0.0, QColor("#58D7FF"))
+            gradient.setColorAt(0.55, QColor("#9B7BFF"))
+            gradient.setColorAt(1.0, QColor("#F27DFF"))
+            painter.fillPath(star, gradient)
+        elif self.provider == "openai":
+            # Six interlocking loops suggest the OpenAI rosette at small sizes.
+            painter.setPen(QPen(self.accent, 1.8))
+            for angle in range(0, 360, 60):
+                painter.save()
+                painter.translate(cx, cy)
+                painter.rotate(angle)
+                painter.drawEllipse(QRectF(-4.4, -11.3, 8.8, 13.0))
+                painter.restore()
+            painter.drawEllipse(QRectF(cx - 2.1, cy - 2.1, 4.2, 4.2))
+        else:
+            # Claude's warm sunburst mark, drawn as precise tapered rays.
+            painter.setPen(QPen(self.accent, 2.2, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap))
+            for angle in range(-90, 270, 30):
+                painter.save()
+                painter.translate(cx, cy)
+                painter.rotate(angle)
+                painter.drawLine(QPointF(0, -6), QPointF(0, -15))
+                painter.restore()
+            painter.setBrush(self.accent)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(QRectF(cx - 3.0, cy - 3.0, 6.0, 6.0))
+
+        primary = QColor(C.TEXT if selected else C.TEXT_MED)
+        painter.setPen(primary)
+        painter.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        painter.drawText(QRectF(49, cy - 13, self.width() - 55, 18),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         self.title)
+        painter.setPen(QColor(C.TEXT_DIM))
+        painter.setFont(QFont("Courier New", 6, QFont.Weight.Normal))
+        painter.drawText(QRectF(49, cy + 3, self.width() - 55, 14),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         self.subtitle)
+        if self.hasFocus():
+            painter.setPen(QPen(QColor(C.PRI), 1, Qt.PenStyle.DashLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(bounds.adjusted(3, 3, -3, -3), 3, 3)
+
+
 class SetupOverlay(QWidget):
     done = pyqtSignal(object)
 
@@ -2006,15 +2094,23 @@ class SetupOverlay(QWidget):
         self._provider.addItem("Anthropic  ·  Claude API", "anthropic")
         provider_idx = self._provider.findData(provider_settings.get("provider", "gemini"))
         self._provider.setCurrentIndex(max(0, provider_idx))
-        self._provider.setFixedHeight(32)
-        self._provider.setStyleSheet(f"""
-            QComboBox {{ background: #000d12; color: {C.TEXT};
-                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}
-            QComboBox:focus {{ border: 1px solid {C.PRI}; }}
-            QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT};
-                selection-background-color: {C.PRI_DIM}; }}
-        """)
+        self._provider.hide()  # internal value model; visible choice uses logo tiles below
         layout.addWidget(self._provider)
+        self._provider_tiles: dict[str, ProviderTile] = {}
+        provider_row = QHBoxLayout()
+        provider_row.setSpacing(7)
+        for provider, title, subtitle, accent in (
+            ("gemini", "GEMINI", "GOOGLE AI", "#63CFFF"),
+            ("openai", "GPT", "OPENAI API", "#D4E9E2"),
+            ("anthropic", "CLAUDE", "ANTHROPIC API", "#E98562"),
+        ):
+            tile = ProviderTile(provider, title, subtitle, accent, self)
+            tile.clicked.connect(
+                lambda _checked=False, key=provider: self._select_provider(key)
+            )
+            provider_row.addWidget(tile, 1)
+            self._provider_tiles[provider] = tile
+        layout.addLayout(provider_row)
         self._provider_note = _lbl(
             "Gemini remains required for live voice, tool routing, and Google-grounded search.",
             8, color=C.TEXT_MED, align=Qt.AlignmentFlag.AlignLeft,
@@ -2100,6 +2196,11 @@ class SetupOverlay(QWidget):
         init_btn.clicked.connect(self._submit)
         layout.addWidget(init_btn)
 
+    def _select_provider(self, provider: str) -> None:
+        index = self._provider.findData(provider)
+        if index >= 0:
+            self._provider.setCurrentIndex(index)
+
     def _sel(self, key: str):
         self._sel_os = key
         pal = {"windows":(C.PRI,"#001a22"),"mac":(C.ACC2,"#1a1400"),"linux":(C.GREEN,"#001a0d")}
@@ -2123,6 +2224,8 @@ class SetupOverlay(QWidget):
 
     def _update_provider_fields(self, *_):
         provider = str(self._provider.currentData() or "gemini")
+        for key, tile in self._provider_tiles.items():
+            tile.setChecked(key == provider)
         if provider == "openai":
             self._external_key_label.setText("OPENAI API KEY  ·  OPTIONAL IF ALREADY CONFIGURED")
             has_key = bool(self._provider_settings.get("has_openai_key"))
@@ -3952,6 +4055,7 @@ class NewsBriefingOverlay(QFrame):
         )
         self._items: list[dict] = []
         self._images: dict[int, QPixmap] = {}
+        self._image_failures: set[int] = set()
         self._index = 0
         self._animation: QParallelAnimationGroup | None = None
         self._opacity = QGraphicsOpacityEffect(self)
@@ -3978,7 +4082,7 @@ class NewsBriefingOverlay(QFrame):
 
         body = QHBoxLayout()
         body.setSpacing(10)
-        self._image = QLabel("IMAGE\nLOADING")
+        self._image = QLabel("IMAGE\nLOADING…")
         self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image.setFixedSize(142, 112)
         self._image.setStyleSheet(f"background:#050b0e;border:1px solid {C.BORDER};color:{C.TEXT_DIM};font:8pt 'Courier New';")
@@ -4025,7 +4129,10 @@ class NewsBriefingOverlay(QFrame):
             return
         self._items = normalized[:12]
         self._images.clear()
+        self._image_failures.clear()
         self._index = 0
+        self._image.setPixmap(QPixmap())
+        self._image.setText("IMAGE\nLOADING…")
         self._render_current()
         self._advance_timer.start() if len(self._items) > 1 else self._advance_timer.stop()
         self._animate_in()
@@ -4037,14 +4144,25 @@ class NewsBriefingOverlay(QFrame):
         if not image.loadFromData(data):
             return
         self._images[index] = image
+        self._image_failures.discard(index)
         if index == self._index:
             self._render_image(image)
+
+    def set_image_failed(self, index: int, article_url: str) -> None:
+        if not 0 <= index < len(self._items) or self._items[index].get("url") != article_url:
+            return
+        self._image_failures.add(index)
+        if index == self._index:
+            self._render_image()
 
     def _render_image(self, image: QPixmap | None = None) -> None:
         image = image or self._images.get(self._index)
         if image is None or image.isNull():
             self._image.setPixmap(QPixmap())
-            self._image.setText("IMAGE\nUNAVAILABLE")
+            self._image.setText(
+                "IMAGE\nUNAVAILABLE" if self._index in self._image_failures
+                else "IMAGE\nLOADING…"
+            )
             return
         self._image.setText("")
         self._image.setPixmap(image.scaled(
@@ -4300,6 +4418,7 @@ class MainWindow(QMainWindow):
         self._workspace.news_briefing_items.connect(self._show_news_briefing_overlay)
         self._workspace.news_briefing_ended.connect(self._hide_news_briefing_overlay)
         self._workspace.news_briefing_image_ready.connect(self._set_news_briefing_image)
+        self._workspace.news_image_failed.connect(self._set_news_briefing_image_failed)
         self._workspace.close_requested.connect(self._close_workspace)
         self._workspace.interrupt_requested.connect(self._do_interrupt)
         self._workspace.feature_requested.connect(self._open_holo_feature)
@@ -4585,6 +4704,9 @@ class MainWindow(QMainWindow):
 
     def _set_news_briefing_image(self, index: int, article_url: str, data: bytes, content_type: str) -> None:
         self._news_briefing_overlay.set_image(index, article_url, data, content_type)
+
+    def _set_news_briefing_image_failed(self, index: int, article_url: str) -> None:
+        self._news_briefing_overlay.set_image_failed(index, article_url)
 
     def _close_workspace(self) -> None:
         self._workspace.stop_holo_camera()
@@ -7266,7 +7388,7 @@ class MainWindow(QMainWindow):
             self._leave_immersive_view()
         ov = SetupOverlay(self.centralWidget())
         cw = self.centralWidget()
-        ow, oh = 520, 535
+        ow, oh = 540, 560
         ov.setGeometry(
             (cw.width()  - ow) // 2,
             (cw.height() - oh) // 2,

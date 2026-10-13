@@ -47,7 +47,7 @@ except Exception:  # pragma: no cover - depends on the local PyQt build
 
 
 _NEWS_PUBLISHER_HOSTS = {
-    "english.newsfirst.lk", "newsfirst.lk", "www.newsfirst.lk",
+    "english.newsfirst.lk", "sinhala.newsfirst.lk", "newsfirst.lk", "www.newsfirst.lk",
     "adaderana.lk", "www.adaderana.lk", "sinhala.adaderana.lk",
 }
 
@@ -56,14 +56,40 @@ class _OpenGraphImageParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.image_url = ""
+        self.fallback_images: list[tuple[int, str]] = []
 
     def handle_starttag(self, tag, attrs):
-        if tag.lower() != "meta" or self.image_url:
-            return
         values = {str(key).lower(): str(value or "") for key, value in attrs}
-        field = (values.get("property") or values.get("name") or "").lower()
-        if field in {"og:image", "og:image:url", "twitter:image", "twitter:image:src"}:
-            self.image_url = values.get("content", "").strip()
+        if tag.lower() == "meta" and not self.image_url:
+            field = (values.get("property") or values.get("name") or "").lower()
+            if field in {"og:image", "og:image:url", "twitter:image", "twitter:image:src"}:
+                self.image_url = values.get("content", "").strip()
+        elif tag.lower() == "img":
+            # Publisher pages often lazy-load their lead photo, while their
+            # social metadata is absent or points to a generic site logo.
+            alt = (values.get("alt") or values.get("title") or "").lower()
+            classes = (values.get("class") or "").lower()
+            try:
+                width = int(values.get("width") or 0)
+            except ValueError:
+                width = 0
+            score = 2 * bool(any(word in f"{alt} {classes}" for word in ("news", "story", "article", "headline", "lead")))
+            score += 2 if width >= 300 else 0
+            for key in ("data-src", "data-lazy-src", "data-original", "src"):
+                candidate = values.get(key, "").strip()
+                if candidate:
+                    if any(word in candidate.lower() for word in ("logo", "icon", "avatar", "banner")):
+                        score -= 5
+                    self.fallback_images.append((score, candidate))
+                    break
+            srcset = values.get("data-srcset") or values.get("srcset") or ""
+            if srcset:
+                candidate = srcset.split(",", 1)[0].strip().split(" ", 1)[0]
+                if candidate:
+                    self.fallback_images.append((score, candidate))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
 
 
 def _is_public_https_url(url: str) -> bool:
@@ -329,6 +355,8 @@ class HudWorkspace(QWidget):
     thumbnail_loaded = pyqtSignal(int, bytes)
     holo_event = pyqtSignal(str, str)
     news_image_loaded = pyqtSignal(int, str, bytes, str)
+    news_image_failed = pyqtSignal(int, str)
+    news_image_slot_available = pyqtSignal()
     news_briefing_items = pyqtSignal(object)
     news_briefing_ended = pyqtSignal()
     news_briefing_image_ready = pyqtSignal(int, str, bytes, str)
@@ -368,6 +396,7 @@ class HudWorkspace(QWidget):
         self.system_metrics_loaded.connect(self._on_system_metrics_loaded)
         self.thumbnail_loaded.connect(self._on_thumbnail_loaded)
         self.news_image_loaded.connect(self._on_news_image_loaded)
+        self.news_image_slot_available.connect(self._start_queued_news_images)
         self._gallery_buttons = []
         self._holo_server = None
         self._holo_interceptor = None
@@ -394,6 +423,7 @@ class HudWorkspace(QWidget):
         self._last_news_items: list[dict] = []
         self._news_briefing_active = False
         self._news_image_slots = threading.BoundedSemaphore(4)
+        self._news_image_queue: list[tuple[int, str]] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 7, 8, 8)
@@ -1660,6 +1690,9 @@ class HudWorkspace(QWidget):
                 if not line:
                     continue
                 if re.match(r"^(?:Newsfirst|Ada Derana)\s*[—:-]", line, re.I):
+                    if current:
+                        items.append(current)
+                        current = None
                     current_source = line[:60]
                     continue
                 if line.casefold().startswith("sri lankan local news"):
@@ -1699,20 +1732,29 @@ class HudWorkspace(QWidget):
             self._select("gestures", "HOLO / LIVE NEWS")
         if self._holo_server is not None:
             self._holo_server.set_news_items(self._last_news_items)
+        self._news_image_queue.clear()
         for index, item in enumerate(self._last_news_items):
             article_url = item.get("url", "")
             host = urlparse(article_url).hostname
-            if (urlparse(article_url).scheme == "https" and host in _NEWS_PUBLISHER_HOSTS
-                    and self._news_image_slots.acquire(blocking=False)):
-                try:
-                    threading.Thread(
-                        target=self._fetch_news_image_guarded,
-                        args=(index, article_url),
-                        daemon=True,
-                        name="JarvisHeadlineImage",
-                    ).start()
-                except Exception:
-                    self._news_image_slots.release()
+            if urlparse(article_url).scheme == "https" and host in _NEWS_PUBLISHER_HOSTS:
+                self._news_image_queue.append((index, article_url))
+        self._start_queued_news_images()
+
+    def _start_queued_news_images(self) -> None:
+        """Fetch every headline image with a small bounded number of workers."""
+        while self._news_image_queue and self._news_image_slots.acquire(blocking=False):
+            index, article_url = self._news_image_queue.pop(0)
+            try:
+                threading.Thread(
+                    target=self._fetch_news_image_guarded,
+                    args=(index, article_url),
+                    daemon=True,
+                    name="JarvisHeadlineImage",
+                ).start()
+            except Exception:
+                self._news_image_slots.release()
+                self.news_image_slot_available.emit()
+                break
 
     def show_briefing_news(self, data, title: str = "NEWSFIRST + ADA DERANA / LIVE BRIEFING"):
         """Prepare the news-image feed without navigating away from the current HUD."""
@@ -1724,38 +1766,65 @@ class HudWorkspace(QWidget):
 
     def _fetch_news_image_guarded(self, index: int, article_url: str) -> None:
         try:
-            self._fetch_news_image(index, article_url)
+            if not self._fetch_news_image(index, article_url):
+                self.news_image_failed.emit(index, article_url)
+        except Exception:
+            self.news_image_failed.emit(index, article_url)
         finally:
             self._news_image_slots.release()
+            self.news_image_slot_available.emit()
 
-    def _fetch_news_image(self, index: int, article_url: str) -> None:
+    def _fetch_news_image(self, index: int, article_url: str) -> bool:
         """Fetch the publisher's OpenGraph image, capped and restricted to public HTTPS."""
         try:
             if not _is_public_https_url(article_url):
-                return
+                return False
             opener = build_opener(_PublicHttpsRedirectHandler())
-            request = Request(article_url, headers={"User-Agent": "JARVIS Desktop/1.0", "Accept": "text/html"})
+            request = Request(
+                article_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.8,si;q=0.6",
+                },
+            )
             with opener.open(request, timeout=7) as response:
                 if not response.headers.get_content_type().startswith("text/html"):
-                    return
+                    return False
                 page = response.read(1_000_001)
                 if len(page) > 1_000_000:
-                    return
+                    return False
                 charset = response.headers.get_content_charset() or "utf-8"
                 page_url = response.geturl()
             parser = _OpenGraphImageParser()
             parser.feed(page.decode(charset, errors="replace"))
-            image_url = urljoin(page_url, parser.image_url)
-            if not parser.image_url or not _is_public_https_url(image_url):
-                return
-            request = Request(image_url, headers={"User-Agent": "JARVIS Desktop/1.0", "Accept": "image/*"})
+            fallbacks = [url for _score, url in sorted(parser.fallback_images, reverse=True)]
+            candidates = [parser.image_url, *fallbacks]
+            image_url = ""
+            for candidate in candidates:
+                resolved = urljoin(page_url, candidate)
+                if _is_public_https_url(resolved):
+                    image_url = resolved
+                    break
+            if not image_url:
+                return False
+            request = Request(
+                image_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    "Referer": page_url,
+                },
+            )
             with opener.open(request, timeout=7) as response:
                 content_type = response.headers.get_content_type().lower()
                 data = response.read(2_000_001)
             if content_type in {"image/jpeg", "image/png", "image/webp", "image/gif"} and len(data) <= 2_000_000:
                 self.news_image_loaded.emit(index, article_url, data, content_type)
+                return True
+            return False
         except Exception:
-            return
+            return False
 
     def _on_news_image_loaded(self, index: int, article_url: str, data: bytes, content_type: str) -> None:
         if (self._holo_server is not None and 0 <= index < len(self._last_news_items)
