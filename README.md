@@ -298,8 +298,12 @@ core/injection_guard.py
 core/confirm.py
 core/sandbox.py
 actions/self_heal.py
-security/audit_log.jsonl
 ```
+
+The security audit ledger is created outside the checkout in the current
+user's application-data directory, scoped to this checkout. A fresh clone
+starts a new ledger; an existing checkout's local ledger is migrated on first
+launch when its old log is present.
 
 ---
 
@@ -416,7 +420,7 @@ inside broad-control tools fail closed to confirmation. Examples include:
 * Phone calls
 * Other actions classified as dangerous
 
-You can approve or cancel a pending request by clicking **CONFIRM** or **CANCEL** on the HUD, or by saying **"confirm action"** or **"cancel action"**. Voice phrases are accepted only while a confirmation is pending; a plain "yes" is not enough. **Dev Agent** and **memory export/import** require a manual HUD click. Other confirmation-gated actions—including email, messages, Instagram, phone calls, and computer controls—can be approved by voice; Voice ID is checked when enabled and supported on that platform.
+You can approve or cancel a pending request by clicking **CONFIRM** or **CANCEL** on the HUD, or by saying **"confirm action"** or **"cancel action"**. Voice phrases are accepted only while a confirmation is pending; a plain "yes" is not enough. On a fresh install, the confirmation UI and audit ledger initialize on the first JARVIS launch; API keys and a Voice ID profile are not needed for HUD confirmation prompts. Voice approvals use Voice ID only when it is enabled. **Dev Agent** and **memory export/import** require a manual HUD click. Other confirmation-gated actions—including email, messages, Instagram, phone calls, and computer controls—can be approved by voice; Voice ID is checked when enabled and supported on that platform.
 
 ### Self-Healing System — Version 1
 
@@ -447,42 +451,22 @@ before it changes anything.
 
 ### Optional Voice ID
 
-Voice ID can add a local speaker-match check to wake-word unlocks and spoken
-confirmation of sensitive actions. The manual **WAKE NOW** control and clicking
-**CONFIRM** or **CANCEL** remain available.
+Voice ID adds a local speaker-match check to wake-word unlocks and spoken approvals. It is optional and is **not pre-enrolled on a fresh machine**; each user must enroll their own voice on each device. The **WAKE NOW** control and HUD **CONFIRM**/**CANCEL** buttons remain available.
 
-1. Install the optional packages in the same Python environment used to launch
-   JARVIS:
+1. Install the optional packages into the same Python environment used to launch JARVIS:
 
    ```powershell
    python -m pip install -r requirements-voice-id.txt
    ```
-2. Restart Jarvis and open the left settings panel.
-3. Click **VOICE ID: SET UP / TOGGLE** and read the enrollment phrase shown in
-   the activity log for eight seconds.
-4. Use the same button to turn Voice ID on or off. Right-click it to replace or
-   remove the profile.
+2. Restart JARVIS and open the left settings panel. Click **VOICE ID: SET UP / TOGGLE**.
+3. Read the displayed challenge sentence twice, clearly, while enrollment is active. JARVIS verifies the spoken challenge, then stores an encrypted speaker profile locally.
+4. Click **VOICE ID: SET UP / TOGGLE** again to enable Voice ID. Use the same control to disable it; right-click to replace or remove the profile.
 
-The speaker model runs locally and downloads its model files on the first
-enrollment into the standard Hugging Face cache outside the project. The
-enrollment audio is not saved; only an encrypted speaker profile is stored in
-`config/voice_id.dat`. Windows uses DPAPI. macOS uses Keychain. Linux encrypts
-the profile with AES-GCM and stores the random key in the native Secret Service
-(such as GNOME Keyring or KDE Wallet). Plaintext keyring fallbacks are refused.
-Linux requires the Secret Service to be installed, running, and unlocked. If a
-native credential vault is unavailable, Voice ID fails closed and manual HUD
-confirmation remains available. Install `requirements-voice-id.txt` separately
-on any supported OS. Windows DPAPI profiles cannot move to another device or
-OS; enroll again on each device. The model cache remains outside the Git
-repository.
+The speaker model runs locally and downloads its model files to the user-level Hugging Face cache on first enrollment. Enrollment audio is discarded; only the encrypted profile is kept in `config/voice_id.dat`, which is ignored by Git. Windows protects the profile with DPAPI. macOS uses Keychain. Linux encrypts the profile and keeps its key in the native Secret Service (such as GNOME Keyring or KDE Wallet). Linux requires that service to be installed, running, and unlocked; plaintext keyring fallbacks are refused. If the optional packages or native credential vault are unavailable, Voice ID cannot enroll or approve speech; manual HUD controls remain available.
 
-Voice ID is optional because it needs large machine-learning dependencies and
-local audio hardware. Python 3.12 is recommended for its SpeechBrain stack.
+Install `requirements-voice-id.txt` separately on every device where you want Voice ID. Windows DPAPI profiles cannot be moved to another device or OS, and macOS/Linux profiles also depend on that device's OS credential vault. Enroll again on each device. Python 3.12 is recommended for the optional SpeechBrain packages.
 
-Voice ID is a convenience check, not proof against replayed recordings or
-voice-cloning attacks. Keep the manual confirmation path for sensitive actions.
-If Jarvis runs with wake-word mode enabled, the local wake phrase must also pass
-the speaker check before voice unlock.
+Voice ID is a convenience speaker check, not proof against replayed recordings or voice-cloning attacks. Keep the manual confirmation path available for sensitive actions.
 
 The intended execution flow is:
 
@@ -540,70 +524,20 @@ Rate limiting is applied independently of the model's own reasoning.
 
 # 📜 Tamper-Evident Audit Ledger
 
-Jarvis records tool execution events in:
+JARVIS stores its audit history and verification state in a per-checkout user-data directory outside the Git working tree:
 
 ```text
-security/audit_log.jsonl
+Windows: %LOCALAPPDATA%\JarvisAI\security\instances\<checkout-id>\
+macOS:   ~/Library/Application Support/JarvisAI/security/instances/<checkout-id>/
+Linux:   $XDG_DATA_HOME/jarvisai/security/instances/<checkout-id>/
+         (default: ~/.local/share/jarvisai/security/instances/<checkout-id>/)
 ```
 
-The ledger uses **hash chaining**.
+On the first launch of a fresh checkout, JARVIS initializes an empty ledger, a local HMAC key, and an authenticated checkpoint. A fresh clone or another machine gets its own independent ledger; it does not need a prior machine's audit files for confirmation prompts to work. Keep the local state directory intact on the same machine if you want to preserve and verify that checkout's history. Do not commit or copy its key and checkpoint into Git.
 
-Each event contains information such as:
+The ledger uses SHA-256 hash chaining, per-entry HMAC authentication, and an external HMAC checkpoint. Each event records the action, risk tier, decision, timestamp, and previous hash. Verification detects edits and truncation relative to the checkpoint. Legacy unsigned entries may remain as history; changes made before the first signed checkpoint cannot be detected retroactively. A process running as your OS account can still access or replace both the key and checkpoint, so this does not protect against malware or an attacker controlling your account.
 
-```json
-{
-  "ts": 1790401432.6246662,
-  "event": "call",
-  "action": "youtube_video",
-  "tier": "SENSITIVE",
-  "decision": "ran",
-  "detail": "",
-  "prev_hash": "000...000",
-  "hash": "11acb3c931672df..."
-}
-```
-
-Each record references the hash of the previous record.
-
-Conceptually:
-
-```text
-Event 1
-   │
-   ▼
-Hash 1
-   │
-   ▼
-Event 2 + Hash 1
-   │
-   ▼
-Hash 2
-   │
-   ▼
-Event 3 + Hash 2
-   │
-   ▼
-Hash 3
-```
-
-If an existing entry is modified, the subsequent hash chain no longer matches.
-Normal appends use the cached verified tail and take constant time; the full
-ledger is checked at startup or when an external size change is detected.
-
-The ledger can be verified using:
-
-```python
-security.verify_log()
-```
-
-The log uses an HMAC-authenticated hash chain. Its random key and an
-HMAC-authenticated latest-head checkpoint are stored under the local
-`config/` directory and excluded by `.gitignore`. Verification detects
-ordinary edits and deletion of the latest entries relative to that checkpoint.
-Legacy unsigned audit rows remain as history; changes made before the first
-signed checkpoint cannot be detected retroactively. A process running as your
-account can still access or replace both the key and checkpoint, so this does
-not protect against malware or an attacker controlling your account.
+The ledger can be checked from the application with `security.verify_log()`; JARVIS also reports the verification status at startup. The audit state is local runtime data, excluded from the repository, and is created automatically for a fresh install.
 
 ---
 
@@ -2447,7 +2381,8 @@ Local data is stored on your computer.
 | ---------------------------- | -------------------------------- |
 | API keys & configuration     | `config/api_keys.json`, `.env`    |
 | Persistent memory             | `memory/long_term.db` plus WAL/SHM files, rolling backups, legacy `memory/long_term.json` |
-| Security and memory audit files | `security/audit_log.jsonl`, `config/memory_audit.key`, and `config/memory_audit.anchor` |
+| Security and memory audit files | Per-checkout user-data directory (security ledger), `config/memory_audit.key`, and `config/memory_audit.anchor` |
+| Voice ID profile | Encrypted `config/voice_id.dat`; encryption key uses DPAPI on Windows or the native OS credential vault on macOS/Linux |
 | TLS private key and certificate | `config/certs/`                |
 | Google OAuth client secret   | `config/google_credentials.json` |
 | Google OAuth refresh token   | `config/google_token.json`       |
