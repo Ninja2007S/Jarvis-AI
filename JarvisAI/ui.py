@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import psutil
 
@@ -19,16 +20,16 @@ else:
     _WIN_HIDE: dict = {}
 
 from PyQt6.QtCore import (
-    QEvent, QEasingCurve, QLineF, QMimeData, QObject, QParallelAnimationGroup, QPointF,
+    QEvent, QEasingCurve, QLineF, QMimeData, QObject, QParallelAnimationGroup, QPoint, QPointF,
     QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
+    QBrush, QColor, QConicalGradient, QDesktopServices, QDragEnterEvent, QDropEvent, QFont,
     QFontDatabase, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
@@ -3935,6 +3936,231 @@ class AIProviderOverlay(_HudOverlay):
         self.hide()
 
 
+class NewsBriefingOverlay(QFrame):
+    """Compact, animated headline card shown only while the news is being read."""
+
+    _W = 430
+    _H = 198
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("NewsBriefingOverlay")
+        self.setStyleSheet(
+            f"QFrame#NewsBriefingOverlay{{background:rgba(8,14,18,246);"
+            f"border:1px solid {C.PRI};border-radius:5px;}}"
+            f"QLabel{{background:transparent;border:0;color:{C.TEXT};}}"
+        )
+        self._items: list[dict] = []
+        self._images: dict[int, QPixmap] = {}
+        self._index = 0
+        self._animation: QParallelAnimationGroup | None = None
+        self._opacity = QGraphicsOpacityEffect(self)
+        self._opacity.setOpacity(0.0)
+        self.setGraphicsEffect(self._opacity)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 8, 10, 9)
+        root.setSpacing(6)
+        header = QHBoxLayout()
+        self._kicker = QLabel("◈  SRI LANKA / LIVE BRIEFING")
+        self._kicker.setStyleSheet(f"color:{C.PRI};font:bold 8pt 'Courier New';letter-spacing:1px;")
+        header.addWidget(self._kicker, 1)
+        self._counter = QLabel("01 / 01")
+        self._counter.setStyleSheet(f"color:{C.TEXT_DIM};font:8pt 'Courier New';")
+        header.addWidget(self._counter)
+        close = QPushButton("×")
+        close.setFixedSize(24, 22)
+        close.setToolTip("Dismiss the briefing headlines")
+        close.setStyleSheet(f"QPushButton{{color:{C.TEXT_DIM};background:transparent;border:0;font:14pt 'Segoe UI';}}QPushButton:hover{{color:{C.WHITE};}}")
+        close.clicked.connect(self.dismiss)
+        header.addWidget(close)
+        root.addLayout(header)
+
+        body = QHBoxLayout()
+        body.setSpacing(10)
+        self._image = QLabel("IMAGE\nLOADING")
+        self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image.setFixedSize(142, 112)
+        self._image.setStyleSheet(f"background:#050b0e;border:1px solid {C.BORDER};color:{C.TEXT_DIM};font:8pt 'Courier New';")
+        body.addWidget(self._image)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(3)
+        self._source = QLabel("NEWS SOURCE")
+        self._source.setStyleSheet(f"color:{C.ACC2};font:bold 7pt 'Courier New';")
+        text_col.addWidget(self._source)
+        self._headline = QLabel("Waiting for headlines…")
+        self._headline.setWordWrap(True)
+        self._headline.setMaximumHeight(42)
+        self._headline.setStyleSheet(f"color:{C.WHITE};font:bold 9pt 'Segoe UI';")
+        text_col.addWidget(self._headline)
+        self._summary = QLabel("")
+        self._summary.setWordWrap(True)
+        self._summary.setMaximumHeight(47)
+        self._summary.setStyleSheet(f"color:{C.TEXT_MED};font:8pt 'Segoe UI';")
+        text_col.addWidget(self._summary, 1)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        self._open = QPushButton("OPEN ARTICLE  ↗")
+        self._open.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._open.setStyleSheet(
+            f"QPushButton{{color:{C.PRI};background:#0b171a;border:1px solid {C.PRI_DIM};"
+            "padding:5px 9px;font:bold 7pt 'Courier New';}"
+            f"QPushButton:hover{{background:{C.PRI_GHO};border-color:{C.PRI};}}"
+        )
+        self._open.clicked.connect(self._open_current_article)
+        actions.addWidget(self._open)
+        text_col.addLayout(actions)
+        body.addLayout(text_col, 1)
+        root.addLayout(body, 1)
+
+        self._advance_timer = QTimer(self)
+        self._advance_timer.setInterval(9000)
+        self._advance_timer.timeout.connect(self._advance)
+        self.hide()
+
+    def set_items(self, items) -> None:
+        normalized = [item for item in (items or []) if isinstance(item, dict)]
+        if not normalized:
+            self.dismiss()
+            return
+        self._items = normalized[:12]
+        self._images.clear()
+        self._index = 0
+        self._render_current()
+        self._advance_timer.start() if len(self._items) > 1 else self._advance_timer.stop()
+        self._animate_in()
+
+    def set_image(self, index: int, article_url: str, data: bytes, _content_type: str) -> None:
+        if not 0 <= index < len(self._items) or self._items[index].get("url") != article_url:
+            return
+        image = QPixmap()
+        if not image.loadFromData(data):
+            return
+        self._images[index] = image
+        if index == self._index:
+            self._render_image(image)
+
+    def _render_image(self, image: QPixmap | None = None) -> None:
+        image = image or self._images.get(self._index)
+        if image is None or image.isNull():
+            self._image.setPixmap(QPixmap())
+            self._image.setText("IMAGE\nUNAVAILABLE")
+            return
+        self._image.setText("")
+        self._image.setPixmap(image.scaled(
+            self._image.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
+
+    def _render_current(self) -> None:
+        item = self._items[self._index]
+        self._counter.setText(f"{self._index + 1:02d} / {len(self._items):02d}")
+        self._source.setText(str(item.get("source") or "NEWSFIRST / ADA DERANA").upper()[:52])
+        self._headline.setText(str(item.get("title") or "Headline")[:180])
+        summary = " ".join(str(item.get("detail") or item.get("snippet") or item.get("description") or "").split())
+        self._summary.setText(summary[:230] if summary else "JARVIS is reading this headline now.")
+        url = str(item.get("url") or item.get("link") or "")
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        trusted = parsed.scheme == "https" and (
+            host == "newsfirst.lk" or host.endswith(".newsfirst.lk")
+            or host == "adaderana.lk" or host.endswith(".adaderana.lk")
+        )
+        self._open.setEnabled(trusted)
+        self._open.setToolTip("Open this publisher's article in your default browser" if trusted else "No verified publisher article URL is available")
+        self._render_image()
+
+    def _advance(self) -> None:
+        if len(self._items) < 2:
+            return
+        self._index = (self._index + 1) % len(self._items)
+        self._render_current()
+
+    def _open_current_article(self) -> None:
+        if not self._items:
+            return
+        url = str(self._items[self._index].get("url") or self._items[self._index].get("link") or "")
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        allowed = host == "newsfirst.lk" or host.endswith(".newsfirst.lk") or host == "adaderana.lk" or host.endswith(".adaderana.lk")
+        if parsed.scheme == "https" and allowed:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _animate_in(self) -> None:
+        self._stop_animation()
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        width = min(self._W, max(280, parent.width() - 16))
+        height = min(self._H, max(150, parent.height() - 16))
+        self.setFixedSize(width, height)
+        self._image.setFixedSize(min(142, max(92, (width - 42) // 3)), min(112, height - 76))
+        x = max(8, parent.width() - width - 18)
+        y = max(8, parent.height() - height - 18)
+        target = QPoint(x, y)
+        self.setGeometry(x, y + 18, width, height)
+        self._opacity.setOpacity(0.0)
+        self.show()
+        self.raise_()
+        group = QParallelAnimationGroup(self)
+        fade = QPropertyAnimation(self._opacity, b"opacity", group)
+        fade.setDuration(380)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        slide = QPropertyAnimation(self, b"pos", group)
+        slide.setDuration(380)
+        slide.setStartValue(QPoint(x, y + 18))
+        slide.setEndValue(target)
+        slide.setEasingCurve(QEasingCurve.Type.OutCubic)
+        group.addAnimation(fade)
+        group.addAnimation(slide)
+        self._animation = group
+        group.start()
+
+    def reposition(self) -> None:
+        parent = self.parentWidget()
+        if parent is None or not self.isVisible():
+            return
+        x = max(8, parent.width() - self.width() - 18)
+        y = max(8, parent.height() - self.height() - 18)
+        self.move(x, y)
+
+    def dismiss(self) -> None:
+        self._advance_timer.stop()
+        if not self.isVisible():
+            return
+        self._stop_animation()
+        group = QParallelAnimationGroup(self)
+        fade = QPropertyAnimation(self._opacity, b"opacity", group)
+        fade.setDuration(280)
+        fade.setStartValue(self._opacity.opacity())
+        fade.setEndValue(0.0)
+        fade.setEasingCurve(QEasingCurve.Type.InCubic)
+        slide = QPropertyAnimation(self, b"pos", group)
+        slide.setDuration(280)
+        slide.setStartValue(self.pos())
+        slide.setEndValue(self.pos() + QPoint(0, 14))
+        slide.setEasingCurve(QEasingCurve.Type.InCubic)
+        group.addAnimation(fade)
+        group.addAnimation(slide)
+        group.finished.connect(self._finish_dismiss)
+        self._animation = group
+        group.start()
+
+    def _finish_dismiss(self) -> None:
+        self.hide()
+        self._opacity.setOpacity(0.0)
+        self._items = []
+        self._images.clear()
+
+    def _stop_animation(self) -> None:
+        if self._animation is not None:
+            self._animation.stop()
+            self._animation.deleteLater()
+            self._animation = None
+
+
 class MainWindow(QMainWindow):
     _close_sig       = pyqtSignal()
     _log_sig        = pyqtSignal(str)
@@ -4070,6 +4296,10 @@ class MainWindow(QMainWindow):
         self._earth_panel.close_requested.connect(self._close_earth)
         self._hud_cam_stack.addWidget(self._earth_panel)
         self._workspace = HudWorkspace()
+        self._news_briefing_overlay = NewsBriefingOverlay(self._hud_cam_stack)
+        self._workspace.news_briefing_items.connect(self._show_news_briefing_overlay)
+        self._workspace.news_briefing_ended.connect(self._hide_news_briefing_overlay)
+        self._workspace.news_briefing_image_ready.connect(self._set_news_briefing_image)
         self._workspace.close_requested.connect(self._close_workspace)
         self._workspace.interrupt_requested.connect(self._do_interrupt)
         self._workspace.feature_requested.connect(self._open_holo_feature)
@@ -4267,8 +4497,17 @@ class MainWindow(QMainWindow):
         self._earth_panel.start_flight_radar_in_background(manual_place)
 
     def _show_workspace(self, kind: str, payload) -> None:
-        self._earth_panel.stop_flight_radar()
         data = payload if isinstance(payload, dict) else {"value": payload}
+        if kind == "briefing_news":
+            self._workspace.show_briefing_news(
+                data.get("items", data.get("text", "")),
+                data.get("title", "NEWSFIRST + ADA DERANA / LIVE BRIEFING"),
+            )
+            return
+        if kind == "briefing_news_hide":
+            self._workspace.hide_briefing_news()
+            return
+        self._earth_panel.stop_flight_radar()
         if kind == "news" and self._workspace._is_fullscreen:
             # Keep the Holo stage active during a briefing. The image server is
             # updated from the same headline cards and the deck polls for them.
@@ -4337,6 +4576,15 @@ class MainWindow(QMainWindow):
             self._workspace.show_view(kind)
         if kind != "holo":
             self._hud_cam_stack.setCurrentWidget(self._workspace)
+
+    def _show_news_briefing_overlay(self, items) -> None:
+        self._news_briefing_overlay.set_items(items)
+
+    def _hide_news_briefing_overlay(self) -> None:
+        self._news_briefing_overlay.dismiss()
+
+    def _set_news_briefing_image(self, index: int, article_url: str, data: bytes, content_type: str) -> None:
+        self._news_briefing_overlay.set_image(index, article_url, data, content_type)
 
     def _close_workspace(self) -> None:
         self._workspace.stop_holo_camera()
@@ -4994,6 +5242,8 @@ class MainWindow(QMainWindow):
         cw = self.centralWidget()
         if getattr(self, "_immersive_open", False):
             self._immersive_overlay.setGeometry(cw.rect())
+        if hasattr(self, "_news_briefing_overlay"):
+            self._news_briefing_overlay.reposition()
         if self._overlay and self._overlay.isVisible():
             ow, oh = 460, 390
             self._overlay.setGeometry(
@@ -7365,6 +7615,13 @@ class JarvisUI:
 
     def show_news_cards(self, items, title: str = "HEADLINES"):
         self._show_workspace_view("news", {"items": items, "title": str(title or "HEADLINES")})
+
+    def show_briefing_news(self, items, title: str = "NEWSFIRST + ADA DERANA / LIVE BRIEFING"):
+        """Show temporary HUD headline cards without switching the active workspace."""
+        self._show_workspace_view("briefing_news", {"items": items, "title": str(title or "LIVE BRIEFING")})
+
+    def hide_briefing_news(self):
+        self._show_workspace_view("briefing_news_hide", {})
 
     def show_email_cards(self, items, title: str = "INBOX"):
         self._show_workspace_view("email", {"items": list(items or []), "title": str(title or "INBOX")})

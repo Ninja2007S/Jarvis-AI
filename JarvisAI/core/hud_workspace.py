@@ -329,6 +329,9 @@ class HudWorkspace(QWidget):
     thumbnail_loaded = pyqtSignal(int, bytes)
     holo_event = pyqtSignal(str, str)
     news_image_loaded = pyqtSignal(int, str, bytes, str)
+    news_briefing_items = pyqtSignal(object)
+    news_briefing_ended = pyqtSignal()
+    news_briefing_image_ready = pyqtSignal(int, str, bytes, str)
     feature_requested = pyqtSignal(str)
     neural_hand_update = pyqtSignal(object)
 
@@ -389,6 +392,7 @@ class HudWorkspace(QWidget):
         self._interrupt_shortcut.activated.connect(self.interrupt_requested.emit)
         self.holo_event.connect(self._on_holo_event)
         self._last_news_items: list[dict] = []
+        self._news_briefing_active = False
         self._news_image_slots = threading.BoundedSemaphore(4)
 
         root = QVBoxLayout(self)
@@ -1632,7 +1636,8 @@ class HudWorkspace(QWidget):
             self._doc_view_stack.setCurrentWidget(self._doc_text)
         self._select("document", "DOCUMENT / SUMMARY")
 
-    def show_news(self, data, title: str = "NEWSFIRST / ADA DERANA", keep_holo: bool = False):
+    def show_news(self, data, title: str = "NEWSFIRST / ADA DERANA", keep_holo: bool = False,
+                  briefing_overlay: bool = False):
         items = []
         if isinstance(data, list):
             for value in data[:12]:
@@ -1685,7 +1690,11 @@ class HudWorkspace(QWidget):
                                       "detail": " ".join(block.splitlines()[1:])[:600],
                                       "url": urls[0].rstrip(".,)") if urls else "", "source": ""})
         self._last_news_items = items[:12]
-        self._set_cards("news", self._last_news_items, title, field_map=("title", "detail", "source"), link_label="OPEN STORY")
+        self._news_briefing_active = bool(briefing_overlay)
+        if briefing_overlay:
+            self.news_briefing_items.emit(self._last_news_items)
+        else:
+            self._set_cards("news", self._last_news_items, title, field_map=("title", "detail", "source"), link_label="OPEN STORY")
         if keep_holo and "gestures" in self._page_index:
             self._select("gestures", "HOLO / LIVE NEWS")
         if self._holo_server is not None:
@@ -1704,6 +1713,14 @@ class HudWorkspace(QWidget):
                     ).start()
                 except Exception:
                     self._news_image_slots.release()
+
+    def show_briefing_news(self, data, title: str = "NEWSFIRST + ADA DERANA / LIVE BRIEFING"):
+        """Prepare the news-image feed without navigating away from the current HUD."""
+        self.show_news(data, title, briefing_overlay=True)
+
+    def hide_briefing_news(self):
+        self._news_briefing_active = False
+        self.news_briefing_ended.emit()
 
     def _fetch_news_image_guarded(self, index: int, article_url: str) -> None:
         try:
@@ -1744,6 +1761,9 @@ class HudWorkspace(QWidget):
         if (self._holo_server is not None and 0 <= index < len(self._last_news_items)
                 and self._last_news_items[index].get("url") == article_url):
             self._holo_server.set_news_image(index, data, content_type)
+        if (self._news_briefing_active and 0 <= index < len(self._last_news_items)
+                and self._last_news_items[index].get("url") == article_url):
+            self.news_briefing_image_ready.emit(index, article_url, data, content_type)
 
     def show_email(self, items, title: str = "UNREAD / RECENT EMAIL"):
         self._set_cards("email", items, title, field_map=("subject", "from", "snippet", "date"))

@@ -708,6 +708,8 @@ class JarvisLive:
         self._run_task: asyncio.Task | None = None
         self._shutdown_event: asyncio.Event | None = None
         self._shutdown_requested = False
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_in_progress = False
         self._is_speaking         = False
         self._assistant_turn_pending = False
         self._barge_in_until      = 0.0
@@ -1197,14 +1199,15 @@ class JarvisLive:
                     self._voice_id_enroll_candidate = None
                 self.ui.show_content(
                     "VOICE ID ENROLLMENT",
-                    f"Speak this sentence once, clearly, after starting enrollment:\n\n{challenge}\n\n"
-                    "Keep JARVIS quiet while you speak. Audio is processed locally; only an encrypted voice profile is saved. "
+                    f"Read this sentence twice, clearly, after starting enrollment:\n\n{challenge}\n\n"
+                    "Keep the microphone close and JARVIS quiet until enrollment finishes. "
+                    "Only clear voiced audio is used; raw audio is discarded after the local profile is created. "
                     "The encryption key stays in this device's OS credential store.",
                 )
                 threading.Timer(
-                    40.0, self._expire_voice_id_enrollment, args=(challenge,),
+                    60.0, self._expire_voice_id_enrollment, args=(challenge,),
                 ).start()
-                return f"Enrollment started. Speak the sentence shown in the HUD: {challenge}"
+                return f"Enrollment started. Read the sentence twice, clearly: {challenge}"
 
             if action == "remove":
                 voice_id.remove_profile()
@@ -1232,21 +1235,29 @@ class JarvisLive:
         self.ui.write_log("SEC: Voice ID enrollment expired; no profile was saved.")
 
     def _capture_voice_id_enrollment(self, indata, frames: int) -> None:
-        """Collect a short sample from the already-open mic stream; never save raw audio."""
+        """Collect clear, voiced mic chunks only; raw audio is discarded after embedding."""
         if self.ui.muted or self._phone_active:
             return
         with self._speaking_lock:
             if self._is_speaking:
                 return
         data = indata.tobytes()
+        samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+        if not samples.size:
+            return
+        rms = float(np.sqrt(np.mean(np.square(samples))))
+        # Ignore silence and low-level room noise; count only useful speech
+        # frames toward the enrollment duration.
+        if rms < 0.0025:
+            return
         ready_sample = None
         with self._voice_id_enroll_lock:
             if not self._voice_id_enroll_active:
                 return
             self._voice_id_enroll_chunks.append(data)
             self._voice_id_enroll_samples += int(frames)
-            # Five seconds is long enough for the challenge and gives ECAPA a
-            # steadier profile than the previous minimum-length sample.
+            # Five seconds of voiced audio gives ECAPA multiple phrases while
+            # avoiding the silent tail of the recording.
             if self._voice_id_enroll_samples >= SEND_SAMPLE_RATE * 5:
                 candidate = b"".join(self._voice_id_enroll_chunks)
                 self._voice_id_enroll_chunks = []
@@ -1272,7 +1283,8 @@ class JarvisLive:
             self._voice_id_enroll_transcript = (
                 f"{self._voice_id_enroll_transcript} {normalized}".strip()[-500:]
             )
-            if self._voice_text_key(challenge) in self._voice_id_enroll_transcript:
+            challenge_key = self._voice_text_key(challenge)
+            if self._voice_id_enroll_transcript.count(challenge_key) >= 2:
                 self._voice_id_enroll_matched = True
                 candidate = self._voice_id_enroll_candidate
                 if candidate and time.monotonic() - candidate[1] <= 30.0:
@@ -1957,26 +1969,34 @@ class JarvisLive:
 
             elif name == "shutdown_jarvis":
                 async def _do_shutdown():
-                    if self._shutdown_requested:
-                        return
-                    # Stop background polling immediately, let the current
-                    # session speak its goodbye, then cancel the root run task
-                    # so its TaskGroup closes before asyncio shuts executors.
-                    self._shutdown_requested = True
+                    # Confirmation callbacks run outside the event loop. Keep
+                    # shutdown idempotent, but do not set the global stop flag
+                    # until the goodbye has had a chance to render and play.
+                    with self._shutdown_lock:
+                        if self._shutdown_requested or self._shutdown_in_progress:
+                            return
+                        self._shutdown_in_progress = True
                     try:
-                        if self.session:
+                        self.ui.write_log("SYS: JARVIS is shutting down…")
+                        if self.session and self._turn_done_event is not None:
+                            self._turn_done_event.clear()
                             try:
                                 await asyncio.wait_for(
                                     self.session.send_client_content(
                                         turns={"role": "user", "parts": [{"text": "Say a brief natural goodbye to the user."}]},
                                         turn_complete=True,
                                     ),
-                                    timeout=2.0,
+                                    timeout=3.0,
+                                )
+                                # Wait for the goodbye's audio turn to finish,
+                                # bounded so a stalled network cannot hang exit.
+                                await asyncio.wait_for(
+                                    self._turn_done_event.wait(), timeout=8.0
                                 )
                             except Exception:
                                 pass
-                        await asyncio.sleep(1.5)
                     finally:
+                        self._shutdown_in_progress = False
                         self.request_shutdown()
                 def _trigger_shutdown():
                     # Confirmation callbacks run on a worker thread, which has
@@ -2940,9 +2960,9 @@ class JarvisLive:
                 if not failed:
                     # Show on UI content panel immediately
                     self.ui.show_content("SRI LANKA NEWS — Newsfirst + Ada Derana", news_text)
-                    if hasattr(self.ui, "show_news_cards"):
-                        self.ui.show_news_cards(
-                            news_text, "NEWSFIRST + ADA DERANA / HEADLINES"
+                    if hasattr(self.ui, "show_briefing_news"):
+                        self.ui.show_briefing_news(
+                            news_text, "NEWSFIRST + ADA DERANA / LIVE BRIEFING"
                         )
 
                     p2 = (
@@ -2982,11 +3002,24 @@ class JarvisLive:
                         await asyncio.wait_for(self._turn_done_event.wait(), timeout=120.0)
                     except asyncio.TimeoutError:
                         pass
+                # Live turn_complete means synthesis finished, but the desktop
+                # output queue can still contain audible speech. Keep headline
+                # cards visible until the final queued audio batch drains.
+                playback_deadline = time.monotonic() + 12.0
+                while not self._briefing_cancelled and time.monotonic() < playback_deadline:
+                    queue = self.audio_in_queue
+                    with self._speaking_lock:
+                        speaking = self._is_speaking
+                    if not speaking and (queue is None or queue.empty()):
+                        break
+                    await asyncio.sleep(0.05)
             except Exception as e:
                 print(f"[Briefing] Phase 2 error: {e}")
                 print(f"[JARVIS] Briefing phase 2 failed: {e}")
                 self.ui.write_log("SYS: Could not fetch the news for the briefing.")
             finally:
+                if hasattr(self.ui, "hide_briefing_news"):
+                    self.ui.hide_briefing_news()
                 self._briefing_active = False
                 if self._briefing_task is asyncio.current_task():
                     self._briefing_task = None

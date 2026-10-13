@@ -168,8 +168,36 @@ def _embedding(audio) -> np.ndarray:
         raise ValueError("Speak for at least 1.5 seconds for Voice ID.")
     if not np.isfinite(waveform).all():
         raise ValueError("The microphone sample was invalid.")
-    if float(np.sqrt(np.mean(np.square(waveform)))) < 0.003:
+    source_rms = float(np.sqrt(np.mean(np.square(waveform))))
+    if source_rms < 0.003:
         raise ValueError("The microphone sample was too quiet to verify.")
+
+    # Remove long silences and steady low-level room noise before extracting
+    # the speaker vector. SpeechBrain's embedding is sensitive to how much of
+    # a short approval sample is silence; both enrollment and verification use
+    # the same local energy gate.
+    frame_size = int(SAMPLE_RATE * 0.02)  # 20 ms
+    usable = (len(waveform) // frame_size) * frame_size
+    if usable < frame_size:
+        raise ValueError("Speak for at least 1.5 seconds for Voice ID.")
+    framed = waveform[:usable].reshape(-1, frame_size)
+    frame_rms = np.sqrt(np.mean(np.square(framed), axis=1))
+    strong_level = float(np.percentile(frame_rms, 90))
+    gate = max(0.0025, strong_level * 0.08)
+    voiced = frame_rms >= gate
+    # Keep 40 ms around voiced frames so the gate does not cut consonant
+    # onsets and offsets. Merge the retained frames into one model input.
+    voiced = np.convolve(voiced.astype(np.int8), np.ones(5, dtype=np.int8), mode="same") > 0
+    if not np.any(voiced):
+        raise ValueError("The microphone sample did not contain clear speech.")
+    clean = framed[voiced].reshape(-1).astype(np.float32, copy=False)
+    clean_rms = float(np.sqrt(np.mean(np.square(clean))))
+    if clean_rms < 0.003 or len(clean) < int(SAMPLE_RATE * MIN_AUDIO_SECONDS):
+        raise ValueError("Speak clearly for at least 1.5 seconds for Voice ID.")
+    # Normalize moderate mic-level differences without amplifying quiet noise
+    # aggressively or clipping a loud recording.
+    gain = min(4.0, 0.05 / clean_rms)
+    waveform = np.clip(clean * gain, -1.0, 1.0)
 
     signal = torch.from_numpy(waveform).unsqueeze(0)
     model = _get_model()
