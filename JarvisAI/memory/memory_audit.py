@@ -153,6 +153,13 @@ def verify_chain() -> dict:
     anchor_path = BASE_DIR / "config" / "memory_audit.anchor"
     events = [row for row in load_memory().get("memory_audit", []) if isinstance(row, dict)]
     if not path.exists():
+        # A fresh clone has no memory records yet, so there is no signed chain
+        # to verify and no missing key indicates tampering. The key is created
+        # on the first memory write. Keep treating a missing key as an error
+        # once an anchor or signed history exists.
+        if not events and not anchor_path.exists():
+            return {"valid": True, "checked": 0, "legacy_unsigned": 0,
+                    "reason": "empty memory audit history; signing initializes on first write"}
         return {"valid": False, "checked": 0, "legacy_unsigned": len(events), "reason": "audit key missing"}
     key = path.read_bytes()
     signed = [row for row in events if row.get("hmac")]

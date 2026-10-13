@@ -37,6 +37,38 @@ _wmi_gpu_counter_ok: bool | None = None
 _network_lock = threading.Lock()
 _network_previous = None
 _network_previous_at = 0.0
+_status_sensor_lock = threading.Lock()
+_status_sensor_values: dict[str, object] = {}
+_status_sensor_jobs: set[str] = set()
+_status_sensor_last_started: dict[str, float] = {}
+
+
+def _status_sensor_job(name: str, getter) -> None:
+    """Refresh one optional/driver-backed metric without delaying callers."""
+    try:
+        value = getter()
+    except Exception:
+        value = None
+    with _status_sensor_lock:
+        _status_sensor_values[name] = value
+        _status_sensor_jobs.discard(name)
+
+
+def _kick_status_sensor(name: str, getter, interval: float = 8.0) -> None:
+    now = time.monotonic()
+    with _status_sensor_lock:
+        if name in _status_sensor_jobs:
+            return
+        if now - _status_sensor_last_started.get(name, 0.0) < interval:
+            return
+        _status_sensor_jobs.add(name)
+        _status_sensor_last_started[name] = now
+    threading.Thread(
+        target=_status_sensor_job,
+        args=(name, getter),
+        daemon=True,
+        name=f"JarvisMetric-{name}",
+    ).start()
 
 
 def _nvml_gpu() -> float:
@@ -284,12 +316,32 @@ def _network_rates() -> tuple[float, float]:
         return 0.0, 0.0
 
 
+def _gpu_status() -> tuple[float, str]:
+    # Keep the two probes together because their cached NVML/WMI handles are shared.
+    usage = _get_gpu_usage()
+    name = _gpu_name()
+    return usage, name
+
+
 def get_system_status() -> dict:
-    """Snapshot of current system metrics for the system_status tool."""
-    cpu  = psutil.cpu_percent(interval=0.2)
+    """Return a quick snapshot; optional driver/WMI probes update in background.
+
+    ``cpu_percent(interval=0.2)`` used to pause every request, while the GPU,
+    temperature and device-name probes can be slow on Windows (notably WMI).
+    The dashboard and voice tool now get immediately available metrics, and
+    those optional values fill in as their independent background probes finish.
+    """
+    cpu  = psutil.cpu_percent(interval=None)
     ram  = psutil.virtual_memory()
-    temp = _get_cpu_temp()
-    gpu  = _get_gpu_usage()
+
+    _kick_status_sensor("cpu_temp_c", _get_cpu_temp)
+    _kick_status_sensor("gpu_status", _gpu_status)
+    _kick_status_sensor("cpu_name", _cpu_name)
+    _kick_status_sensor("process_count", lambda: len(psutil.pids()))
+    with _status_sensor_lock:
+        sensors = dict(_status_sensor_values)
+    gpu_status = sensors.get("gpu_status")
+    gpu_percent, gpu_name = gpu_status if isinstance(gpu_status, tuple) and len(gpu_status) == 2 else (None, None)
 
     boot_time   = psutil.boot_time()
     uptime_secs = time.time() - boot_time
@@ -315,7 +367,7 @@ def get_system_status() -> dict:
 
     return {
         "cpu_percent":   round(cpu, 1),
-        "cpu_name":      _cpu_name(),
+        "cpu_name":      sensors.get("cpu_name") or "Detecting CPU model…",
         "cpu_cores":     psutil.cpu_count(logical=False),
         "cpu_threads":   psutil.cpu_count(logical=True),
         "cpu_freq_mhz":  current_mhz,
@@ -323,9 +375,9 @@ def get_system_status() -> dict:
         "ram_used_gb":   round(ram.used   / 1024 ** 3, 1),
         "ram_total_gb":  round(ram.total  / 1024 ** 3, 1),
         "ram_available_gb": round(ram.available / 1024 ** 3, 1),
-        "cpu_temp_c":    round(temp, 1) if temp > 0 else None,
-        "gpu_percent":   round(gpu,  1) if gpu  >= 0 else None,
-        "gpu_name":      _gpu_name(),
+        "cpu_temp_c":    round(float(sensors["cpu_temp_c"]), 1) if sensors.get("cpu_temp_c") is not None and float(sensors["cpu_temp_c"]) > 0 else None,
+        "gpu_percent":   round(float(gpu_percent), 1) if gpu_percent is not None and float(gpu_percent) >= 0 else None,
+        "gpu_name":      gpu_name or "Detecting graphics adapter…",
         "disk_percent":  disk_percent,
         "disk_used_gb":  disk_used_gb,
         "disk_total_gb": disk_total_gb,
@@ -338,7 +390,7 @@ def get_system_status() -> dict:
         "architecture":  platform.machine() or "Unknown",
         "uptime":        f"{uptime_h}h {uptime_m}m",
         "uptime_seconds": round(uptime_secs),
-        "process_count": len(psutil.pids()),
+        "process_count": sensors.get("process_count"),
     }
 
 

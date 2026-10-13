@@ -42,6 +42,7 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 import sys
 import threading
 import time
@@ -54,8 +55,6 @@ from core import confirm as confirm_gate
 
 # ── where the ledger lives ───────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).resolve().parent.parent
-LOG_DIR    = BASE_DIR / "security"
-LOG_FILE   = LOG_DIR / "audit_log.jsonl"
 _GENESIS   = "0" * 64
 
 
@@ -70,9 +69,24 @@ def _audit_data_dir() -> Path:
     return root / "jarvisai" / "security"
 
 
-_AUDIT_STATE_DIR = _audit_data_dir()
+_AUDIT_ROOT_DIR = _audit_data_dir()
+# A checkpoint belongs to one checkout. Sharing a machine-wide checkpoint
+# between separate clones made a clean clone look tampered with when the
+# ignored, checkout-local audit log was naturally absent.
+_checkout_path = str(BASE_DIR.resolve())
+if os.name == "nt":
+    _checkout_path = os.path.normcase(_checkout_path)
+_AUDIT_INSTANCE_ID = hashlib.sha256(_checkout_path.encode("utf-8")).hexdigest()[:24]
+_AUDIT_STATE_DIR = _AUDIT_ROOT_DIR / "instances" / _AUDIT_INSTANCE_ID
 _AUDIT_KEY_FILE = _AUDIT_STATE_DIR / "audit_hmac.key"
 _AUDIT_CHECKPOINT_FILE = _AUDIT_STATE_DIR / "audit_checkpoint.json"
+LOG_DIR = _AUDIT_STATE_DIR
+LOG_FILE = LOG_DIR / "audit_log.jsonl"
+_LEGACY_LOG_FILE = BASE_DIR / "security" / "audit_log.jsonl"
+_LEGACY_AUDIT_KEY_FILE = _AUDIT_ROOT_DIR / "audit_hmac.key"
+_LEGACY_AUDIT_CHECKPOINT_FILE = _AUDIT_ROOT_DIR / "audit_checkpoint.json"
+_storage_migration_lock = threading.Lock()
+_storage_migration_done = False
 _audit_key_cache: bytes | None = None
 _audit_key_lock = threading.Lock()
 
@@ -102,6 +116,48 @@ def _log(msg: str) -> None:
             _log_cb(f"SEC: {msg}")
         except Exception:
             pass
+
+
+def _prepare_audit_storage() -> None:
+    """Use private per-checkout state and migrate this checkout's old ledger.
+
+    Older releases kept the log in the repository while putting its key and
+    checkpoint in a shared per-user directory. A new clone therefore could
+    inherit a checkpoint from another clone without inheriting its ignored
+    log. New installations are isolated by checkout path. When the old log is
+    present beside this checkout, migrate it and the legacy key/checkpoint so
+    its history remains verifiable.
+    """
+    global _storage_migration_done
+    if _storage_migration_done:
+        return
+    with _storage_migration_lock:
+        if _storage_migration_done:
+            return
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        if _LEGACY_LOG_FILE.exists() and not LOG_FILE.exists():
+            for source, target in (
+                (_LEGACY_AUDIT_KEY_FILE, _AUDIT_KEY_FILE),
+                (_LEGACY_AUDIT_CHECKPOINT_FILE, _AUDIT_CHECKPOINT_FILE),
+                (_LEGACY_LOG_FILE, LOG_FILE),
+            ):
+                if source.exists() and not target.exists():
+                    temp = target.with_name(target.name + ".migration.tmp")
+                    try:
+                        shutil.copyfile(source, temp)
+                        with temp.open("rb+") as stream:
+                            os.fsync(stream.fileno())
+                        os.replace(temp, target)
+                        try:
+                            os.chmod(target, 0o600)
+                        except OSError:
+                            pass
+                    finally:
+                        try:
+                            temp.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+        _storage_migration_done = True
 
 
 # ── risk tiers ────────────────────────────────────────────────────────────
@@ -452,6 +508,7 @@ _ledger_entries: int | None = None
 def _audit_key() -> bytes:
     """Load or create a random HMAC key in the current user's data directory."""
     global _audit_key_cache
+    _prepare_audit_storage()
     with _audit_key_lock:
         if _audit_key_cache is not None:
             return _audit_key_cache

@@ -298,8 +298,12 @@ core/injection_guard.py
 core/confirm.py
 core/sandbox.py
 actions/self_heal.py
-security/audit_log.jsonl
 ```
+
+The security audit ledger is created outside the checkout in the current
+user's application-data directory, scoped to this checkout. A fresh clone
+starts a new ledger; an existing checkout's local ledger is migrated on first
+launch when its old log is present.
 
 ---
 
@@ -544,13 +548,18 @@ Rate limiting is applied independently of the model's own reasoning.
 
 # 📜 Tamper-Evident Audit Ledger
 
-Jarvis records tool execution events in:
+Jarvis records tool execution events in the per-checkout user-data directory:
 
 ```text
-security/audit_log.jsonl
+Windows: %LOCALAPPDATA%\JarvisAI\security\instances\<checkout-id>\
+macOS:   ~/Library/Application Support/JarvisAI/security/instances/<checkout-id>/
+Linux:   $XDG_DATA_HOME/jarvisai/security/instances/<checkout-id>/
+         (default: ~/.local/share/jarvisai/security/instances/<checkout-id>/)
 ```
 
-The ledger uses **hash chaining**.
+The ledger uses SHA-256 hash chaining, per-entry HMAC authentication, and an
+external HMAC checkpoint. Its key and history remain on the machine and are
+not part of the repository.
 
 Each event contains information such as:
 
@@ -2059,9 +2068,6 @@ JarvisAI/
 │   ├── plugin_loader.py
 │   └── action_loader.py
 │
-├── security/
-│   └── audit_log.jsonl        # generated local security log; do not commit
-│
 ├── sandbox_runs/
 │   └── {temporary execution directories}
 │
@@ -2449,7 +2455,7 @@ Local data is stored on your computer.
 | ---------------------------- | -------------------------------- |
 | API keys & configuration     | `config/api_keys.json`, `.env`    |
 | Persistent memory             | `memory/long_term.db` plus WAL/SHM files, rolling backups, legacy `memory/long_term.json` |
-| Security and memory audit files | `security/audit_log.jsonl`, `config/memory_audit.key`, and `config/memory_audit.anchor` |
+| Security and memory audit files | Per-checkout user-data directory (security ledger), `config/memory_audit.key`, and `config/memory_audit.anchor` |
 | Optional memory encryption  | `config/memory_encryption.key` (off by default) |
 | TLS private key and certificate | `config/certs/`                |
 | Google OAuth client secret   | `config/google_credentials.json` |
