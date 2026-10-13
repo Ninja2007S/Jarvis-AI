@@ -6763,7 +6763,8 @@ class MainWindow(QMainWindow):
             data["user_name"] = user_name.strip()
             if ui_color:
                 data["ui_color"] = ui_color.strip().lower()
-            API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+            from memory.config_manager import write_api_config
+            write_api_config(data)
             self._log.append_log(f"SYS: Identity updated — {display}")
             if color_changed:
                 self._log.append_log(f"SYS: UI colour applied — {ui_color}")
@@ -7011,7 +7012,8 @@ class MainWindow(QMainWindow):
         config = _read_full_config()
         config["gemini_api_key"] = key
         config["os_system"] = os_name
-        API_FILE.write_text(json.dumps(config, indent=4), encoding="utf-8")
+        from memory.config_manager import write_api_config
+        write_api_config(config)
         from core.provider_settings import save_provider_settings
         provider = str(setup.get("provider", "gemini"))
         provider_key = str(setup.get("external_api_key", ""))

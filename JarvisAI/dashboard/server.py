@@ -106,214 +106,14 @@ _CRYPTOJS_FILE = STATIC_DIR / "crypto-js.min.js"
 
 
 def _ensure_network_access(port: int) -> None:
-    """Firewall changes are intentionally disabled.
+    """Intentionally a no-op.
 
-    JARVIS must not silently open inbound ports or change a Windows network
-    profile. Use a private VPN reverse proxy for remote access instead.
+    JARVIS must not silently open inbound ports or change a firewall profile.
+    Use a private VPN reverse proxy (for example Tailscale Serve) for remote
+    access. The old firewall-editing code was removed rather than left behind an
+    early return, so it cannot be re-enabled by accident.
     """
     return
-
-    # Legacy code below is unreachable and retained only to keep this patch
-    # small. Do not remove the return or call this helper from server startup.
-    import sys, subprocess, os, tempfile, threading
-
-    # ── Windows ──────────────────────────────────────────────────────────────
-    if sys.platform == "win32":
-        import ctypes, time
-
-        port_rule = f"JARVIS Dashboard Port {port}"
-        prog_rule  = "JARVIS Dashboard Python"
-        py_exe     = sys.executable
-
-        def _netsh_rule_exists(name: str) -> bool:
-            try:
-                r = subprocess.run(
-                    ["netsh", "advfirewall", "firewall", "show", "rule", f"name={name}"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                return r.returncode == 0 and "No rules match" not in r.stdout
-            except Exception:
-                return False
-
-        def _network_is_public() -> bool:
-            try:
-                r = subprocess.run(
-                    ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                     "(Get-NetConnectionProfile | "
-                     "Where-Object {$_.NetworkCategory -eq 'Public'} | "
-                     "Measure-Object).Count"],
-                    capture_output=True, text=True, timeout=6,
-                )
-                return r.stdout.strip() not in ("", "0")
-            except Exception:
-                return False
-
-        need_port    = not _netsh_rule_exists(port_rule)
-        need_prog    = not _netsh_rule_exists(prog_rule)
-        need_private = _network_is_public()
-
-        if not need_port and not need_prog and not need_private:
-            return  # already fully configured
-
-        # Build a .bat file — netsh + powershell, runs fast when elevated
-        bat_lines = ["@echo off"]
-        if need_private:
-            bat_lines.append(
-                'powershell -NoProfile -NonInteractive -Command "'
-                'Get-NetConnectionProfile | '
-                "Where-Object {$_.NetworkCategory -eq 'Public'} | "
-                'Set-NetConnectionProfile -NetworkCategory Private"'
-            )
-        if need_port:
-            bat_lines.append(
-                f'netsh advfirewall firewall add rule '
-                f'name="{port_rule}" protocol=TCP dir=in '
-                f'localport={port} action=allow'
-            )
-        if need_prog:
-            bat_lines.append(
-                f'netsh advfirewall firewall add rule '
-                f'name="{prog_rule}" dir=in action=allow '
-                f'program="{py_exe}" enable=yes'
-            )
-
-        bat_body = "\r\n".join(bat_lines) + "\r\n"
-        fd, bat_path = tempfile.mkstemp(suffix=".bat", prefix="jarvis_fw_")
-        try:
-            os.write(fd, bat_body.encode("mbcs"))   # Windows cmd.exe expects ANSI
-            os.close(fd)
-        except Exception:
-            try:
-                os.close(fd)
-            except Exception:
-                pass
-            return
-
-        # ── Try running directly (succeeds when already admin) ────────────────
-        try:
-            r = subprocess.run(
-                [bat_path], capture_output=True, timeout=8, shell=True
-            )
-            if r.returncode == 0:
-                print(f"[Dashboard] Firewall configured for port {port}.")
-                try:
-                    os.unlink(bat_path)
-                except Exception:
-                    pass
-                return
-        except Exception:
-            pass
-
-        # ── ShellExecuteW: native UAC elevation (most reliable on Windows) ────
-        # ShellExecuteW with verb "runas" always shows the UAC dialog regardless
-        # of UAC level settings. Non-blocking — uvicorn is already running.
-        print("[Dashboard] One-time network setup required.")
-        print("[Dashboard] >>> A Windows security dialog will appear — click 'Yes' <<<")
-        try:
-            ret = ctypes.windll.shell32.ShellExecuteW(
-                None,       # hwnd  (no parent window)
-                "runas",    # verb  (request elevation)
-                bat_path,   # file  (our .bat)
-                None,       # params
-                None,       # working dir
-                0,          # SW_HIDE (run without a visible cmd window)
-            )
-            if int(ret) > 32:
-                # ShellExecuteW returns immediately; bat finishes in ~1 second.
-                # Sleep briefly so the rules are in place before the first retry.
-                time.sleep(2)
-                print(f"[Dashboard] Network setup complete — port {port} is open.")
-                print("[Dashboard] Refresh your phone browser to connect.")
-            else:
-                print("[Dashboard] Setup was not allowed.")
-                print("[Dashboard] Phone connections may fail until JARVIS is run as Administrator.")
-        except Exception as e:
-            print(f"[Dashboard] Firewall setup error: {e}")
-        finally:
-            # Cleanup after the bat has had time to run
-            def _cleanup(path: str) -> None:
-                time.sleep(5)
-                try:
-                    os.unlink(path)
-                except Exception:
-                    pass
-            threading.Thread(target=_cleanup, args=(bat_path,), daemon=True).start()
-        return
-
-    # ── macOS ─────────────────────────────────────────────────────────────────
-    if sys.platform == "darwin":
-        fw_ctl = "/usr/libexec/ApplicationFirewall/socketfilterfw"
-        try:
-            r = subprocess.run(
-                [fw_ctl, "--getglobalstate"], capture_output=True, text=True, timeout=5,
-            )
-            if "disabled" in r.stdout.lower():
-                return  # firewall off — nothing to do
-
-            py = sys.executable
-            listed = subprocess.run(
-                [fw_ctl, "--listapps"], capture_output=True, text=True, timeout=5,
-            )
-            if py in listed.stdout:
-                return  # already allowed
-
-            print("[Dashboard] One-time network setup — enter your password in the macOS dialog.")
-            subprocess.run(
-                ["osascript", "-e",
-                 f'do shell script "{fw_ctl} --add {py} && {fw_ctl} --unblockapp {py}"'
-                 f' with administrator privileges'],
-                timeout=60,
-            )
-        except Exception:
-            pass  # macOS firewall is off by default — silent failure is fine
-        return
-
-    # ── Linux ─────────────────────────────────────────────────────────────────
-    def _privileged(cmd: list[str]) -> bool:
-        for prefix in (["pkexec"], ["sudo", "-n"]):
-            try:
-                r = subprocess.run(prefix + cmd, capture_output=True, timeout=30)
-                if r.returncode == 0:
-                    return True
-            except Exception:
-                pass
-        return False
-
-    try:  # ufw
-        r = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=5)
-        if "active" in r.stdout.lower():
-            if _privileged(["ufw", "allow", f"{port}/tcp"]):
-                print(f"[Dashboard] ufw: port {port} allowed.")
-            else:
-                print(f"[Dashboard] Run manually:  sudo ufw allow {port}/tcp")
-            return
-    except FileNotFoundError:
-        pass
-
-    try:  # firewalld
-        r = subprocess.run(
-            ["firewall-cmd", "--state"], capture_output=True, text=True, timeout=5,
-        )
-        if "running" in r.stdout.lower():
-            ok = (_privileged(["firewall-cmd", "--add-port", f"{port}/tcp", "--permanent"])
-                  and _privileged(["firewall-cmd", "--reload"]))
-            if ok:
-                print(f"[Dashboard] firewalld: port {port} allowed.")
-            else:
-                print(f"[Dashboard] Run manually:  sudo firewall-cmd --add-port={port}/tcp --permanent && sudo firewall-cmd --reload")
-            return
-    except FileNotFoundError:
-        pass
-
-    try:  # iptables (not persistent but works until reboot)
-        r = subprocess.run(["iptables", "-L", "INPUT", "-n"], capture_output=True, timeout=5)
-        if r.returncode == 0:
-            if _privileged(["iptables", "-A", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]):
-                print(f"[Dashboard] iptables: port {port} opened.")
-            else:
-                print(f"[Dashboard] Run manually:  sudo iptables -A INPUT -p tcp --dport {port} -j ACCEPT")
-    except FileNotFoundError:
-        pass  # no iptables means firewall is probably off — nothing to do
 
 
 def _ensure_crypto_js() -> None:
@@ -489,6 +289,7 @@ class DashboardServer:
             os.environ.get("JARVIS_REMOTE_URL", "")
         )
         self._tokens: set[str]            = set()
+        self._token_issued: dict[str, float] = {}  # auth_token → issue time (for expiry)
         self._token_keys: dict[str, str]  = {}   # auth_token → session_key
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
         self._clients: set[WebSocket]     = set()
@@ -527,6 +328,53 @@ class DashboardServer:
             return ""
         return value
 
+    # Session lifetimes. Bearer tokens used to live until the process exited,
+    # and "revoke" left every already-issued token valid.
+    _TOKEN_TTL_SECONDS = 12 * 3600
+    _DEVICE_TTL_SECONDS = 30 * 24 * 3600
+
+    def _token_valid(self, tok: str) -> bool:
+        """True only for an issued, unexpired, unrevoked bearer token."""
+        if not tok or tok not in self._tokens:
+            return False
+        issued = self._token_issued.get(tok)
+        if issued is None or time.time() - issued > self._TOKEN_TTL_SECONDS:
+            self._drop_token(tok)
+            return False
+        return True
+
+    def _drop_token(self, tok: str) -> None:
+        self._tokens.discard(tok)
+        self._token_issued.pop(tok, None)
+        self._token_keys.pop(tok, None)
+
+    def _remember_token(self, tok: str, session_key: str) -> None:
+        self._tokens.add(tok)
+        self._token_issued[tok] = time.time()
+        self._token_keys[tok] = session_key
+        self._aes_key(session_key)
+        # Opportunistic cleanup so abandoned sessions do not accumulate.
+        now = time.time()
+        for old, issued in list(self._token_issued.items()):
+            if now - issued > self._TOKEN_TTL_SECONDS:
+                self._drop_token(old)
+
+    def revoke_all_sessions(self) -> tuple[int, int]:
+        """End every paired device AND every live bearer token.
+
+        Returns (device_tokens_revoked, live_sessions_ended). Callable from the
+        desktop UI (for example if a paired phone is lost) as well as the API.
+        """
+        devices = len(self._device_sessions)
+        live = len(self._tokens)
+        self._device_sessions.clear()
+        self._tokens.clear()
+        self._token_issued.clear()
+        self._token_keys.clear()
+        self._aes_cache.clear()
+        self._pending_keys.clear()
+        return devices, live
+
     def new_key(self, expiry_secs: int = 600) -> str:
         now = time.time()
         self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
@@ -536,11 +384,14 @@ class DashboardServer:
     
     def _rate_limited(self, ip: str, window: float = 60.0, max_attempts: int = 5) -> bool:
         now = time.time()
+        # Drop sources with no recent attempts so the table cannot grow without bound.
+        for stale in [k for k, v in self._login_attempts.items()
+                      if not v or now - v[-1] >= window]:
+            del self._login_attempts[stale]
         hist = [t for t in self._login_attempts.get(ip, []) if now - t < window]
         hist.append(now)
         self._login_attempts[ip] = hist
         return len(hist) > max_attempts
-    """added security layer to prevent prompt injection attacks."""
 
 
     @staticmethod
@@ -622,7 +473,7 @@ class DashboardServer:
 
         def _auth(req: Request) -> bool:
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
-            return bool(tok) and tok in self._tokens
+            return self._token_valid(tok)
 
         # serve CryptoJS from local cache, fallback to CDN redirect
         @app.get("/static/crypto.js")
@@ -662,9 +513,7 @@ class DashboardServer:
             if entered in self._pending_keys and self._pending_keys[entered] > now:
                 del self._pending_keys[entered]          # one-time use
                 tok = secrets.token_urlsafe(32)
-                self._tokens.add(tok)
-                self._token_keys[tok] = entered
-                self._aes_key(entered)                   # pre-derive & cache
+                self._remember_token(tok, entered)
                 security.audit("dashboard_login", "login", "SENSITIVE", "ran", f"ip={client_ip}")
                 if self._connect_callback:
                     self._connect_callback()
@@ -715,10 +564,8 @@ class DashboardServer:
             del self._pending_keys[key]
             tok     = secrets.token_urlsafe(32)
             dev_tok = secrets.token_urlsafe(32)
-            self._tokens.add(tok)
-            self._token_keys[tok] = key
-            self._aes_key(key)
-            self._device_sessions[dev_tok] = {"session_key": key}
+            self._remember_token(tok, key)
+            self._device_sessions[dev_tok] = {"session_key": key, "issued": time.time()}
             security.audit("dashboard_login", "auto_login", "SENSITIVE", "ran",
                            f"QR pairing: {client_ip}")
 
@@ -755,11 +602,13 @@ class DashboardServer:
             dev_tok = (body.get("device_token") or "").strip()
             if not dev_tok or dev_tok not in self._device_sessions:
                 return JSONResponse({"ok": False}, status_code=401)
-            session_key = self._device_sessions[dev_tok]["session_key"]
+            device = self._device_sessions[dev_tok]
+            if time.time() - float(device.get("issued", 0)) > self._DEVICE_TTL_SECONDS:
+                self._device_sessions.pop(dev_tok, None)
+                return JSONResponse({"ok": False}, status_code=401)
+            session_key = device["session_key"]
             tok = secrets.token_urlsafe(32)
-            self._tokens.add(tok)
-            self._token_keys[tok] = session_key
-            self._aes_key(session_key)
+            self._remember_token(tok, session_key)
             if self._connect_callback:
                 self._connect_callback()
             asyncio.create_task(self.broadcast(
@@ -788,9 +637,18 @@ class DashboardServer:
             """Invalidate all persistent device tokens (admin action)."""
             if not _auth(req):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
-            count = len(self._device_sessions)
-            self._device_sessions.clear()
-            return JSONResponse({"ok": True, "revoked": count})
+            count, live = self.revoke_all_sessions()
+            for ws in list(self._clients) + ([self._phone_audio_ws] if self._phone_audio_ws else []):
+                try:
+                    await ws.close(code=4003)
+                except Exception:
+                    pass
+            self._clients.clear()
+            self._phone_audio_ws = None
+            from core import security
+            security.audit("dashboard_login", "revoke_devices", "SENSITIVE", "ran",
+                           f"devices={count} sessions={live}")
+            return JSONResponse({"ok": True, "revoked": count, "sessions_ended": live})
 
         @app.post("/api/command")
         async def command(req: Request):
@@ -824,7 +682,7 @@ class DashboardServer:
         @app.websocket("/ws/phone-audio")
         async def phone_audio_ws(websocket: WebSocket, token: str = ""):
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not self._token_valid(tok):
                 await websocket.close(code=4001)
                 return
             await websocket.accept()
@@ -869,6 +727,14 @@ class DashboardServer:
                 if not _auth(req):
                     return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
+                # A paired device must not be able to fill the disk.
+                try:
+                    existing = [f for f in self._uploads_dir.iterdir() if f.is_file()]
+                    if (len(existing) >= 500
+                            or sum(f.stat().st_size for f in existing) > 2 * 1024 ** 3):
+                        return JSONResponse({"error": "Upload folder is full"}, status_code=507)
+                except OSError:
+                    pass
                 safe = _safe_filename(file.filename or "upload")
                 dest = self._uploads_dir / safe
                 stem, suffix = Path(safe).stem, Path(safe).suffix
@@ -936,18 +802,21 @@ class DashboardServer:
         async def download_file(filename: str, token: str = ""):
             # Auth via query param — browser <a download> can't send custom headers
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not self._token_valid(tok):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
-            safe = re.sub(r'[/\\]', '', filename)
-            path = self._uploads_dir / safe
-            if not path.exists() or not path.is_file():
+            safe = _safe_filename(filename)
+            base = self._uploads_dir.resolve()
+            path = (base / safe).resolve()
+            # pathlib joins "C:name" onto the *current directory of drive C*, not
+            # onto uploads/, so confirm the result is a direct child of uploads/.
+            if path.parent != base or not path.exists() or not path.is_file():
                 return JSONResponse({"error": "Not found"}, status_code=404)
             return FileResponse(str(path), filename=safe)
 
         @app.websocket("/ws")
         async def ws_ep(websocket: WebSocket, token: str = ""):
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not self._token_valid(tok):
                 await websocket.close(code=4001)
                 return
             await websocket.accept()

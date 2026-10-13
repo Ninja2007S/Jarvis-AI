@@ -242,10 +242,20 @@ def _confirmation_label(name: str) -> str:
     )
 
 
+def _clip(text: str, limit: int) -> str:
+    """Truncate for the confirmation panel, but say so.
+
+    A silently cut-off command or path lets the user approve text they never saw.
+    """
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + f" … [+{len(text) - limit} more characters not shown]"
+
+
 def _confirmation_detail(params: dict) -> str:
     """Render action parameters in readable form while retaining the values."""
     if not isinstance(params, dict):
-        return str(params)[:300]
+        return _clip(str(params), 300)
     if params.get("action") in {
         "inbox", "read_messages", "send_message", "reply", "publish_now",
         "schedule_post", "list_scheduled", "cancel_scheduled",
@@ -263,7 +273,7 @@ def _confirmation_detail(params: dict) -> str:
                 key, key.replace("_", " ").capitalize()
             )
             parts.append(f"{label}: {value}")
-        return "  ·  ".join(parts)[:4500]
+        return _clip("  ·  ".join(parts), 4500)
     items = []
     for key, value in params.items():
         if str(key).startswith("_jarvis_"):
@@ -278,7 +288,7 @@ def _confirmation_detail(params: dict) -> str:
         else:
             rendered = json.dumps(value, ensure_ascii=False, default=str)
         items.append(f"{label}: {rendered}")
-    return "  ·  ".join(items)[:300]
+    return _clip("  ·  ".join(items), 300)
 
 # How many DANGEROUS-tier calls are allowed in the trailing window before
 # security.guard() refuses outright (independent of confirm.py — this is
@@ -292,6 +302,19 @@ _SENSITIVE_MAX_CALLS  = 12
 _recent_dangerous: deque[float] = deque()
 _recent_sensitive: deque[float] = deque()
 _rate_lock = threading.Lock()
+
+# SAFE tools are read-only, but some of them spend model quota or network
+# requests on every call (a web search with grounding, a Pro-model reasoning
+# pass). With no limit, a runaway tool-call loop - or injected text asking for
+# "search for X" repeatedly - burns the free-tier quota without ever touching a
+# DANGEROUS/SENSITIVE limiter. (max calls, window seconds) per tool.
+_COSTLY_SAFE_LIMITS: dict[str, tuple[int, int]] = {
+    "web_search":     (12, 60),
+    "deep_reasoning": (4, 60),
+    "flight_finder":  (6, 60),
+    "weather_report": (12, 60),
+}
+_recent_costly: dict[str, deque[float]] = {}
 
 # Provenance: was the content that led to this turn something Jarvis fetched
 # from outside (a web page, an email body, OCR off a screenshot) rather than
@@ -630,9 +653,19 @@ def verify_log() -> tuple[bool, str]:
 
 
 # ── rate limiting ────────────────────────────────────────────────────────────
-def _rate_check(tier: str, *, consume: bool = True) -> Optional[str]:
+def _rate_check(tier: str, *, consume: bool = True, name: str = "") -> Optional[str]:
     now = time.monotonic()
     with _rate_lock:
+        if name in _COSTLY_SAFE_LIMITS:
+            max_calls, window = _COSTLY_SAFE_LIMITS[name]
+            recent = _recent_costly.setdefault(name, deque())
+            while recent and now - recent[0] > window:
+                recent.popleft()
+            if len(recent) >= max_calls:
+                return (f"'{name}' is being called too often ({max_calls} per "
+                        f"{window} seconds). Pausing to protect the API quota.")
+            if consume:
+                recent.append(now)
         if tier == TIER_DANGEROUS:
             while _recent_dangerous and now - _recent_dangerous[0] > _DANGEROUS_WINDOW_SEC:
                 _recent_dangerous.popleft()
@@ -710,7 +743,7 @@ def guard(name: str, params: dict, run: Callable[[], str]) -> str:
     # 2) rate limit — independent of confirmation, catches loops.
     # Preflight without charging the quota. A pending or rejected confirmation
     # must not consume a real-action slot.
-    limited = _rate_check(tier, consume=False)
+    limited = _rate_check(tier, consume=False, name=name)
     if limited:
         audit("rate_limited", name, tier, "denied", limited)
         _log(f"RATE-LIMITED '{name}'")
@@ -731,7 +764,7 @@ def guard(name: str, params: dict, run: Callable[[], str]) -> str:
 
 
 def _run_and_audit(name: str, tier: str, run: Callable[[], str]) -> str:
-    limited = _rate_check(tier, consume=True)
+    limited = _rate_check(tier, consume=True, name=name)
     if limited:
         audit("rate_limited", name, tier, "denied", limited)
         _log(f"RATE-LIMITED '{name}'")

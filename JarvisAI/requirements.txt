@@ -102,3 +102,6 @@ pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
 # Install for incoming-call handling:  pip install twilio
 # Requires a Twilio account and a phone number. See config/api_keys.json.
 twilio
+# audioop was removed from the standard library in Python 3.13; the phone handler
+# needs it for G.711 mu-law conversion and resampling.
+audioop-lts; python_version >= "3.13"

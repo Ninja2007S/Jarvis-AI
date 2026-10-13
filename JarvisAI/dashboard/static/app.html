@@ -162,9 +162,19 @@
     }
 
     function _authHeader() { return { 'Authorization': `Bearer ${_authToken}` }; }
+    // Sessions now expire server-side (and "revoke devices" ends live ones).
+    // On a 401, drop the stale token and go to /login, which silently re-signs
+    // in with the stored device token when that is still valid.
+    function _sessionExpired() {
+      sessionStorage.removeItem('jarvis_token');
+      location.replace('/login');
+    }
     function _authFetch(url, opts = {}) {
       opts.headers = Object.assign({}, opts.headers, _authHeader());
-      return fetch(url, opts);
+      return fetch(url, opts).then(r => {
+        if (r.status === 401) _sessionExpired();
+        return r;
+      });
     }
 
     // ── AES-256-CBC encryption (CryptoJS) ────────────────────────────────────
@@ -211,7 +221,12 @@
     const ws       = new WebSocket(_wsUrl);
 
     ws.onopen    = () => { sys('Remote session active.'); toast('Connected to JARVIS'); };
-    ws.onclose   = () => sys('Connection lost — refresh to reconnect.');
+    ws.onclose   = () => {
+      sys('Connection lost — refresh to reconnect.');
+      // A rejected handshake looks like any other drop; probe once so an expired
+      // session redirects to /login instead of staying stuck.
+      _authFetch('/api/handoff/status').catch(() => {});
+    };
     ws.onerror   = () => sys('Connection error.');
     ws.onmessage = (e) => {
       const m = JSON.parse(e.data);

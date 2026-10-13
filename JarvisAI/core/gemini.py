@@ -38,6 +38,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -113,13 +114,20 @@ _request_lock = threading.Lock()
 
 
 def _wait_for_request_slot(model: str) -> None:
-    """Apply a conservative per-model request gap for free-tier traffic."""
+    """Apply a conservative per-model request gap for free-tier traffic.
+
+    The slot is *reserved* under the lock and the sleep happens outside it.
+    Sleeping while holding the lock made a call to one model block calls to every
+    other model for up to the whole gap, and several waiters on one model each
+    slept the full gap from the same stale timestamp.
+    """
     with _request_lock:
         now = time.monotonic()
-        delay = _request_times.get(model, 0.0) + _REQUEST_GAP_SECONDS - now
-        if delay > 0:
-            time.sleep(delay)
-        _request_times[model] = time.monotonic()
+        slot = max(now, _request_times.get(model, 0.0) + _REQUEST_GAP_SECONDS)
+        _request_times[model] = slot
+        delay = slot - now
+    if delay > 0:
+        time.sleep(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +609,28 @@ _cooldown: dict[str, float] = {}
 _cool_lock = threading.Lock()
 
 
+_RETRY_HINT_RE = re.compile(
+    r"retry(?:\s+in|Delay['\"]?\s*[:=]\s*['\"]?)\s*([0-9]+(?:\.[0-9]+)?)\s*s", re.I
+)
+_HTTP_429_RE = re.compile(r"(?<![0-9A-Za-z])429(?![0-9A-Za-z])")
+
+
+def _retry_after_seconds(message: str, default: int = _COOLDOWN_SECONDS) -> int:
+    """Cooldown length for a 429: the server's own hint if it gave one.
+
+    Per-minute limits usually clear in well under a minute, so a flat 5-minute
+    cooldown needlessly takes a working model out of rotation. The hint is clamped
+    so a bad value can neither disable the cooldown nor park a model for hours.
+    """
+    match = _RETRY_HINT_RE.search(message or "")
+    if match:
+        try:
+            return max(5, min(int(float(match.group(1))) + 2, 900))
+        except ValueError:
+            pass
+    return default
+
+
 def _cool(model: str, seconds: int = _COOLDOWN_SECONDS) -> None:
     with _cool_lock:
         _cooldown[model] = (
@@ -824,13 +854,13 @@ def call(
             except (TypeError, ValueError):
                 status = None
             upper_message = message.upper()
-            if status == 429 or "429" in upper_message or "RESOURCE_EXHAUSTED" in upper_message:
-                _cool(model, _COOLDOWN_SECONDS)
+            if status == 429 or _HTTP_429_RE.search(message) or "RESOURCE_EXHAUSTED" in upper_message:
+                cooldown = _retry_after_seconds(message)
+                _cool(model, cooldown)
 
                 print(
                     f"[Gemini] {model}: out of quota — "
-                    f"skipping it for "
-                    f"{_COOLDOWN_SECONDS // 60} minutes"
+                    f"skipping it for {cooldown}s"
                 )
 
             elif (status is not None and 500 <= status <= 599) or any(

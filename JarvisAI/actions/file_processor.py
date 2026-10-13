@@ -802,6 +802,11 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
         return "No file path provided."
 
     path = Path(file_path_str)
+    try:
+        from core import path_guard as _path_guard
+        _path_guard.check(path, write=False)
+    except PermissionError as e:
+        return str(e)
     if not path.exists():
         return f"File not found: {file_path_str}"
     if not path.is_file():

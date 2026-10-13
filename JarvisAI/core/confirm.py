@@ -47,8 +47,11 @@ class _Pending:
 _pending: Optional[_Pending] = None
 _lock = threading.Lock()
 _MANUAL_CLICK_ONLY_KEYS = {
-    "sec-phone_call", "sec-computer_control", "sec-code_helper",
+    "sec-dev_agent", "sec-memory_export", "sec-memory_import",
 }
+# Keep these three operations click-only even if an unrelated environment
+# setting changes. Other confirmation-gated actions can use the exact spoken
+# approval phrase (and still pass Voice ID when it is enabled).
 
 # Set once at startup by main.py. Signature: (title, detail) -> None for show,
 # and () -> None for hide. Both are marshalled onto the Qt thread by the UI.
@@ -106,10 +109,19 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
         return f"Could not ask for confirmation: {e}. Nothing was done."
 
     _log(f"SYS: Awaiting confirmation — {title}")
+    if key in _MANUAL_CLICK_ONLY_KEYS:
+        guidance = (
+            "This request requires the user to click CONFIRM on the HUD; spoken "
+            "approval is disabled for it. They can click CANCEL instead."
+        )
+    else:
+        guidance = (
+            "The user can say 'confirm action' or click CONFIRM on the HUD; "
+            "they can say 'cancel action' or click CANCEL instead."
+        )
     return (
         f"[CONFIRMATION_PENDING] I have put a confirmation on screen for: {title}. "
-        f"Tell the user they can say 'confirm action' or click CONFIRM on the HUD; "
-        f"they can say 'cancel action' or click CANCEL instead. Do not claim it is done."
+        f"{guidance} Do not claim it is done."
     )
 
 

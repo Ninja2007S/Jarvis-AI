@@ -70,6 +70,11 @@ def _read_file(file_path: str) -> tuple[str, str]:
     if not file_path:
         return "", "No file path provided."
     p = Path(file_path)
+    try:
+        from core import path_guard as _path_guard
+        _path_guard.check(p, write=False)
+    except PermissionError as e:
+        return "", str(e)
     if not p.exists():
         return "", f"File not found: {file_path}"
     try:
@@ -79,6 +84,11 @@ def _read_file(file_path: str) -> tuple[str, str]:
 
 
 def _save_file(path: Path, content: str) -> str:
+    try:
+        from core import path_guard as _path_guard
+        _path_guard.check(path, write=True)
+    except PermissionError as e:
+        return f"Could not save: {e}"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -187,7 +197,11 @@ Code:"""
     response = model.generate_content(prompt)
     code     = _clean_code(response.text)
     path     = _resolve_save_path(output_path, lang)
-    _save_file(path, code)
+    status   = _save_file(path, code)
+    if status.startswith("Could not save"):
+        # Previously this was ignored, so a blocked or failed save was still
+        # reported to the user as "Saved to: ...".
+        raise PermissionError(status)
     return code, path
 
 

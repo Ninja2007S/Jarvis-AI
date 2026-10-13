@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import json
@@ -16,6 +17,44 @@ BASE_DIR         = get_base_dir()
 API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
 PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
 MAX_FIX_ATTEMPTS = 5
+
+# ── hardening helpers ────────────────────────────────────────────────────────
+# Dependency names and the run command come from an LLM-written plan (and from
+# error text produced by LLM-written code), so they are untrusted input.
+_REQ_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}"                 # project name, never starts with '-'
+    r"(\[[A-Za-z0-9,._-]{1,64}\])?"                     # optional extras
+    r"(\s*(==|>=|<=|~=|!=|>|<)\s*[A-Za-z0-9.*+!_-]{1,32}(\s*,\s*(==|>=|<=|~=|!=|>|<)\s*[A-Za-z0-9.*+!_-]{1,32})*)?$"
+)
+_MAX_DEPENDENCIES = 15
+_ALLOWED_RUNNERS = re.compile(
+    r"^(python[0-9.]*|py|pytest|node|npm|npx|deno|go|cargo|ruby|php|dotnet)(\.exe|\.cmd)?$",
+    re.IGNORECASE,
+)
+_SECRET_ENV = re.compile(
+    r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|SID)", re.IGNORECASE
+)
+
+
+def _valid_requirement(req: str) -> bool:
+    """A plain PyPI requirement, never a pip option, URL, path or VCS reference.
+
+    Without this, a "dependency" such as "--index-url=http://evil/" or
+    "git+https://..." would be handed straight to `pip install`.
+    """
+    return isinstance(req, str) and bool(_REQ_RE.match(req.strip()))
+
+
+def _auto_install_enabled() -> bool:
+    return os.environ.get("JARVIS_DEV_AGENT_AUTO_INSTALL", "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+def _clean_env() -> dict:
+    """Child environment without anything that looks like a credential, so
+    generated code cannot read GEMINI_API_KEY / TWILIO_AUTH_TOKEN / etc."""
+    return {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from core import gemini
 
@@ -227,7 +266,11 @@ Code for {file_path}:"""
         response = model.generate_content(prompt)
         code = _strip_fences(response.text)
 
-        full_path = project_dir / file_path
+        # file_path comes from an LLM-written plan, so it is untrusted: an
+        # absolute path or "../" would otherwise write outside the project.
+        from core import path_guard as _path_guard
+        full_path = _path_guard.safe_join(project_dir, file_path)
+        _path_guard.check(full_path, write=True)
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -242,6 +285,17 @@ Code for {file_path}:"""
 def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
     if not dependencies:
         return "No external dependencies."
+
+    cleaned = [str(d).strip() for d in dependencies][:_MAX_DEPENDENCIES]
+    rejected = [d for d in cleaned if not _valid_requirement(d)]
+    dependencies = [d for d in cleaned if _valid_requirement(d)]
+    if rejected:
+        print(f"[DevAgent] ⚠️ Ignored unsafe dependency entries: {rejected}")
+    if not dependencies:
+        return "No valid external dependencies (unsafe entries ignored)."
+    if not _auto_install_enabled():
+        return ("Automatic installs are disabled. Install these yourself if you "
+                f"trust them: {', '.join(dependencies)}")
 
     to_install = []
     for dep in dependencies:
@@ -261,10 +315,10 @@ def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
     print(f"[DevAgent] 📦 Installing: {to_install}")
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install"] + to_install,
+            [sys.executable, "-m", "pip", "install", "--no-input"] + to_install,
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
-            timeout=120, cwd=str(project_dir)
+            timeout=120, cwd=str(project_dir), env=_clean_env()
         )
         if result.returncode == 0:
             return f"Installed: {', '.join(to_install)}"
@@ -299,6 +353,13 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
     print(f"[DevAgent] 🚀 Running: {run_command}")
     try:
         parts = run_command.split()
+        if not parts:
+            return "No run command was provided."
+        # The command is LLM-written. Allow language runtimes only: a plan must
+        # not be able to launch powershell, curl, rm, etc. directly.
+        if not _ALLOWED_RUNNERS.match(Path(parts[0]).name):
+            return (f"Refused to run '{parts[0]}': only language runtimes "
+                    "(python, node, npm, go, cargo, ...) can be started automatically.")
         if parts[0].lower() == "python":
             parts[0] = sys.executable
 
@@ -307,7 +368,8 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=timeout,
-            cwd=str(project_dir)
+            cwd=str(project_dir),
+            env=_clean_env(),
         )
 
         stdout = result.stdout.strip()
@@ -338,13 +400,16 @@ def _try_auto_install(error_output: str, project_dir: Path) -> bool:
         return False
 
     pkg = match.group(1).replace("_", "-").split(".")[0]
+    if not _auto_install_enabled() or not _valid_requirement(pkg):
+        print(f"[DevAgent] Not auto-installing '{pkg}'.")
+        return False
     print(f"[DevAgent] 🔧 Auto-installing missing package: {pkg}")
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", pkg],
+            [sys.executable, "-m", "pip", "install", "--no-input", pkg],
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
-            timeout=60, cwd=str(project_dir)
+            timeout=60, cwd=str(project_dir), env=_clean_env()
         )
         return result.returncode == 0
     except Exception:
@@ -425,7 +490,9 @@ Fixed code for {fix_path}:"""
             response = model.generate_content(prompt)
             fixed = _strip_fences(response.text)
 
-            full_path = project_dir / fix_path
+            from core import path_guard as _path_guard
+            full_path = _path_guard.safe_join(project_dir, fix_path)
+            _path_guard.check(full_path, write=True)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 

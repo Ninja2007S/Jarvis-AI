@@ -95,7 +95,17 @@ _SAFE_ROOTS: list[Path] = [
 ]
 
 def _is_safe_path(target: Path) -> bool:
-    """Is the given path inside _SAFE_ROOTS? If not, reject the operation."""
+    """Is the given path inside _SAFE_ROOTS and not a protected location?
+
+    Protected locations (credentials, Jarvis's own install folder, shell and OS
+    start-up files) are refused for every operation: a steered model must not
+    be able to read secrets or drop code that runs on the next launch."""
+    try:
+        from core import path_guard
+        if path_guard.protected_reason(target, write=True):
+            return False
+    except Exception:
+        return False  # fail closed if the guard itself cannot evaluate the path
     try:
         resolved = target.resolve()
         return any(

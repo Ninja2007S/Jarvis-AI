@@ -36,8 +36,9 @@
   stream additionally requires an expiring, one-use token issued only after a
   signed call webhook. A public tunnel must target port 8001 only. The isolated
   phone Gemini Live session has `tools=[]`, and cannot invoke Jarvis's local
-  confirmation handler. Phone calls, broad computer-control operations, and
-  generated-code execution require the HUD click; voice cannot approve them.
+  confirmation handler. Dev Agent and memory export/import require a manual HUD
+  click. Other confirmation-gated actions can use the exact spoken approval
+  phrase, with Voice ID checked when enabled and supported.
 - The supplied shared TLS certificate is identified and rotated on startup.
   The dashboard no longer opens firewall rules or binds to all network
   interfaces. It listens on loopback; remote access requires an explicit
@@ -64,11 +65,10 @@ with restricted files and networking for stronger containment.
 ## Voice ID and confirmation
 
 Voice ID uses Windows DPAPI and is disabled on macOS/Linux. Even with Voice ID
-enabled, speech verification is only used where available. Phone-call and broad
-computer-control dangerous actions require a manual HUD confirmation click, so
-their approval does not depend on the platform's voice-identification support.
-Other actions that allow spoken confirmation are not speaker-verified on
-platforms where Voice ID is unavailable.
+enabled, speech verification is only used where available. Dev Agent and memory
+export/import require a manual HUD confirmation click. Other actions that allow
+spoken confirmation are not speaker-verified on platforms where Voice ID is
+unavailable.
 
 ## Before sharing or rebuilding the package
 

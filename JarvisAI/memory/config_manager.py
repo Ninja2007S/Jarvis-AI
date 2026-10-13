@@ -14,6 +14,58 @@ BASE_DIR    = get_base_dir()
 CONFIG_DIR  = BASE_DIR / "config"
 CONFIG_FILE = CONFIG_DIR / "api_keys.json"
 _MEMORY_CONFIG_LOCK = threading.Lock()
+_CONFIG_IO_LOCK = threading.RLock()
+
+
+def _write_config(data: dict, indent: int = 4) -> None:
+    """Write api_keys.json atomically with owner-only permissions.
+
+    The file holds every credential (Gemini, Twilio, Instagram, ...). It used to
+    be rewritten in place by a dozen setters with plain write_text(): a crash or a
+    concurrent read mid-write left truncated JSON, and every setter's
+    "except: data = {}" fallback then saved that empty dict back over the file,
+    wiping all stored keys. Writes now go through a temp file + os.replace, and an
+    unreadable existing file is preserved as a .corrupt backup before replacement.
+    """
+    with _CONFIG_IO_LOCK:
+        ensure_config_dir()
+        if CONFIG_FILE.exists():
+            try:
+                json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                try:
+                    backup = CONFIG_FILE.with_name(
+                        f"{CONFIG_FILE.name}.corrupt-{int(__import__('time').time())}"
+                    )
+                    os.replace(CONFIG_FILE, backup)
+                    try:
+                        os.chmod(backup, 0o600)
+                    except OSError:
+                        pass
+                except OSError:
+                    pass
+        temp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
+        fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(json.dumps(data, indent=indent))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, CONFIG_FILE)
+            try:
+                os.chmod(CONFIG_FILE, 0o600)
+            except OSError:
+                pass
+        finally:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+def write_api_config(data: dict, indent: int = 4) -> None:
+    """Public entry point for atomic, owner-only writes of config/api_keys.json."""
+    _write_config(data, indent)
+
 
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -33,10 +85,7 @@ def save_api_keys(gemini_api_key: str) -> None:
 
     data["gemini_api_key"] = gemini_api_key.strip()
 
-    CONFIG_FILE.write_text(
-        json.dumps(data, indent=2),
-        encoding="utf-8"
-    )
+    _write_config(data, indent=2)
 
 def load_api_keys() -> dict:
     if not CONFIG_FILE.exists():
@@ -81,7 +130,7 @@ def save_assistant_config(assistant_name: str, user_name: str) -> None:
             data = {}
     data["assistant_name"] = assistant_name.strip() or "JARVIS"
     data["user_name"] = user_name.strip()
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 # ── Assistant voice ──────────────────────────────────────────────────────────
@@ -110,7 +159,7 @@ def save_voice(voice_name: str) -> None:
             data = {}
     v = (voice_name or "").strip()
     data["voice_name"] = v if v in AVAILABLE_VOICES else DEFAULT_VOICE
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def get_wake_word_enabled() -> bool:
@@ -127,7 +176,7 @@ def save_wake_word_enabled(enabled: bool) -> None:
         except Exception:
             data = {}
     data["wake_word_enabled"] = bool(enabled)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def get_push_to_talk_enabled() -> bool:
@@ -254,7 +303,7 @@ def save_turn_tuning(values: dict) -> None:
     cur = dict(cur) if isinstance(cur, dict) else {}
     cur.update(values or {})
     data["turn_tuning"] = cur
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def get_proactive_audio_enabled() -> bool:
@@ -298,7 +347,7 @@ def save_memory_encryption(enabled: bool, key_path: str = "") -> None:
     data["memory_encryption_enabled"] = bool(enabled)
     if key_path.strip():
         data["memory_encryption_key_path"] = key_path.strip()
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def reserve_memory_llm_call() -> bool:
@@ -315,7 +364,7 @@ def reserve_memory_llm_call() -> bool:
         usage["count"] = int(usage.get("count", 0) or 0) + 1
         data["_memory_llm_daily_usage"] = usage
         ensure_config_dir()
-        CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        _write_config(data)
         return True
 
 
@@ -346,7 +395,7 @@ def _save_flag(key: str, value) -> None:
         except Exception:
             data = {}
     data[key] = bool(value) if isinstance(value, bool) else value
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def get_brief_enabled() -> bool:
@@ -362,7 +411,7 @@ def save_brief_enabled(enabled: bool) -> None:
         except Exception:
             data = {}
     data["morning_brief_enabled"] = enabled
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 # ── Audio devices ────────────────────────────────────────────────────────────
@@ -386,7 +435,7 @@ def _patch_config(**fields) -> None:
         except Exception:
             data = {}
     data.update(fields)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def get_input_device() -> str:
@@ -449,7 +498,7 @@ def save_plugin_config(namespace: str, values: dict) -> None:
     cur.update(values)
     pc[namespace] = cur
     data["plugin_config"] = pc
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
@@ -465,4 +514,4 @@ def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
         plugins_cfg = {}
     plugins_cfg[plugin_name] = enabled
     data["plugins_enabled"] = plugins_cfg
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)

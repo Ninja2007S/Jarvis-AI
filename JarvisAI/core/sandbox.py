@@ -41,6 +41,7 @@ BASE_DIR     = Path(__file__).resolve().parent.parent
 SANDBOX_ROOT = BASE_DIR / "sandbox_runs"
 MAX_MEMORY_MB = 512          # kill the child if its RSS exceeds this
 _POLL_SEC     = 0.5
+MAX_CAPTURE_CHARS = 1_000_000  # per stream; the child is killed beyond this
 
 # ── static danger scan ───────────────────────────────────────────────────────
 # Deliberately broad and language-agnostic: these are the strings that show
@@ -143,6 +144,31 @@ def _watchdog(proc: subprocess.Popen, deadline: float, mem_limit_mb: int, flag: 
         time.sleep(_POLL_SEC)
 
 
+def _drain(stream, sink: list, limit: int, proc: subprocess.Popen, flag: dict) -> None:
+    """Read a pipe incrementally, stopping (and killing the child) at `limit`.
+
+    subprocess.communicate() buffers *everything* the child prints in this
+    process's memory. The watchdog only measures the child's RSS, so a program
+    printing endlessly for the full timeout could exhaust Jarvis's own memory
+    long before the 32,000-character display cap was applied.
+    """
+    total = 0
+    try:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                return
+            if total < limit:
+                sink.append(chunk[: limit - total])
+            total += len(chunk)
+            if total > limit and "reason" not in flag:
+                flag["reason"] = "output size limit exceeded"
+                _kill_process_tree(proc)
+                return
+    except (OSError, ValueError):
+        return
+
+
 def run_sandboxed(source_path: Path, args: list[str] | None, timeout: int) -> str:
     """Copies source_path into a fresh, disposable sandbox folder and runs it
     there with a scrubbed environment and a memory+time watchdog. Returns the
@@ -194,12 +220,28 @@ def run_sandboxed(source_path: Path, args: list[str] | None, timeout: int) -> st
         )
         watchdog.start()
 
+        out_chunks: list[str] = []
+        err_chunks: list[str] = []
+        readers = [
+            threading.Thread(target=_drain, daemon=True,
+                             args=(proc.stdout, out_chunks, MAX_CAPTURE_CHARS, proc, flag)),
+            threading.Thread(target=_drain, daemon=True,
+                             args=(proc.stderr, err_chunks, MAX_CAPTURE_CHARS, proc, flag)),
+        ]
+        for reader in readers:
+            reader.start()
         try:
-            out, err = proc.communicate(timeout=timeout + 2)
+            proc.wait(timeout=timeout + 2)
         except subprocess.TimeoutExpired:
             _kill_process_tree(proc)
-            out, err = proc.communicate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
             flag.setdefault("reason", "timeout")
+        for reader in readers:
+            reader.join(timeout=5)
+        out, err = "".join(out_chunks), "".join(err_chunks)
 
         parts = []
         if out.strip():

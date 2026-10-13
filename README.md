@@ -380,7 +380,7 @@ inside broad-control tools fail closed to confirmation. Examples include:
 * Phone calls
 * Other actions classified as dangerous
 
-You can approve or cancel a pending request by clicking **CONFIRM** or **CANCEL** on the HUD, or by saying **"confirm action"** or **"cancel action"**. Voice phrases are accepted only while a confirmation is pending; a plain "yes" is not enough. Phone calls, broad computer-control requests, and generated-code execution require the HUD **CONFIRM** click; saying "confirm action" cannot approve those categories. Other voice approvals use Voice ID only when it is enabled and available on that platform.
+You can approve or cancel a pending request by clicking **CONFIRM** or **CANCEL** on the HUD, or by saying **"confirm action"** or **"cancel action"**. Voice phrases are accepted only while a confirmation is pending; a plain "yes" is not enough. **Dev Agent** and **memory export/import** require a manual HUD click. Other confirmation-gated actions—including email, messages, Instagram, phone calls, and computer controls—can be approved by voice; Voice ID is checked when enabled and supported on that platform.
 
 ### Self-Healing System — Version 1
 
